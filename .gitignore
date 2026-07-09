@@ -7,3 +7,4 @@ coverage/
 ai-social-publisher-secrets-*.json
 .data/
 data/settings.json
+.worktrees/
