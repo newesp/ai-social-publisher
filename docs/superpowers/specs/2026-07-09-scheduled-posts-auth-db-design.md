@@ -56,9 +56,13 @@ The missing pieces are:
 ### Scheduling
 
 - The demo uses Vercel Hobby-compatible daily cron.
+- The user can choose a schedule date.
 - The only enabled scheduled time in the UI is 9:00 AM Taiwan time.
 - Vercel cron uses UTC, so `vercel.json` must use `0 1 * * *`.
-- The UI should still present a schedule button plus a time select, but the time select initially has one value: `9:00 AM`.
+- The UI should present a schedule button, a date picker, and a time select. The time select initially has one value: `9:00 AM`.
+- The server computes `scheduled_for` as 9:00 AM in `Asia/Taipei` on the selected date, converted to UTC before storing.
+- The UI should disable dates where the selected date at 9:00 AM Taiwan time is already in the past.
+- The server must reject a scheduled date/time that is already in the past, even if the UI allowed it.
 - DB records store the exact `scheduledFor` timestamp in UTC.
 - Scheduled publishing is not minute-precise in this demo. Posts are published when the daily cron finds them due.
 
@@ -80,13 +84,14 @@ Add ownership and keep scheduled/published state on the parent post.
 Required columns:
 
 - `id`: integer primary key.
-- `owner_email`: text, required.
+- `owner_email`: text, required, normalized as lowercase and trimmed.
 - `product_name`: text, required.
 - `product_features`: text, required.
 - `image_prompt`: text, nullable.
 - `image_imgur_url`: text, nullable. Existing name can be kept even if the URL is from Vercel Blob.
 - `status`: text, required.
 - `scheduled_for`: timestamp integer, nullable.
+- `publishing_started_at`: timestamp integer, nullable.
 - `published_at`: timestamp integer, nullable.
 - `created_at`: timestamp integer, required.
 - `updated_at`: timestamp integer, required.
@@ -99,6 +104,7 @@ Allowed parent statuses:
 - `published`: all active targets published successfully.
 - `partial_failed`: at least one active target published and at least one failed.
 - `failed`: all active targets failed or a system error prevented publishing.
+- `publish_unknown`: publishing started, but the process stopped before the app could safely determine the final provider state.
 - `cancelled`: user cancelled before publishing started.
 
 ### `post_targets`
@@ -126,6 +132,7 @@ Allowed target statuses:
 - `publishing`.
 - `published`.
 - `failed`.
+- `publish_unknown`.
 - `cancelled`.
 
 ### `user_settings`
@@ -136,7 +143,7 @@ The existing `settings` table and `data/settings.json` can remain temporarily fo
 
 Required columns:
 
-- `owner_email`: text, required.
+- `owner_email`: text, required, normalized as lowercase and trimmed.
 - `key`: text, required.
 - `encrypted_value`: text, required.
 - `updated_at`: timestamp integer, required.
@@ -207,6 +214,7 @@ Policy behavior:
 
 - Demo mode: any non-empty Google email can sign in and operate on its own data.
 - Production mode: only emails in `ADMIN_EMAILS` can sign in and operate.
+- All email comparisons and stored owner emails must use lowercase/trimmed normalization.
 
 ### Route Guards
 
@@ -241,6 +249,7 @@ Request body:
 - `imageUrl`.
 - `targets`: array of platform targets with `platform`, `content`, and `hashtags`.
 - `mode`: `now` or `scheduled`.
+- `scheduledDate`: user-selected date in `YYYY-MM-DD` format.
 - `scheduledTime`: currently only `09:00`.
 
 Behavior:
@@ -248,6 +257,8 @@ Behavior:
 - Require a signed-in publisher.
 - Use the signed-in email as `owner_email`.
 - Insert `posts` and `post_targets`.
+- For scheduled posts, compute `scheduled_for` on the server from `scheduledDate` + `scheduledTime` in the `Asia/Taipei` timezone.
+- Reject missing dates, unsupported times, invalid dates, and dates where 9:00 AM Taiwan time is already in the past.
 - If `mode=scheduled`, set parent and target status to `scheduled` and do not call external platform APIs.
 - If `mode=now`, insert first, then call the same publishing service used by scheduler, then persist results.
 
@@ -271,7 +282,8 @@ Behavior:
 - Require a signed-in publisher.
 - Only affect rows where `owner_email` matches the signed-in email.
 - If status is `scheduled`, update parent and targets to `cancelled`.
-- If status is `publishing`, `published`, `partial_failed`, or `failed`, return 409 conflict.
+- The cancellation update must be conditional on `status = 'scheduled'`.
+- If status is `draft`, `publishing`, `published`, `partial_failed`, `failed`, `publish_unknown`, or `cancelled`, return 409 conflict with the current status.
 - Do not physically delete the row.
 
 ### `POST /api/posts/[id]/publish`
@@ -284,6 +296,7 @@ Behavior:
 - Only affect rows where `owner_email` matches the signed-in email.
 - Allow `draft` and `failed`.
 - Do not publish an already `published` post.
+- Do not automatically retry `publish_unknown`; return 409 and tell the user to inspect the target platform before deciding on any manual recovery.
 - Use the post owner's settings.
 - Persist target results.
 
@@ -316,8 +329,12 @@ Updates settings for the signed-in user.
 Behavior:
 
 - Require settings access.
-- Encrypt each non-empty value.
+- Encrypt each non-empty raw value.
+- Empty strings are ignored and leave existing settings unchanged.
+- To clear a setting, the client must send the key in `clearKeys`.
+- Masked placeholders returned by `GET /api/settings` must be rejected if submitted as new values.
 - Upsert rows by `(owner_email, key)`.
+- Delete rows listed in `clearKeys` after validating they belong to the signed-in owner.
 - Return masked settings only.
 
 ## Service Boundaries
@@ -346,8 +363,8 @@ Responsible for DB CRUD:
 - List posts with targets by owner.
 - Find a post with targets by ID and owner.
 - Find due scheduled posts.
-- Mark scheduled post cancelled.
-- Mark post publishing.
+- Mark scheduled post cancelled with a conditional update where `status = 'scheduled'`.
+- Atomically claim a scheduled post for publishing with a conditional update where `id = ?` and `status = 'scheduled'`.
 - Persist publish results.
 
 ### `src/lib/posts/post-service.js`
@@ -364,10 +381,13 @@ Responsible for user-facing use cases:
 Responsible for scheduler behavior:
 
 - Query due scheduled posts where `scheduled_for <= now` and status is `scheduled`.
-- Lock each post by moving it to `publishing`.
+- Claim each post atomically by moving it to `publishing` and setting `publishing_started_at`.
+- Skip a post if the conditional claim affects zero rows.
 - Publish each locked post.
 - Persist success, partial failure, and failure results.
 - Continue processing other due posts if one post fails.
+- Do not automatically reclaim stale `publishing` posts for another publish attempt. Because external providers may have already accepted the post, automatic retry can duplicate real social posts.
+- Mark stale `publishing` posts as `publish_unknown` only through a deliberate recovery routine or admin/manual action after a timeout, with an error message that tells the user to inspect the target platform before retrying.
 
 ### `src/lib/posts/publish-runner.js`
 
@@ -388,15 +408,16 @@ The final wizard step should show:
 
 - Editable platform previews.
 - Mode control: `Publish now` or `Schedule`.
-- When `Schedule` is selected, show a time select.
+- When `Schedule` is selected, show a date picker and a time select.
 - The time select currently has exactly one enabled value: `9:00 AM`.
+- The date picker should disable dates whose 9:00 AM Taiwan time has already passed.
 - The schedule button creates a scheduled DB row and does not call external platform APIs.
 - The publish-now button creates a DB row and then publishes immediately.
 
 Button behavior:
 
 - `Publish now`: calls `POST /api/posts` with `mode=now`.
-- `Schedule`: calls `POST /api/posts` with `mode=scheduled` and `scheduledTime=09:00`.
+- `Schedule`: calls `POST /api/posts` with `mode=scheduled`, `scheduledDate=YYYY-MM-DD`, and `scheduledTime=09:00`.
 
 ### History And Schedule Page
 
@@ -412,6 +433,7 @@ Display:
 - Published time.
 - Error messages.
 - Cancel button for `scheduled` posts.
+- `publish_unknown` status with a warning that the user must inspect the external platform before retrying.
 
 Cancel button behavior:
 
@@ -436,6 +458,7 @@ Behavior:
 - Scheduling can succeed even if provider settings are missing.
 - Publishing fails with a clear error if required settings are missing.
 - The post and target rows store the failure status and error message.
+- Stored and returned error messages must be sanitized to remove secrets and request credentials, including `Authorization`, bearer tokens, `access_token`, API keys, and known saved setting values.
 
 ### Partial Platform Failure
 
@@ -446,14 +469,24 @@ Behavior:
 ### Duplicate Scheduler Trigger
 
 - Scheduler only processes rows in `scheduled` status.
-- Scheduler moves a row to `publishing` before calling external providers.
+- Scheduler claims a row using an atomic conditional update from `scheduled` to `publishing` before calling external providers.
+- Only the process that successfully claims the row may publish it.
 - If a row is already `publishing`, it is skipped.
+
+### Crash And Idempotency
+
+- The app must persist each target result immediately after that target publish call returns.
+- If a target has `external_post_id`, the publish runner must not call the provider for that target again.
+- If the process crashes after a provider accepts a post but before the DB stores `external_post_id`, the app cannot prove whether the external post exists.
+- The scheduler must not automatically retry stale `publishing` rows because that can duplicate real posts.
+- A stale `publishing` recovery path may mark the row `publish_unknown` with a redacted error message and require user inspection before manual retry.
 
 ### Cancel Race
 
 - Cancelling a `scheduled` row succeeds.
 - Cancelling a `publishing` row returns 409 conflict.
 - Cancelling a completed row returns 409 conflict.
+- Cancelling an already `cancelled` row returns 409 conflict with the current status.
 
 ## Deployment Configuration
 
@@ -496,11 +529,21 @@ Production also needs the same DB, auth, encryption, cron, blob, and provider-re
 
 ## Testing Plan
 
+Implementation should be split into reviewable milestones rather than shipped as one large patch:
+
+- Auth policy and per-user encrypted settings foundation.
+- Post DB repository, owner-scoped history, and scheduled cancellation.
+- Publish runner refactor that persists DB-backed publish results.
+- Scheduler and cron trigger with atomic claim, crash handling, and bearer-secret auth.
+- Wizard, history, login/logout, and settings UI integration.
+- Final verification and deployment configuration cleanup.
+
 ### Auth Policy Tests
 
 - Demo mode allows any non-empty Google email.
 - Production mode allows only emails in `ADMIN_EMAILS`.
 - Production mode rejects unlisted emails.
+- Email normalization trims and lowercases owner emails and allowlist emails.
 
 ### Settings Tests
 
@@ -508,15 +551,21 @@ Production also needs the same DB, auth, encryption, cron, blob, and provider-re
 - One user's masked settings do not include another user's settings.
 - Stored values are encrypted, not plaintext.
 - Missing `SETTINGS_ENCRYPTION_KEY` fails settings writes.
+- Empty setting values leave existing values unchanged.
+- `clearKeys` deletes only the signed-in user's settings.
+- Masked placeholders cannot be saved back as encrypted values.
 
 ### Post Repository And Service Tests
 
 - Creating a scheduled post inserts one parent row and target rows.
 - Creating a scheduled post stores `owner_email`.
+- Creating a scheduled post with a selected date stores 9:00 AM `Asia/Taipei` converted to UTC.
+- Creating a scheduled post in the past is rejected.
 - Listing posts returns only the signed-in owner's posts.
 - Cancelling a scheduled post updates parent and target statuses to `cancelled`.
 - Cancelling a publishing or published post returns conflict.
 - Creating a now post inserts DB rows before publishing.
+- Atomic claim succeeds for exactly one caller and fails for competing callers.
 
 ### Scheduler Tests
 
@@ -527,6 +576,9 @@ Production also needs the same DB, auth, encryption, cron, blob, and provider-re
 - Scheduler updates targets and parent post on full success.
 - Scheduler updates parent post to `partial_failed` on mixed target results.
 - Scheduler continues after one post fails.
+- Scheduler does not automatically retry stale `publishing` posts.
+- Publish runner skips targets that already have `external_post_id`.
+- Provider error messages are redacted before persistence and API responses.
 
 ### API Tests
 
@@ -539,9 +591,9 @@ Production also needs the same DB, auth, encryption, cron, blob, and provider-re
 ### UI Logic Tests
 
 - Wizard starts in publish-now mode.
-- Selecting schedule shows the time select.
+- Selecting schedule shows the date picker and time select.
 - Time select has one option: `9:00 AM`.
-- Schedule submission calls `POST /api/posts` with `mode=scheduled`.
+- Schedule submission calls `POST /api/posts` with `mode=scheduled`, `scheduledDate`, and `scheduledTime=09:00`.
 - Publish-now submission calls `POST /api/posts` with `mode=now`.
 
 ## Open Future Extensions
