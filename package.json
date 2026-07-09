@@ -1,0 +1,34 @@
+{
+  "name": "ai-social-publisher",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@google/genai": "latest",
+    "@libsql/client": "latest",
+    "@mantine/core": "latest",
+    "@mantine/dates": "latest",
+    "@mantine/hooks": "latest",
+    "@mantine/notifications": "latest",
+    "@tabler/icons-react": "latest",
+    "@vercel/blob": "^2.6.1",
+    "axios": "latest",
+    "dayjs": "latest",
+    "drizzle-orm": "latest",
+    "form-data": "latest",
+    "next": "latest",
+    "next-auth": "latest",
+    "openai": "latest",
+    "react": "latest",
+    "react-dom": "latest"
+  },
+  "devDependencies": {
+    "drizzle-kit": "latest"
+  }
+}

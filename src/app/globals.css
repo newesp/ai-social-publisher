@@ -1,0 +1,26 @@
+:root {
+  color-scheme: light;
+  background: #f7f5f2;
+  color: #1d1b19;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  background:
+    linear-gradient(180deg, rgba(255, 250, 244, 0.92), rgba(247, 245, 242, 1)),
+    #f7f5f2;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}

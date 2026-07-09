@@ -1,0 +1,9 @@
+.env*.local
+.next/
+node_modules/
+dist/
+coverage/
+*.log
+ai-social-publisher-secrets-*.json
+.data/
+data/settings.json
