@@ -59,6 +59,7 @@ The missing pieces are:
 - The user can choose a schedule date.
 - The only enabled scheduled time in the UI is 9:00 AM Taiwan time.
 - Vercel cron uses UTC, so `vercel.json` must use `0 1 * * *`.
+- Vercel Hobby cron has once-per-day minimum interval and per-hour scheduling precision, so the product expectation is "during the 9:00 AM Taiwan hour" rather than exact 9:00:00 delivery.
 - The UI should present a schedule button, a date picker, and a time select. The time select initially has one value: `9:00 AM`.
 - The server computes `scheduled_for` as 9:00 AM in `Asia/Taipei` on the selected date, converted to UTC before storing.
 - The UI should disable dates where the selected date at 9:00 AM Taiwan time is already in the past.
@@ -96,6 +97,11 @@ Required columns:
 - `created_at`: timestamp integer, required.
 - `updated_at`: timestamp integer, required.
 
+Indexes:
+
+- `(status, scheduled_for)` for scheduler scans.
+- `(owner_email, created_at)` for owner-scoped history.
+
 Allowed parent statuses:
 
 - `draft`: created but not scheduled or published.
@@ -125,6 +131,10 @@ Required columns:
 - `created_at`: timestamp integer, required.
 - `updated_at`: timestamp integer, required.
 
+Constraints:
+
+- Unique `(post_id, platform)` so one post cannot create duplicate targets for the same platform.
+
 Allowed target statuses:
 
 - `draft`.
@@ -145,7 +155,7 @@ Required columns:
 
 - `owner_email`: text, required, normalized as lowercase and trimmed.
 - `key`: text, required.
-- `encrypted_value`: text, required.
+- `encrypted_value`: text, required. This is a serialized JSON envelope, not raw ciphertext.
 - `updated_at`: timestamp integer, required.
 
 Primary key:
@@ -190,6 +200,8 @@ Implementation requirements:
 
 - Treat `SETTINGS_ENCRYPTION_KEY` as a base64-encoded 32-byte key.
 - Use AES-256-GCM or the existing secret-bundle crypto pattern for authenticated encryption.
+- Store `encrypted_value` as a JSON envelope with at least `version`, `cipher`, `iv`, `tag`, and `ciphertext`.
+- Use `version` to support future key rotation or envelope changes.
 - Encrypt values before inserting/updating `user_settings`.
 - Decrypt values only on the server side when calling providers.
 - Mask settings values in API responses.
@@ -236,6 +248,20 @@ Middleware must not block `/api/cron`, because Vercel and later n8n will call it
 - Header should show the signed-in user email or an initial derived from the account.
 
 ## API Design
+
+All authenticated user-facing API routes must use the signed-in user's normalized email to read settings and posts. The old shared settings store must not be used for generation, publishing, scheduling, or settings writes after this feature is implemented.
+
+### `POST /api/generate`
+
+Generates editable platform content and optional image assets for the signed-in user.
+
+Behavior:
+
+- Require a signed-in app user.
+- Load the signed-in user's decrypted settings from `user_settings`.
+- Use the user's own `googleAiApiKey` or `openAiApiKey` based on the selected provider.
+- Never read AI provider credentials from shared `data/settings.json`.
+- Return generated content, image URL, and image error information without exposing raw provider credentials.
 
 ### `POST /api/posts`
 
@@ -295,7 +321,10 @@ Behavior:
 - Require a signed-in publisher.
 - Only affect rows where `owner_email` matches the signed-in email.
 - Allow `draft` and `failed`.
+- Claim the post with an atomic conditional update from `draft` or `failed` to `publishing` before calling external providers.
+- If the conditional claim affects zero rows, return 409 conflict with the current status.
 - Do not publish an already `published` post.
+- Do not call providers for targets already marked `published`.
 - Do not automatically retry `publish_unknown`; return 409 and tell the user to inspect the target platform before deciding on any manual recovery.
 - Use the post owner's settings.
 - Persist target results.
@@ -365,6 +394,7 @@ Responsible for DB CRUD:
 - Find due scheduled posts.
 - Mark scheduled post cancelled with a conditional update where `status = 'scheduled'`.
 - Atomically claim a scheduled post for publishing with a conditional update where `id = ?` and `status = 'scheduled'`.
+- Atomically claim a manual post for publishing with a conditional update where `id = ?`, `owner_email = ?`, and status is `draft` or `failed`.
 - Persist publish results.
 
 ### `src/lib/posts/post-service.js`
@@ -397,6 +427,8 @@ Rules:
 
 - Use the post owner's decrypted settings.
 - Build platform previews/payloads from stored targets and image URL.
+- Skip targets already marked `published`.
+- Skip targets with `external_post_id`.
 - Update target statuses individually.
 - Compute parent post status from target statuses.
 
@@ -476,10 +508,16 @@ Behavior:
 ### Crash And Idempotency
 
 - The app must persist each target result immediately after that target publish call returns.
-- If a target has `external_post_id`, the publish runner must not call the provider for that target again.
+- If a target is already marked `published` or has `external_post_id`, the publish runner must not call the provider for that target again.
 - If the process crashes after a provider accepts a post but before the DB stores `external_post_id`, the app cannot prove whether the external post exists.
 - The scheduler must not automatically retry stale `publishing` rows because that can duplicate real posts.
 - A stale `publishing` recovery path may mark the row `publish_unknown` with a redacted error message and require user inspection before manual retry.
+
+### Live External Side Effects
+
+- Automated tests and implementation verification must use mocks/fakes for Meta, LINE, OpenAI, Google AI, and image upload side effects.
+- Do not run live Meta or LINE publish verification unless the user explicitly approves the exact destination account/channel/page and payload at that time.
+- Do not deploy, rotate production secrets, or modify OAuth/provider app settings as part of implementation verification unless the user explicitly asks for it.
 
 ### Cancel Race
 
@@ -527,6 +565,16 @@ ADMIN_EMAILS=owner@example.com
 
 Production also needs the same DB, auth, encryption, cron, blob, and provider-related env values as demo.
 
+## Migration Notes
+
+This is a demo project, so existing demo rows can be migrated conservatively:
+
+- Existing rows without `owner_email` should be assigned to a sentinel value from `MIGRATION_OWNER_EMAIL` if present.
+- If `MIGRATION_OWNER_EMAIL` is not set, local/demo migration may leave old rows inaccessible rather than guessing an owner.
+- New code must never create rows without normalized `owner_email`.
+- Add the scheduler and history indexes described in the data model.
+- Add the `post_targets` unique `(post_id, platform)` constraint after removing or resolving any duplicate demo rows.
+
 ## Testing Plan
 
 Implementation should be split into reviewable milestones rather than shipped as one large patch:
@@ -535,6 +583,7 @@ Implementation should be split into reviewable milestones rather than shipped as
 - Post DB repository, owner-scoped history, and scheduled cancellation.
 - Publish runner refactor that persists DB-backed publish results.
 - Scheduler and cron trigger with atomic claim, crash handling, and bearer-secret auth.
+- Generate route per-user settings integration.
 - Wizard, history, login/logout, and settings UI integration.
 - Final verification and deployment configuration cleanup.
 
@@ -554,6 +603,7 @@ Implementation should be split into reviewable milestones rather than shipped as
 - Empty setting values leave existing values unchanged.
 - `clearKeys` deletes only the signed-in user's settings.
 - Masked placeholders cannot be saved back as encrypted values.
+- `encrypted_value` is a JSON envelope with `version`, `cipher`, `iv`, `tag`, and `ciphertext`.
 
 ### Post Repository And Service Tests
 
@@ -566,6 +616,8 @@ Implementation should be split into reviewable milestones rather than shipped as
 - Cancelling a publishing or published post returns conflict.
 - Creating a now post inserts DB rows before publishing.
 - Atomic claim succeeds for exactly one caller and fails for competing callers.
+- Manual publish claim succeeds for exactly one caller and returns conflict for competing callers.
+- Manual publish skips already published targets.
 
 ### Scheduler Tests
 
@@ -582,6 +634,9 @@ Implementation should be split into reviewable milestones rather than shipped as
 
 ### API Tests
 
+- `/api/generate` requires a signed-in user.
+- `/api/generate` uses the signed-in user's decrypted settings.
+- `/api/generate` does not read shared settings.
 - `/api/cron` rejects missing or wrong bearer secret.
 - `/api/cron` accepts `Authorization: Bearer ${CRON_SECRET}`.
 - `/api/posts` requires a signed-in user.
