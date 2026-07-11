@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "node scripts/runtime-config.mjs",
+    "prebuild": "node scripts/runtime-config.mjs",
+    "prestart": "node scripts/runtime-config.mjs",
+    "check:runtime-config": "node scripts/runtime-config.mjs",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
