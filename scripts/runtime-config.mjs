@@ -12,20 +12,48 @@ export function validateRuntimeConfig(env) {
     }
   }
 
-  if (mode === "production" && !String(env.ALLOWED_GOOGLE_EMAILS ?? "").trim()) {
+  validateTursoUrl(env.TURSO_DATABASE_URL);
+
+  if (mode === "production" && !hasAllowedGoogleEmail(env.ALLOWED_GOOGLE_EMAILS)) {
     throw new Error("ALLOWED_GOOGLE_EMAILS must be configured when AUTH_MODE=production.");
+  }
+}
+
+export function loadEnvironmentText(text, env) {
+  for (const line of String(text).split(/\r?\n/)) {
+    const match = line.match(/^\s*([^#=\s]+)\s*=\s*(.*)$/);
+    if (match && !env[match[1]]) env[match[1]] = parseEnvironmentValue(match[2]);
   }
 }
 
 function loadLocalEnv(env) {
   try {
-    for (const line of readFileSync(".env.local", "utf8").split(/\r?\n/)) {
-      const match = line.match(/^\s*([^#=\s]+)\s*=\s*(.*)$/);
-      if (match && !env[match[1]]) env[match[1]] = match[2];
-    }
+    loadEnvironmentText(readFileSync(".env.local", "utf8"), env);
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
+}
+
+function hasAllowedGoogleEmail(value) {
+  return String(value ?? "").split(",").some((email) => email.trim());
+}
+
+function validateTursoUrl(value) {
+  try {
+    const url = new URL(String(value));
+    if (!url.hostname || !["libsql:", "https:"].includes(url.protocol)) throw new Error();
+  } catch {
+    throw new Error("TURSO_DATABASE_URL must be a valid libsql:// or https:// URL.");
+  }
+}
+
+function parseEnvironmentValue(value) {
+  const text = String(value).trim();
+  if ((text.startsWith('"') && text.includes('"', 1)) || (text.startsWith("'") && text.includes("'", 1))) {
+    const quote = text[0];
+    return text.slice(1, text.indexOf(quote, 1));
+  }
+  return text.replace(/\s+#.*$/, "").trim();
 }
 
 if (process.argv[1]?.endsWith("runtime-config.mjs")) {
