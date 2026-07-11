@@ -80,3 +80,31 @@
 - `npm.cmd run build`: passed; Next.js emitted the existing middleware-to-proxy deprecation warning.
 - `git diff --check`: passed.
 - No Meta, LINE, Turso, migration, or remote call was made; all provider and settings failures were injected locally.
+
+## Re-review P1 correction: atomic terminal persistence and response sanitization
+
+### Changes
+
+- Wrapped parent/target creation, scheduled cancellation, publish claiming, and terminal publish-result recording in repository transactions. The terminal-result transaction updates all target outcomes, resolves the parent status from those rows, and returns the resulting post before committing.
+- Normalized every post-claim publisher outcome to one terminal result per claimed target. Missing, malformed, or non-terminal platform outcomes become a persisted failed result, so a claimed target cannot remain `publishing` while its parent reaches a terminal status.
+- Removed `ownerEmail` and raw target provider errors from all posts API payloads; failed targets return only the generic `Publishing failed.` message. Provider-error persistence also redacts the owner email as well as values from the owner's settings.
+- Made unexpected API errors generic HTTP 500 responses, preventing a lower-level database/settings/provider exception from echoing an owner email or token.
+
+### TDD evidence
+
+1. RED: `npm.cmd test -- tests/post-route-handlers.test.js tests/post-repository.test.js`
+   - Failed 2/8: the API payload contained `owner@example.com`/`owner-token`, and the repository called `db.insert` directly instead of opening a transaction.
+2. RED: `npm.cmd test -- tests/post-service.test.js`
+   - Failed 1/5: a publisher omission left the LINE target in `publishing` rather than persisting `failed`.
+3. GREEN: `npm.cmd test -- tests/auth-policy.test.js tests/post-service.test.js tests/post-route-handlers.test.js tests/post-repository.test.js`
+   - Passed 24/24 with local in-memory repositories, local transaction fakes, and injected publishers/settings only.
+4. RED: `npm.cmd test -- tests/auth-policy.test.js`
+   - Failed 1/11 because an unhandled error exposed `owner@example.com failed with owner-token` in a 500 response.
+5. GREEN: the same focused 24-test command passed after generic 500 response handling.
+
+### Final verification
+
+- `npm.cmd test`: 72 passed, 0 failed.
+- `npm.cmd run build`: passed. Next.js emitted the existing middleware-to-proxy deprecation warning.
+- `git diff --check`: passed before final staging.
+- No Meta, LINE, Turso, migration, or other remote operation was performed.

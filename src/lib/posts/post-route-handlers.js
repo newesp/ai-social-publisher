@@ -5,7 +5,8 @@ export function createPostRouteHandlers({ requireAppUser, requirePublisher, getR
     async GET() {
       const ownerEmail = await requireAppUser();
       const repository = await getRepository();
-      return respond({ posts: await listPosts({ ownerEmail, repository }) });
+      const posts = await listPosts({ ownerEmail, repository });
+      return respond({ posts: posts.map(toPostResponse) });
     },
     async POST(request) {
       const ownerEmail = await requirePublisher();
@@ -20,7 +21,7 @@ export function createPostRouteHandlers({ requireAppUser, requirePublisher, getR
           throw routeError("Publishing failed and the outcome could not be recorded.", 500);
         }
       }
-      return respond({ post: published }, { status: 201 });
+      return respond({ post: toPostResponse(published) }, { status: 201 });
     },
   };
 }
@@ -37,6 +38,17 @@ export function createPostCancellationHandler({ requirePublisher, getRepository,
     const { id } = await params;
     const repository = await getRepository();
     const post = await cancelScheduledPost({ ownerEmail, postId: id, repository, now: now() });
-    return respond({ post });
+    return respond({ post: toPostResponse(post) });
+  };
+}
+
+function toPostResponse(post) {
+  const { ownerEmail: _ownerEmail, targets = [], ...safePost } = post;
+  return {
+    ...safePost,
+    targets: targets.map(({ errorMessage: _errorMessage, ...target }) => ({
+      ...target,
+      errorMessage: target.status === "failed" ? "Publishing failed." : null,
+    })),
   };
 }

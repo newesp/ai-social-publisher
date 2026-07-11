@@ -88,7 +88,7 @@ test("posts handlers derive the owner and keep scheduled requests provider-free"
   assert.equal((await listed.json()).posts.length, 1);
 });
 
-test("publish-now handler persists provider errors using the signed-in owner's settings", async () => {
+test("publish-now handler uses the signed-in owner's settings without returning provider errors", async () => {
   const repository = createMemoryRepository();
   const owners = [];
   const handlers = createPostRouteHandlers({
@@ -109,7 +109,35 @@ test("publish-now handler persists provider errors using the signed-in owner's s
   assert.equal(response.status, 201);
   assert.deepEqual(owners, ["owner@example.com"]);
   assert.equal(data.post.status, "failed");
-  assert.equal(data.post.targets[0].errorMessage, "provider refused [redacted]");
+  assert.equal(data.post.targets[0].errorMessage, "Publishing failed.");
+});
+
+test("posts API responses never expose an owner email or settings token", async () => {
+  const repository = createMemoryRepository();
+  const handlers = createPostRouteHandlers({
+    requireAppUser: async () => "owner@example.com",
+    requirePublisher: async () => "owner@example.com",
+    getRepository: async () => repository,
+    readSettings: async () => ({ metaPageAccessToken: "owner-token" }),
+    publishTargets: async () => [{
+      platform: "meta",
+      status: "failed",
+      error: "owner@example.com failed with owner-token",
+    }],
+    now: () => new Date("2026-07-09T00:00:00.000Z"),
+  });
+
+  const created = await handlers.POST(new Request("http://localhost/api/posts", {
+    method: "POST",
+    body: JSON.stringify({ ...body, mode: "now" }),
+  }));
+  const listed = await handlers.GET();
+
+  for (const response of [created, listed]) {
+    const payload = JSON.stringify(await response.json());
+    assert.equal(payload.includes("owner@example.com"), false);
+    assert.equal(payload.includes("owner-token"), false);
+  }
 });
 
 test("publish-now records a safe failed result when the publisher throws after claim", async () => {

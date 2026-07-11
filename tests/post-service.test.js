@@ -173,3 +173,21 @@ test("persists immediate publish outcomes from the injected publisher", async ()
     ["line", "failed", "LINE rejected the request"],
   ]);
 });
+
+test("persists a terminal failed result for every claimed target omitted by the publisher", async () => {
+  const repository = createMemoryRepository();
+  const created = await createPost({ ownerEmail: "owner@example.com", input, mode: "now", repository });
+
+  const post = await publishPost({
+    ownerEmail: "owner@example.com",
+    postId: created.id,
+    repository,
+    readSettings: async () => ({}),
+    publishTargets: async () => [{ platform: "meta", status: "published", externalId: "meta-1" }],
+    now: new Date("2026-07-09T00:00:00.000Z"),
+  });
+
+  assert.deepEqual(post.targets.map((target) => target.status), ["published", "failed"]);
+  assert.equal(post.targets[1].errorMessage, "Publishing did not return a terminal result.");
+  assert.equal(post.status, "partial_failed");
+});

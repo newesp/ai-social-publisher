@@ -100,10 +100,7 @@ export async function publishPost({
       platform: preview.platform,
       publishPayload: preview.publishPayload,
     }));
-    results = (await publishTargets({ targets, settings })).map((result) => ({
-      ...result,
-      error: result.error ? redactProviderError(result.error, settings) : result.error,
-    }));
+    results = terminalResults(post.targets, await publishTargets({ targets, settings }), settings, owner);
   } catch {
     results = post.targets.map((target) => ({
       platform: target.platform,
@@ -112,6 +109,26 @@ export async function publishPost({
     }));
   }
   return repository.recordPublishResults(owner, id, results, now);
+}
+
+function terminalResults(targets, providerResults, settings, owner) {
+  const resultsByPlatform = new Map(
+    (Array.isArray(providerResults) ? providerResults : []).map((result) => [result?.platform, result]),
+  );
+  return targets.map((target) => {
+    const result = resultsByPlatform.get(target.platform);
+    if (result?.status === POST_STATUS.PUBLISHED || result?.status === POST_STATUS.FAILED) {
+      return {
+        ...result,
+        error: result.error ? redactProviderError(result.error, settings, owner) : result.error,
+      };
+    }
+    return {
+      platform: target.platform,
+      status: POST_STATUS.FAILED,
+      error: "Publishing did not return a terminal result.",
+    };
+  });
 }
 
 function activeTargets(targets) {
@@ -133,8 +150,9 @@ function parseHashtags(value) {
   }
 }
 
-function redactProviderError(error, settings) {
+function redactProviderError(error, settings, owner) {
   let message = String(error);
+  if (owner) message = message.split(owner).join("[redacted]");
   for (const secret of Object.values(settings ?? {}).filter(Boolean).map(String)) {
     message = message.split(secret).join("[redacted]");
   }
