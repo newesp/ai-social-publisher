@@ -14,7 +14,10 @@ import {
   requireAppUser,
   routeErrorResponse,
 } from "../src/lib/auth/route-guards.js";
-import { isLocalAuthBypassEnabled } from "../src/lib/auth/middleware-policy.js";
+import {
+  isBrowserRequestAuthorized,
+  isLocalAuthBypassEnabled,
+} from "../src/lib/auth/middleware-policy.js";
 
 test("normalizes Google account emails", () => {
   assert.equal(normalizeEmail(" Owner@Example.COM "), "owner@example.com");
@@ -45,6 +48,16 @@ test("production mode rejects Google emails outside ALLOWED_GOOGLE_EMAILS", () =
   assert.equal(canUseApp("guest@example.com", env), false);
   assert.equal(canPublish("guest@example.com", env), false);
   assert.equal(canManageSettings("guest@example.com", env), false);
+});
+
+test("missing or invalid AUTH_MODE fails closed", () => {
+  assert.equal(getAuthMode({}), null);
+  assert.equal(getAuthMode({ AUTH_MODE: "staging" }), null);
+  assert.equal(canSignInWithGoogle("owner@example.com", {}), false);
+  assert.equal(
+    canUseApp("owner@example.com", { AUTH_MODE: "staging", ALLOWED_GOOGLE_EMAILS: "owner@example.com" }),
+    false,
+  );
 });
 
 test("route guards derive the normalized owner from the NextAuth session", async () => {
@@ -87,4 +100,27 @@ test("the local auth bypass cannot disable production middleware", () => {
     isLocalAuthBypassEnabled({ DISABLE_AUTH_FOR_LOCAL_DEV: "true", NODE_ENV: "production" }),
     false,
   );
+});
+
+test("browser middleware re-checks production allowlist membership from the JWT email", () => {
+  const env = {
+    AUTH_MODE: "production",
+    ALLOWED_GOOGLE_EMAILS: "active@example.com",
+  };
+
+  assert.equal(
+    isBrowserRequestAuthorized({ token: { email: " Active@Example.com " } }, env),
+    true,
+  );
+  assert.equal(
+    isBrowserRequestAuthorized({ token: { email: "removed@example.com" } }, env),
+    false,
+  );
+  assert.equal(isBrowserRequestAuthorized({ token: {} }, env), false);
+});
+
+test("middleware wires browser authorization to the shared policy", async () => {
+  const middlewareSource = await readFile(new URL("../src/middleware.js", import.meta.url), "utf8");
+
+  assert.equal(middlewareSource.includes("authorized: isBrowserRequestAuthorized"), true);
 });

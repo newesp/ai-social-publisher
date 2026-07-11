@@ -1,13 +1,16 @@
 import { withAuth } from "next-auth/middleware";
 import { NextResponse } from "next/server";
-import { isLocalAuthBypassEnabled } from "./lib/auth/middleware-policy.js";
+import {
+  isBrowserRequestAuthorized,
+  isLocalAuthBypassEnabled,
+} from "./lib/auth/middleware-policy.js";
 
 const authMiddleware = withAuth({
   pages: {
     signIn: "/login",
   },
   callbacks: {
-    authorized: ({ token }) => Boolean(token),
+    authorized: isBrowserRequestAuthorized,
   },
 });
 

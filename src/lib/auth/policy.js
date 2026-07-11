@@ -3,7 +3,8 @@ export function normalizeEmail(email) {
 }
 
 export function getAuthMode(env = process.env) {
-  return env.AUTH_MODE === "production" ? "production" : "demo";
+  const mode = String(env.AUTH_MODE ?? "").trim().toLowerCase();
+  return mode === "demo" || mode === "production" ? mode : null;
 }
 
 export function parseAllowedGoogleEmails(env = process.env) {
@@ -24,7 +25,10 @@ export function canSignInWithGoogle(email, env = process.env) {
   const normalized = normalizeEmail(email);
   if (!normalized) return false;
 
-  return getAuthMode(env) === "demo" || isAllowedProductionEmail(normalized, env);
+  const authMode = getAuthMode(env);
+  if (authMode === "demo") return true;
+  if (authMode === "production") return isAllowedProductionEmail(normalized, env);
+  return false;
 }
 
 export function canUseApp(email, env = process.env) {

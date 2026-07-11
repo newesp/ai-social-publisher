@@ -4,8 +4,10 @@ import { test } from "node:test";
 import { canSignInWithGoogle, getRoleForEmail, isAdminEmail } from "../src/lib/auth/roles.js";
 
 test("demo allows non-empty Google accounts to sign in", () => {
-  assert.equal(canSignInWithGoogle("guest@example.com"), true);
-  assert.equal(canSignInWithGoogle(""), false);
+  const env = { AUTH_MODE: "demo" };
+
+  assert.equal(canSignInWithGoogle("guest@example.com", env), true);
+  assert.equal(canSignInWithGoogle("", env), false);
 });
 
 test("detects admin emails case-insensitively from ADMIN_EMAILS", () => {
