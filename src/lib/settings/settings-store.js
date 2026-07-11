@@ -1,56 +1,22 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import path from "node:path";
-import { maskSecret } from "./secret-bundle.js";
+import { createDbClient } from "../db/index.js";
+import { createDbUserSettingsRepository } from "./db-user-settings-repository.js";
+import { createUserSettingsStore } from "./user-settings-store.js";
 
-const PUBLIC_SETTING_KEYS = new Set(["metaPageId"]);
-
-export async function readSettings(options = {}) {
-  const filePath = options.filePath ?? getDefaultFilePath();
-
-  try {
-    return JSON.parse(await readFile(filePath, "utf8"));
-  } catch (error) {
-    if (error.code === "ENOENT") return {};
-    throw error;
-  }
+export function getUserSettingsStore(env = process.env) {
+  return createUserSettingsStore({
+    repository: createDbUserSettingsRepository(createDbClient(env)),
+    encryptionKey: env.SETTINGS_ENCRYPTION_KEY,
+  });
 }
 
-export async function updateSettings(updates, options = {}) {
-  const filePath = options.filePath ?? getDefaultFilePath();
-  const current = await readSettings({ filePath });
-  const next = { ...current, ...stripEmptyValues(updates) };
-
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
-
-  return next;
+export async function readSettings(ownerEmail, options = {}) {
+  return (options.store ?? getUserSettingsStore(options.env)).read(ownerEmail);
 }
 
-export async function replaceSettings(settings, options = {}) {
-  const filePath = options.filePath ?? getDefaultFilePath();
-
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
-
-  return settings;
+export async function updateSettings(ownerEmail, updates, options = {}) {
+  return (options.store ?? getUserSettingsStore(options.env)).update(ownerEmail, updates);
 }
 
-export async function getMaskedSettings(options = {}) {
-  const settings = await readSettings(options);
-  return Object.fromEntries(
-    Object.entries(settings).map(([key, value]) => [
-      key,
-      PUBLIC_SETTING_KEYS.has(key) ? value : maskSecret(value),
-    ]),
-  );
-}
-
-function stripEmptyValues(updates) {
-  return Object.fromEntries(
-    Object.entries(updates ?? {}).filter(([, value]) => value !== "" && value != null),
-  );
-}
-
-function getDefaultFilePath() {
-  return path.join("data", "settings.json");
+export async function getMaskedSettings(ownerEmail, options = {}) {
+  return (options.store ?? getUserSettingsStore(options.env)).getMasked(ownerEmail);
 }

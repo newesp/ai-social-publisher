@@ -35,6 +35,12 @@ export const settings = sqliteTable("settings", {
   updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
 });
 
+export const userSettings = sqliteTable("user_settings", {
+  ownerEmail: text("owner_email").primaryKey(),
+  encryptedSettings: text("encrypted_settings").notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
+});
+
 export const auditLogs = sqliteTable("audit_logs", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   actorEmail: text("actor_email").notNull(),

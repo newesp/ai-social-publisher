@@ -3,11 +3,13 @@ import { buildPlatformPreviews } from "../../../../../lib/platform-preview/build
 import { publishTargets } from "../../../../../lib/platforms/publish-service.js";
 import { filterActivePlatforms } from "../../../../../lib/platforms/platform-config.js";
 import { readSettings } from "../../../../../lib/settings/settings-store.js";
+import { requirePublisher } from "../../../../../lib/auth/route-guards.js";
 
 export async function POST(request, { params }) {
+  const ownerEmail = await requirePublisher();
   const { id } = await params;
   const body = await request.json().catch(() => ({}));
-  const settings = await readSettings();
+  const settings = await readSettings(ownerEmail);
   const targets =
     Array.isArray(body.targets) && body.targets.length > 0
       ? body.targets.filter((target) => filterActivePlatforms([target.platform]).length > 0)

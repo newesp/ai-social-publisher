@@ -1,47 +1,75 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import { test } from "node:test";
 
-import {
-  getMaskedSettings,
-  readSettings,
-  updateSettings,
-} from "../src/lib/settings/settings-store.js";
+import { createUserSettingsStore } from "../src/lib/settings/user-settings-store.js";
 
-test("persists settings to the configured local data file", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "ai-social-publisher-"));
-  const filePath = path.join(dir, "settings.json");
+function createMemoryRepository() {
+  const records = new Map();
 
-  try {
-    await updateSettings({ googleAiApiKey: "google-secret" }, { filePath });
-    assert.deepEqual(await readSettings({ filePath }), { googleAiApiKey: "google-secret" });
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
+  return {
+    records,
+    async findByOwnerEmail(ownerEmail) {
+      return records.get(ownerEmail) ?? null;
+    },
+    async save(record) {
+      records.set(record.ownerEmail, record);
+    },
+  };
+}
+
+function createStore(repository = createMemoryRepository()) {
+  return {
+    repository,
+    store: createUserSettingsStore({
+      repository,
+      encryptionKey: "test-only-settings-encryption-key",
+    }),
+  };
+}
+
+test("keeps each owner's encrypted settings isolated", async () => {
+  const { store, repository } = createStore();
+
+  await store.update("owner@example.com", { googleAiApiKey: "owner-google-key" });
+  await store.update("other@example.com", { googleAiApiKey: "other-google-key" });
+  await store.update("other@example.com", { lineChannelAccessToken: "other-line-token" });
+
+  assert.deepEqual(await store.read("owner@example.com"), { googleAiApiKey: "owner-google-key" });
+  assert.deepEqual(await store.read("other@example.com"), {
+    googleAiApiKey: "other-google-key",
+    lineChannelAccessToken: "other-line-token",
+  });
+  assert.notEqual(repository.records.get("owner@example.com").encryptedSettings.includes("owner-google-key"), true);
+  assert.notEqual(repository.records.get("other@example.com").encryptedSettings.includes("other-google-key"), true);
 });
 
-test("masks persisted settings for API responses", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "ai-social-publisher-"));
-  const filePath = path.join(dir, "settings.json");
+test("returns only masked values and preserves secrets for empty input", async () => {
+  const { store } = createStore();
 
-  try {
-    await updateSettings({ openAiApiKey: "sk-example-secret" }, { filePath });
-    assert.deepEqual(await getMaskedSettings({ filePath }), { openAiApiKey: "sk-...ret" });
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
+  await store.update("owner@example.com", {
+    googleAiApiKey: "google-secret",
+    metaPageId: "1234567890",
+  });
+  await store.update("owner@example.com", { googleAiApiKey: "   " });
+
+  assert.deepEqual(await store.getMasked("owner@example.com"), {
+    googleAiApiKey: "goo...ret",
+    metaPageId: "1234567890",
+  });
+  assert.deepEqual(await store.read("owner@example.com"), {
+    googleAiApiKey: "google-secret",
+    metaPageId: "1234567890",
+  });
 });
 
-test("does not mask public Meta Page ID in settings responses", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "ai-social-publisher-"));
-  const filePath = path.join(dir, "settings.json");
+test("rejects masked placeholders instead of persisting them", async () => {
+  const { store } = createStore();
 
-  try {
-    await updateSettings({ metaPageId: "1234567890" }, { filePath });
-    assert.deepEqual(await getMaskedSettings({ filePath }), { metaPageId: "1234567890" });
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
+  await store.update("owner@example.com", { openAiApiKey: "openai-secret" });
+
+  await assert.rejects(
+    store.update("owner@example.com", { openAiApiKey: "ope...ret" }),
+    /masked placeholder/i,
+  );
+  assert.deepEqual(await store.read("owner@example.com"), { openAiApiKey: "openai-secret" });
 });
