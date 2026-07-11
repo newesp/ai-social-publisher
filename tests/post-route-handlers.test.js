@@ -112,6 +112,54 @@ test("publish-now handler persists provider errors using the signed-in owner's s
   assert.equal(data.post.targets[0].errorMessage, "provider refused [redacted]");
 });
 
+test("publish-now records a safe failed result when the publisher throws after claim", async () => {
+  const repository = createMemoryRepository();
+  const handlers = createPostRouteHandlers({
+    requireAppUser: async () => "owner@example.com",
+    requirePublisher: async () => "owner@example.com",
+    getRepository: async () => repository,
+    readSettings: async () => ({ metaPageAccessToken: "owner-token" }),
+    publishTargets: async () => { throw new Error("provider failed for owner@example.com Bearer owner-token"); },
+    now: () => new Date("2026-07-09T00:00:00.000Z"),
+  });
+
+  const response = await handlers.POST(new Request("http://localhost/api/posts", {
+    method: "POST",
+    body: JSON.stringify({ ...body, mode: "now" }),
+  }));
+  const { post } = await response.json();
+
+  assert.equal(response.status, 201);
+  assert.equal(post.status, "failed");
+  assert.equal(post.targets[0].status, "failed");
+  assert.equal(post.targets[0].errorMessage.includes("owner-token"), false);
+  assert.equal(post.targets[0].errorMessage.includes("owner@example.com"), false);
+});
+
+test("publish-now records a safe failed result when owner settings cannot be read", async () => {
+  const repository = createMemoryRepository();
+  const handlers = createPostRouteHandlers({
+    requireAppUser: async () => "owner@example.com",
+    requirePublisher: async () => "owner@example.com",
+    getRepository: async () => repository,
+    readSettings: async () => { throw new Error("settings unavailable for owner@example.com token=owner-token"); },
+    publishTargets: async () => { throw new Error("publisher must not run"); },
+    now: () => new Date("2026-07-09T00:00:00.000Z"),
+  });
+
+  const response = await handlers.POST(new Request("http://localhost/api/posts", {
+    method: "POST",
+    body: JSON.stringify({ ...body, mode: "now" }),
+  }));
+  const { post } = await response.json();
+
+  assert.equal(response.status, 201);
+  assert.equal(post.status, "failed");
+  assert.equal(post.targets[0].status, "failed");
+  assert.equal(post.targets[0].errorMessage.includes("owner-token"), false);
+  assert.equal(post.targets[0].errorMessage.includes("owner@example.com"), false);
+});
+
 test("cancellation handler conditionally cancels only the current owner's scheduled row", async () => {
   const repository = createMemoryRepository();
   const handlers = createPostRouteHandlers({

@@ -60,3 +60,23 @@
 - The local schema adds non-null `posts.owner_email`; reconcile and explicitly authorize any migration against an existing Turso database before applying it. This task intentionally did not create or push a remote migration.
 - The Task 4 UI has not yet been wired to `POST /api/posts`, so current UI behavior remains outside this task’s scope.
 - Task 5 will need to reuse the `publishPost` runner with an appropriately scheduled-row claim policy; the current immediate claim deliberately permits only `draft`.
+
+## Acceptance correction: post-claim exception persistence
+
+### Change
+
+- `publishPost` now catches failures after a post has been claimed, including owner-settings reads, preview assembly, and the injected platform publisher. It writes a failed result for every claimed target before returning the final post.
+- The persisted fallback message is generic and contains neither the signed-in owner email nor a settings value/token.
+- The route handler also converts any publish-outcome persistence failure into a generic HTTP 500 error, so the app route cannot echo a lower-level exception message.
+
+### TDD evidence
+
+1. RED: added independent route-handler tests for a publisher throw after claim and a rejected `readSettings` call. `npm.cmd test -- tests/post-route-handlers.test.js` failed 2/6, each failure exposing the original owner email and token in the thrown error.
+2. GREEN: after the runner catch/persist change, `npm.cmd test -- tests/post-service.test.js tests/post-route-handlers.test.js` passed 10/10. Both tests assert a `failed` parent, `failed` target, and response error text that excludes the owner email and token.
+
+### Correction verification
+
+- `npm.cmd test`: 68 passed, 0 failed.
+- `npm.cmd run build`: passed; Next.js emitted the existing middleware-to-proxy deprecation warning.
+- `git diff --check`: passed.
+- No Meta, LINE, Turso, migration, or remote call was made; all provider and settings failures were injected locally.

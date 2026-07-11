@@ -12,12 +12,23 @@ export function createPostRouteHandlers({ requireAppUser, requirePublisher, getR
       const repository = await getRepository();
       const input = await request.json();
       const post = await createPost({ ownerEmail, input, mode: input.mode, repository, now: now() });
-      const published = input.mode === "now"
-        ? await publishPost({ ownerEmail, postId: post.id, repository, readSettings, publishTargets, now: now() })
-        : post;
+      let published = post;
+      if (input.mode === "now") {
+        try {
+          published = await publishPost({ ownerEmail, postId: post.id, repository, readSettings, publishTargets, now: now() });
+        } catch {
+          throw routeError("Publishing failed and the outcome could not be recorded.", 500);
+        }
+      }
       return respond({ post: published }, { status: 201 });
     },
   };
+}
+
+function routeError(message, status) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
 }
 
 export function createPostCancellationHandler({ requirePublisher, getRepository, now = () => new Date(), respond = (body, init) => Response.json(body, init) }) {

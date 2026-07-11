@@ -85,23 +85,32 @@ export async function publishPost({
     );
   }
 
-  const settings = await readSettings(owner);
-  const previews = buildPlatformPreviews({
-    imageUrl: post.imageImgurUrl,
-    targets: post.targets.map((target) => ({
+  let results;
+  try {
+    const settings = await readSettings(owner);
+    const previews = buildPlatformPreviews({
+      imageUrl: post.imageImgurUrl,
+      targets: post.targets.map((target) => ({
+        platform: target.platform,
+        content: target.content,
+        hashtags: parseHashtags(target.hashtagsJson),
+      })),
+    });
+    const targets = Object.values(previews).map((preview) => ({
+      platform: preview.platform,
+      publishPayload: preview.publishPayload,
+    }));
+    results = (await publishTargets({ targets, settings })).map((result) => ({
+      ...result,
+      error: result.error ? redactProviderError(result.error, settings) : result.error,
+    }));
+  } catch {
+    results = post.targets.map((target) => ({
       platform: target.platform,
-      content: target.content,
-      hashtags: parseHashtags(target.hashtagsJson),
-    })),
-  });
-  const targets = Object.values(previews).map((preview) => ({
-    platform: preview.platform,
-    publishPayload: preview.publishPayload,
-  }));
-  const results = (await publishTargets({ targets, settings })).map((result) => ({
-    ...result,
-    error: result.error ? redactProviderError(result.error, settings) : result.error,
-  }));
+      status: POST_STATUS.FAILED,
+      error: "Publishing failed before a provider response was recorded.",
+    }));
+  }
   return repository.recordPublishResults(owner, id, results, now);
 }
 
