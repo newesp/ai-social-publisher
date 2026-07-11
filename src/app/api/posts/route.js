@@ -1,32 +1,32 @@
 import { NextResponse } from "next/server";
 
-const demoPosts = [
-  {
-    id: 1,
-    productName: "示範商品",
-    status: "draft",
-    targets: [
-      { platform: "meta", status: "draft" },
-      { platform: "instagram", status: "draft" },
-    ],
-  },
-];
+import { requireAppUser, requirePublisher, routeErrorResponse } from "../../../lib/auth/route-guards.js";
+import { createPostRepository } from "../../../lib/posts/post-repository.js";
+import { createPostRouteHandlers } from "../../../lib/posts/post-route-handlers.js";
+import { publishTargets } from "../../../lib/platforms/publish-service.js";
+import { readSettings } from "../../../lib/settings/settings-store.js";
+
+const handlers = createPostRouteHandlers({
+  requireAppUser,
+  requirePublisher,
+  getRepository: () => createPostRepository(),
+  readSettings,
+  publishTargets,
+  respond: (body, init) => NextResponse.json(body, init),
+});
 
 export async function GET() {
-  return NextResponse.json({ posts: demoPosts });
+  try {
+    return await handlers.GET();
+  } catch (error) {
+    return routeErrorResponse(error, NextResponse);
+  }
 }
 
 export async function POST(request) {
-  const body = await request.json();
-
-  return NextResponse.json(
-    {
-      post: {
-        id: Date.now(),
-        status: body.mode === "scheduled" ? "scheduled" : "draft",
-        ...body,
-      },
-    },
-    { status: 201 },
-  );
+  try {
+    return await handlers.POST(request);
+  } catch (error) {
+    return routeErrorResponse(error, NextResponse);
+  }
 }

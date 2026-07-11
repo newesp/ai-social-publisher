@@ -1,17 +1,22 @@
-import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const posts = sqliteTable("posts", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  ownerEmail: text("owner_email").notNull(),
   productName: text("product_name").notNull(),
   productFeatures: text("product_features").notNull(),
   imagePrompt: text("image_prompt"),
   imageImgurUrl: text("image_imgur_url"),
   status: text("status").notNull().default("draft"),
   scheduledFor: integer("scheduled_for", { mode: "timestamp" }),
+  publishingStartedAt: integer("publishing_started_at", { mode: "timestamp" }),
   publishedAt: integer("published_at", { mode: "timestamp" }),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
-});
+}, (table) => [
+  index("posts_owner_created_at_idx").on(table.ownerEmail, table.createdAt),
+  index("posts_status_scheduled_for_idx").on(table.status, table.scheduledFor),
+]);
 
 export const postTargets = sqliteTable("post_targets", {
   id: integer("id").primaryKey({ autoIncrement: true }),
