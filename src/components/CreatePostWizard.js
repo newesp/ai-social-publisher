@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   Badge,
   Button,
@@ -17,26 +17,20 @@ import {
   TextInput,
   Title,
 } from "@mantine/core";
-import { IconRefresh, IconSend } from "@tabler/icons-react";
+import { DateInput } from "@mantine/dates";
+import { IconCalendar, IconRefresh, IconSend } from "@tabler/icons-react";
 import { createDraftTargets } from "../lib/content/draft-content.js";
 import { buildPlatformPreviews } from "../lib/platform-preview/build-platform-previews.js";
 import { ACTIVE_PLATFORMS } from "../lib/platforms/platform-config.js";
+import { buildPostSubmission, SCHEDULE_TIME } from "../lib/wizard/post-submission.js";
+import { WIZARD_STEPS, getInitialPostForm, shouldGenerateOnPreviewAdvance } from "../lib/wizard/wizard-flow.js";
 import { PlatformPreview } from "./PlatformPreview.js";
 
 export function CreatePostWizard() {
   const productNameRef = useRef(null);
   const productFeaturesRef = useRef(null);
   const [active, setActive] = useState(0);
-  const [form, setForm] = useState({
-    productName: "New ESP 展示商品",
-    productFeatures: "快速建立社群文案、跨平台預覽、立即發布。",
-    audience: "professional",
-    tone: "friendly",
-    platforms: ["meta", "line"],
-    llmProvider: "google",
-    imageProvider: "google",
-    mode: "now",
-  });
+  const [form, setForm] = useState(getInitialPostForm);
   const [imageUrl, setImageUrl] = useState(null);
   const [generatedTargets, setGeneratedTargets] = useState(null);
   const [generationStatus, setGenerationStatus] = useState("idle");
@@ -44,451 +38,100 @@ export function CreatePostWizard() {
   const [publishStatus, setPublishStatus] = useState("idle");
   const [publishResult, setPublishResult] = useState(null);
 
-  const targets = useMemo(
-    () => {
-      if (generatedTargets) return generatedTargets;
-
-      return createDraftTargets(form);
-    },
-    [form, generatedTargets],
-  );
-
+  const targets = useMemo(() => generatedTargets ?? createDraftTargets(form), [form, generatedTargets]);
   const previews = useMemo(() => buildPlatformPreviews({ imageUrl, targets }), [imageUrl, targets]);
-
-  useEffect(() => {
-    if (active === 2 && generationStatus === "idle") {
-      regenerateContent({
-        form,
-        setGeneratedTargets,
-        setImageUrl,
-        setGenerationStatus,
-        setGenerationError,
-      });
-    }
-  }, [active, form, generationStatus]);
+  const updateForm = (nextForm) => {
+    setForm(nextForm);
+    setGeneratedTargets(null);
+    setGenerationStatus("idle");
+    setImageUrl(null);
+  };
 
   return (
     <Stack gap="lg">
       <div>
-        <Title order={2}>新增貼文</Title>
-        <Text c="dimmed">輸入商品資訊，生成各平台文案，確認實際預覽後再發布。</Text>
+        <Title order={2}>建立貼文</Title>
+        <Text c="dimmed">建立內容、檢視可編輯預覽，然後立即發布或排程。</Text>
       </div>
 
       <Paper withBorder radius={8} p="lg">
         <Stepper active={active} onStepClick={setActive}>
-          <Stepper.Step label="產品資訊">
+          <Stepper.Step label="商品資訊">
             <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md" mt="md">
-              <TextInput
-                ref={productNameRef}
-                name="productName"
-                label="產品名稱"
-                value={form.productName}
-                onInput={(event) =>
-                  updateProductForm(
-                    { ...form, productName: event.currentTarget.value },
-                    setForm,
-                    setGeneratedTargets,
-                    setGenerationStatus,
-                    setImageUrl,
-                  )
-                }
-                onChange={(event) =>
-                  updateProductForm(
-                    { ...form, productName: event.currentTarget.value },
-                    setForm,
-                    setGeneratedTargets,
-                    setGenerationStatus,
-                    setImageUrl,
-                  )
-                }
-                onBlur={(event) =>
-                  updateProductForm(
-                    { ...form, productName: event.currentTarget.value },
-                    setForm,
-                    setGeneratedTargets,
-                    setGenerationStatus,
-                    setImageUrl,
-                  )
-                }
-              />
-              <Select
-                label="目標受眾"
-                value={form.audience}
-                onChange={(value) =>
-                  updateProductForm(
-                    { ...form, audience: value },
-                    setForm,
-                    setGeneratedTargets,
-                    setGenerationStatus,
-                    setImageUrl,
-                  )
-                }
-                data={[
-                  { value: "young", label: "年輕族群" },
-                  { value: "professional", label: "專業人士" },
-                  { value: "family", label: "家庭主婦" },
-                  { value: "senior", label: "銀髮族" },
-                  { value: "general", label: "通用" },
-                ]}
-              />
+              <TextInput ref={productNameRef} name="productName" label="商品名稱" value={form.productName} onChange={(event) => updateForm({ ...form, productName: event.currentTarget.value })} />
+              <Select label="目標受眾" value={form.audience} onChange={(audience) => updateForm({ ...form, audience: audience ?? "general" })} data={[{ value: "young", label: "年輕族群" }, { value: "professional", label: "專業人士" }, { value: "family", label: "家庭" }, { value: "senior", label: "熟齡族群" }, { value: "general", label: "一般大眾" }]} />
             </SimpleGrid>
-            <Textarea
-              ref={productFeaturesRef}
-              name="productFeatures"
-              mt="md"
-              minRows={4}
-              label="核心特點"
-              value={form.productFeatures}
-              onInput={(event) =>
-                updateProductForm(
-                  { ...form, productFeatures: event.currentTarget.value },
-                  setForm,
-                  setGeneratedTargets,
-                  setGenerationStatus,
-                  setImageUrl,
-                )
-              }
-              onChange={(event) =>
-                updateProductForm(
-                  { ...form, productFeatures: event.currentTarget.value },
-                  setForm,
-                  setGeneratedTargets,
-                  setGenerationStatus,
-                  setImageUrl,
-                )
-              }
-              onBlur={(event) =>
-                updateProductForm(
-                  { ...form, productFeatures: event.currentTarget.value },
-                  setForm,
-                  setGeneratedTargets,
-                  setGenerationStatus,
-                  setImageUrl,
-                )
-              }
-            />
+            <Textarea ref={productFeaturesRef} name="productFeatures" mt="md" minRows={4} label="商品特色" value={form.productFeatures} onChange={(event) => updateForm({ ...form, productFeatures: event.currentTarget.value })} />
             <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md" mt="md">
-              <Select
-                label="語氣風格"
-                value={form.tone}
-                onChange={(value) =>
-                  updateProductForm(
-                    { ...form, tone: value },
-                    setForm,
-                    setGeneratedTargets,
-                    setGenerationStatus,
-                    setImageUrl,
-                  )
-                }
-                data={[
-                  { value: "professional", label: "專業" },
-                  { value: "active", label: "活潑" },
-                  { value: "friendly", label: "親切" },
-                  { value: "premium", label: "高級感" },
-                  { value: "humor", label: "幽默" },
-                ]}
-              />
-              <Checkbox.Group
-                label="發文平台"
-                value={form.platforms}
-                onChange={(platforms) =>
-                  updateProductForm(
-                    { ...form, platforms },
-                    setForm,
-                    setGeneratedTargets,
-                    setGenerationStatus,
-                    setImageUrl,
-                  )
-                }
-              >
-                <Group mt="xs">
-                  {ACTIVE_PLATFORMS.map((option) => (
-                    <Checkbox key={option.value} value={option.value} label={option.label} />
-                  ))}
-                </Group>
+              <Select label="內容語氣" value={form.tone} onChange={(tone) => updateForm({ ...form, tone: tone ?? "friendly" })} data={[{ value: "professional", label: "專業" }, { value: "active", label: "活潑" }, { value: "friendly", label: "親切" }, { value: "premium", label: "高質感" }, { value: "humor", label: "幽默" }]} />
+              <Checkbox.Group label="發布平台" value={form.platforms} onChange={(platforms) => updateForm({ ...form, platforms })}>
+                <Group mt="xs">{ACTIVE_PLATFORMS.map((option) => <Checkbox key={option.value} value={option.value} label={option.label} />)}</Group>
               </Checkbox.Group>
             </SimpleGrid>
           </Stepper.Step>
 
-          <Stepper.Step label="AI Provider">
+          <Stepper.Step label="AI 供應商">
             <SimpleGrid cols={{ base: 1, md: 2 }} spacing="lg" mt="md">
-              <Stack>
-                <Text fw={600}>LLM Provider</Text>
-                <SegmentedControl
-                  value={form.llmProvider}
-                  onChange={(value) =>
-                    updateProductForm(
-                      { ...form, llmProvider: value },
-                      setForm,
-                      setGeneratedTargets,
-                      setGenerationStatus,
-                      setImageUrl,
-                    )
-                  }
-                  data={[
-                    { label: "Gemini", value: "google" },
-                    { label: "OpenAI", value: "openai" },
-                  ]}
-                />
-                <Badge color="orange" variant="light">
-                  Gemini 預設 gemini-3.5-flash
-                </Badge>
-              </Stack>
-              <Stack>
-                <Text fw={600}>Image Provider</Text>
-                <SegmentedControl
-                  value={form.imageProvider}
-                  onChange={(value) =>
-                    updateProductForm(
-                      { ...form, imageProvider: value },
-                      setForm,
-                      setGeneratedTargets,
-                      setGenerationStatus,
-                      setImageUrl,
-                    )
-                  }
-                  data={[
-                    { label: "Google Gemini Image", value: "google" },
-                    { label: "OpenAI GPT Image", value: "openai" },
-                  ]}
-                />
-                <Badge color="teal" variant="light">
-                  Google 預設 gemini-3.1-flash-image
-                </Badge>
-                <Badge color="blue" variant="light">
-                  OpenAI 預設 gpt-image-2
-                </Badge>
-              </Stack>
+              <Stack><Text fw={600}>LLM 供應商</Text><SegmentedControl value={form.llmProvider} onChange={(llmProvider) => updateForm({ ...form, llmProvider })} data={[{ label: "Gemini", value: "google" }, { label: "OpenAI", value: "openai" }]} /></Stack>
+              <Stack><Text fw={600}>圖片供應商</Text><SegmentedControl value={form.imageProvider} onChange={(imageProvider) => updateForm({ ...form, imageProvider })} data={[{ label: "Google Gemini Image", value: "google" }, { label: "OpenAI GPT Image", value: "openai" }]} /></Stack>
             </SimpleGrid>
           </Stepper.Step>
 
-          <Stepper.Step label="預覽與編輯">
+          <Stepper.Step label="預覽與發布">
             <Group justify="space-between" mt="md" mb="sm">
-              <Text fw={600}>平台實際預覽</Text>
-              <Button
-                variant="light"
-                leftSection={<IconRefresh size={16} />}
-                loading={generationStatus === "loading"}
-                onClick={() =>
-                  regenerateContent({
-                    form,
-                    setGeneratedTargets,
-                    setImageUrl,
-                    setGenerationStatus,
-                    setGenerationError,
-                  })
-                }
-              >
-                重新生成
-              </Button>
+              <Text fw={600}>編輯要送出的內容</Text>
+              <Button variant="light" leftSection={<IconRefresh size={16} />} loading={generationStatus === "loading"} onClick={() => regenerateContent({ form, setGeneratedTargets, setImageUrl, setGenerationStatus, setGenerationError })}>重新產生</Button>
             </Group>
-            {generationStatus === "loading" ? (
-              <Text c="dimmed" size="sm" mb="sm">
-                AI 正在根據產品資訊生成文案與圖片...
-              </Text>
-            ) : null}
-            {generationError ? (
-              <Text c="red.7" size="sm" mb="sm">
-                {generationError}
-              </Text>
-            ) : null}
+            {generationStatus === "loading" ? <Text c="dimmed" size="sm" mb="sm">正在產生內容…</Text> : null}
+            {generationError ? <Text c="red.7" size="sm" mb="sm">{generationError}</Text> : null}
             <SimpleGrid cols={{ base: 1, lg: 2 }} spacing="md">
-              {Object.values(previews).map((preview) => (
-                <PlatformPreview
-                  key={preview.platform}
-                  data={preview}
-                  content={targets.find((target) => target.platform === preview.platform)?.content ?? ""}
-                  onContentChange={(content) =>
-                    updateTargetContent({
-                      platform: preview.platform,
-                      content,
-                      targets,
-                      setGeneratedTargets,
-                    })
-                  }
-                />
-              ))}
+              {Object.values(previews).map((preview) => <PlatformPreview key={preview.platform} data={preview} content={targets.find((target) => target.platform === preview.platform)?.content ?? ""} onContentChange={(content) => setGeneratedTargets(targets.map((target) => target.platform === preview.platform ? { ...target, content } : target))} />)}
             </SimpleGrid>
-          </Stepper.Step>
-
-          <Stepper.Step label="發文設定">
-            <SimpleGrid cols={{ base: 1 }} spacing="md" mt="md">
-              <Stack>
-                <Text fw={600}>最終確認</Text>
-                {form.platforms.map((platform) => (
-                  <Checkbox key={platform} checked readOnly label={`${platform} 預覽與 payload 已同步`} />
-                ))}
-                <Button
-                  leftSection={<IconSend size={16} />}
-                  loading={publishStatus === "loading"}
-                  onClick={() => publishNow(targets, imageUrl, setPublishStatus, setPublishResult)}
-                >
-                  確認發文
-                </Button>
-                {publishResult ? (
-                  <Stack gap={4}>
-                    {publishResult.results?.map((result) => (
-                      <Text
-                        key={result.platform}
-                        size="sm"
-                        c={result.status === "published" ? "green.7" : "red.7"}
-                      >
-                        {result.platform}: {result.status}
-                        {result.error ? ` - ${result.error}` : ""}
-                      </Text>
-                    ))}
-                  </Stack>
-                ) : null}
-              </Stack>
-            </SimpleGrid>
+            <Paper withBorder mt="md" p="md">
+              <Text fw={600} mb="sm">發布方式</Text>
+              <SegmentedControl value={form.mode} onChange={(mode) => setForm({ ...form, mode })} data={[{ label: "立即發布", value: "now" }, { label: "排程發布", value: "scheduled" }]} />
+              {form.mode === "scheduled" ? <SimpleGrid cols={{ base: 1, sm: 2 }} mt="sm"><DateInput label="發布日期" value={form.scheduledDate ?? null} onChange={(scheduledDate) => setForm({ ...form, scheduledDate: scheduledDate ?? "" })} valueFormat="YYYY-MM-DD" minDate={new Date()} clearable={false} /><Select label="發布時間（台北）" value={form.scheduledTime ?? SCHEDULE_TIME} onChange={(scheduledTime) => setForm({ ...form, scheduledTime: scheduledTime ?? SCHEDULE_TIME })} data={[{ value: "09:00", label: "09:00" }]} /></SimpleGrid> : null}
+            </Paper>
+            {publishResult ? <Stack gap={4} mt="md"><Badge color={publishResult.status === "failed" ? "red" : publishResult.status === "scheduled" ? "orange" : "green"}>{publishResult.status}</Badge>{publishResult.targets?.map((target) => <Text key={target.id ?? target.platform} size="sm" c={target.status === "failed" ? "red.7" : "green.7"}>{target.platform}: {target.status}{target.errorMessage ? ` - ${target.errorMessage}` : ""}</Text>)}</Stack> : null}
           </Stepper.Step>
         </Stepper>
 
         <Group justify="space-between" mt="xl">
-          <Button variant="default" onClick={() => setActive((step) => Math.max(0, step - 1))}>
-            上一步
-          </Button>
-          {active < 3 ? (
-            <Button
-              onClick={() =>
-                goToNextStep({
-                  form,
-                  productNameRef,
-                  productFeaturesRef,
-                  setForm,
-                  setGeneratedTargets,
-                  setGenerationStatus,
-                  setImageUrl,
-                  setActive,
-                })
-              }
-            >
-              下一步
-            </Button>
-          ) : null}
+          <Button variant="default" onClick={() => setActive((step) => Math.max(0, step - 1))}>上一步</Button>
+          {active < WIZARD_STEPS.PREVIEW ? <Button disabled={generationStatus === "loading"} onClick={() => goToNextStep({ active, form, generatedTargets, productNameRef, productFeaturesRef, setForm, setGeneratedTargets, setGenerationStatus, setGenerationError, setImageUrl, setActive })}>下一步</Button> : <Button leftSection={form.mode === "scheduled" ? <IconCalendar size={16} /> : <IconSend size={16} />} loading={publishStatus === "loading"} disabled={generationStatus === "loading"} onClick={() => submitPost({ form, targets, imageUrl, setPublishStatus, setPublishResult })}>{form.mode === "scheduled" ? "安排 09:00 發布" : "立即發布"}</Button>}
         </Group>
       </Paper>
     </Stack>
   );
 }
 
-function updateProductForm(
-  nextForm,
-  setForm,
-  setGeneratedTargets,
-  setGenerationStatus,
-  setImageUrl,
-) {
-  setForm(nextForm);
-  setGeneratedTargets(null);
-  setGenerationStatus?.("idle");
-  setImageUrl?.(null);
-}
-
-function goToNextStep({
-  form,
-  productNameRef,
-  productFeaturesRef,
-  setForm,
-  setGeneratedTargets,
-  setGenerationStatus,
-  setImageUrl,
-  setActive,
-}) {
-  const syncedForm = {
-    ...form,
-    productName:
-      document.querySelector('[name="productName"]')?.value ??
-      productNameRef.current?.value ??
-      form.productName,
-    productFeatures:
-      document.querySelector('[name="productFeatures"]')?.value ??
-      productFeaturesRef.current?.value ??
-      form.productFeatures,
-  };
-
-  if (
-    syncedForm.productName !== form.productName ||
-    syncedForm.productFeatures !== form.productFeatures
-  ) {
-    updateProductForm(syncedForm, setForm, setGeneratedTargets, setGenerationStatus, setImageUrl);
+function goToNextStep({ active, form, generatedTargets, productNameRef, productFeaturesRef, setForm, setGeneratedTargets, setGenerationStatus, setGenerationError, setImageUrl, setActive }) {
+  const nextStep = Math.min(WIZARD_STEPS.PREVIEW, active + 1);
+  const syncedForm = { ...form, productName: productNameRef.current?.value ?? form.productName, productFeatures: productFeaturesRef.current?.value ?? form.productFeatures };
+  if (syncedForm.productName !== form.productName || syncedForm.productFeatures !== form.productFeatures) {
+    setForm(syncedForm); setGeneratedTargets(null); setGenerationStatus("idle"); setImageUrl(null);
   }
-  setActive((step) => Math.min(3, step + 1));
+  setActive(nextStep);
+  if (shouldGenerateOnPreviewAdvance({ currentStep: active, nextStep, hasGeneratedTargets: Boolean(generatedTargets) })) regenerateContent({ form: syncedForm, setGeneratedTargets, setImageUrl, setGenerationStatus, setGenerationError });
 }
 
-async function regenerateContent({
-  form,
-  setGeneratedTargets,
-  setImageUrl,
-  setGenerationStatus,
-  setGenerationError,
-}) {
-  setGenerationStatus("loading");
-  setGenerationError("");
-
+async function regenerateContent({ form, setGeneratedTargets, setImageUrl, setGenerationStatus, setGenerationError }) {
+  setGenerationStatus("loading"); setGenerationError("");
   try {
-    const response = await fetch("/api/generate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(form),
-    });
+    const response = await fetch("/api/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
     const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.error ?? "AI 生成失敗。");
-    }
-
-    setGeneratedTargets(data.targets);
-    setImageUrl(data.imageUrl ?? null);
-    setGenerationError(data.imageError ? `圖片生成失敗：${data.imageError}` : "");
-    setGenerationStatus("success");
-  } catch (error) {
-    setGenerationError(formatGenerationError(error.message));
-    setGenerationStatus("error");
-  }
+    if (!response.ok) throw new Error(data.error ?? "內容產生失敗。");
+    setGeneratedTargets(data.targets); setImageUrl(data.imageUrl ?? null); setGenerationStatus("success");
+  } catch (error) { setGenerationError(error.message); setGenerationStatus("error"); }
 }
 
-function updateTargetContent({ platform, content, targets, setGeneratedTargets }) {
-  setGeneratedTargets(
-    targets.map((target) => (target.platform === platform ? { ...target, content } : target)),
-  );
-}
-
-function platformLabel(platform) {
-  if (platform === "meta") return "Facebook";
-  if (platform === "line") return "LINE";
-  return platform;
-}
-
-function formatGenerationError(message) {
-  if (message.includes("API request failed: fetch failed")) {
-    return `${message}。請確認 API key 是否正確、伺服器是否能連到外部 AI API，或切換另一個 LLM Provider。`;
-  }
-
-  return message;
-}
-
-async function publishNow(targets, imageUrl, setPublishStatus, setPublishResult) {
-  setPublishStatus("loading");
-  setPublishResult(null);
-
+async function submitPost({ form, targets, imageUrl, setPublishStatus, setPublishResult }) {
+  setPublishStatus("loading"); setPublishResult(null);
   try {
-    const response = await fetch("/api/posts/manual/publish", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        targets,
-        imageUrl,
-      }),
-    });
+    const payload = buildPostSubmission({ form, targets, imageUrl });
+    const response = await fetch("/api/posts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     const data = await response.json();
-
-    setPublishResult(data);
-    setPublishStatus(response.ok ? "done" : "error");
-  } catch (error) {
-    setPublishResult({
-      results: [{ platform: "system", status: "failed", error: error.message }],
-    });
-    setPublishStatus("error");
-  }
+    if (!response.ok) throw new Error(data.error ?? "建立貼文失敗。");
+    setPublishResult(data.post); setPublishStatus("done");
+  } catch (error) { setPublishResult({ status: "failed", targets: [{ platform: "system", status: "failed", errorMessage: error.message }] }); setPublishStatus("error"); }
 }
