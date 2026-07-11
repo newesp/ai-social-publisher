@@ -1,5 +1,6 @@
 import { withAuth } from "next-auth/middleware";
 import { NextResponse } from "next/server";
+import { isLocalAuthBypassEnabled } from "./lib/auth/middleware-policy.js";
 
 const authMiddleware = withAuth({
   pages: {
@@ -11,7 +12,7 @@ const authMiddleware = withAuth({
 });
 
 export default function middleware(request) {
-  if (process.env.DISABLE_AUTH_FOR_LOCAL_DEV === "true") {
+  if (isLocalAuthBypassEnabled()) {
     return NextResponse.next();
   }
 
@@ -19,5 +20,5 @@ export default function middleware(request) {
 }
 
 export const config = {
-  matcher: ["/((?!api/auth|_next/static|_next/image|favicon.ico).*)"],
+  matcher: ["/((?!api/auth|api/cron|_next/static|_next/image|favicon.ico).*)"],
 };

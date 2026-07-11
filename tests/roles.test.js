@@ -3,9 +3,9 @@ import { test } from "node:test";
 
 import { canSignInWithGoogle, getRoleForEmail, isAdminEmail } from "../src/lib/auth/roles.js";
 
-test("MVP allows any Google account to sign in", () => {
+test("demo allows non-empty Google accounts to sign in", () => {
   assert.equal(canSignInWithGoogle("guest@example.com"), true);
-  assert.equal(canSignInWithGoogle(""), true);
+  assert.equal(canSignInWithGoogle(""), false);
 });
 
 test("detects admin emails case-insensitively from ADMIN_EMAILS", () => {

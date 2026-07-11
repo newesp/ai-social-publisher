@@ -1,19 +1,19 @@
+import { normalizeEmail } from "./policy.js";
+
 export function parseAdminEmails(env = process.env) {
   return new Set(
     String(env.ADMIN_EMAILS ?? "")
       .split(",")
-      .map((email) => email.trim().toLowerCase())
+      .map((email) => normalizeEmail(email))
       .filter(Boolean),
   );
 }
 
-export function canSignInWithGoogle() {
-  return true;
-}
+export { canSignInWithGoogle, normalizeEmail } from "./policy.js";
 
 export function isAdminEmail(email, env = process.env) {
-  if (!email) return false;
-  return parseAdminEmails(env).has(String(email).trim().toLowerCase());
+  const normalized = normalizeEmail(email);
+  return Boolean(normalized) && parseAdminEmails(env).has(normalized);
 }
 
 export function getRoleForEmail(email, env = process.env) {
