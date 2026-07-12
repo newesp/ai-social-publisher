@@ -1,6 +1,6 @@
 "use client";
 
-import { Avatar, Badge, Group, Image, Paper, Stack, Text, Textarea } from "@mantine/core";
+import { Avatar, Group, Image, Paper, Stack, Text, Textarea } from "@mantine/core";
 
 export function PlatformPreview({ data, content, onContentChange }) {
   if (data.platform === "meta") {
@@ -27,7 +27,6 @@ function MetaPreview({ data, content, onContentChange }) {
         {data.preview.imageUrl ? (
           <Image src={data.preview.imageUrl} alt="Meta preview image" radius={6} fit="cover" h={220} />
         ) : null}
-        <Badge variant="light">Payload synced</Badge>
       </Stack>
     </Paper>
   );
@@ -50,9 +49,6 @@ function InstagramPreview({ data }) {
         <Text size="sm" lineClamp={6} style={{ whiteSpace: "pre-wrap" }}>
           <strong>newesp.tw</strong> {data.preview.caption}
         </Text>
-        <Badge color="pink" variant="light">
-          Caption synced
-        </Badge>
       </Stack>
     </Paper>
   );
@@ -77,9 +73,6 @@ function LinePreview({ data, content, onContentChange }) {
         {data.preview.imageUrl ? (
           <Image src={data.preview.imageUrl} alt="LINE preview image" radius={6} fit="cover" h={180} />
         ) : null}
-        <Badge color="green" variant="light">
-          Message synced
-        </Badge>
       </Stack>
     </Paper>
   );
