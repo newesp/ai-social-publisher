@@ -1,14 +1,17 @@
 import { NextResponse } from "next/server";
 
-export async function GET(request) {
-  const secret = request.nextUrl.searchParams.get("secret");
-  if (process.env.CRON_SECRET && secret !== process.env.CRON_SECRET) {
-    return NextResponse.json({ error: "Invalid cron secret." }, { status: 401 });
-  }
+import { createPostRepository } from "../../../lib/posts/post-repository.js";
+import { createCronRouteHandlers, runDuePostScheduler } from "../../../lib/scheduler/run-due-post-scheduler.js";
+import { publishTargets } from "../../../lib/platforms/publish-service.js";
+import { readSettings } from "../../../lib/settings/settings-store.js";
 
-  return NextResponse.json({
-    checkedAt: new Date().toISOString(),
-    published: [],
-    message: "Cron placeholder ready for scheduled post locking.",
-  });
-}
+const handlers = createCronRouteHandlers({
+  runScheduler: () => runDuePostScheduler({
+    repository: createPostRepository(),
+    readSettings,
+    publishTargets,
+  }),
+  respond: (body, init) => NextResponse.json(body, init),
+});
+
+export const GET = handlers.GET;

@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, lte } from "drizzle-orm";
 
 import { createDbClient } from "../db/index.js";
 import { postTargets, posts } from "../db/schema.js";
@@ -41,6 +41,29 @@ export function createPostRepository(db = createDbClient()) {
         if (!updated) return null;
         await tx.update(postTargets).set({ status: POST_STATUS.PUBLISHING, updatedAt: now }).where(eq(postTargets.postId, postId));
         return findPostByOwner(tx, ownerEmail, postId);
+      });
+    },
+    async claimDueScheduledPosts(now) {
+      return db.transaction(async (tx) => {
+        const duePosts = await tx.select().from(posts)
+          .where(and(eq(posts.status, POST_STATUS.SCHEDULED), lte(posts.scheduledFor, now)));
+        const claimedPosts = [];
+        for (const duePost of duePosts) {
+          const [claimed] = await tx.update(posts).set({
+            status: POST_STATUS.PUBLISHING,
+            publishingStartedAt: now,
+            updatedAt: now,
+          }).where(and(
+            eq(posts.id, duePost.id),
+            eq(posts.status, POST_STATUS.SCHEDULED),
+            lte(posts.scheduledFor, now),
+          )).returning();
+          if (!claimed) continue;
+          await tx.update(postTargets).set({ status: POST_STATUS.PUBLISHING, updatedAt: now })
+            .where(eq(postTargets.postId, duePost.id));
+          claimedPosts.push(await findPostByOwner(tx, duePost.ownerEmail, duePost.id));
+        }
+        return claimedPosts;
       });
     },
     async recordPublishResults(ownerEmail, postId, results, now) {
