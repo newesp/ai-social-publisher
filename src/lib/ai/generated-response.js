@@ -13,6 +13,7 @@ export async function buildGeneratedResponse({
 }) {
   const targets = await generateTargets({
     llmProvider: body.llmProvider,
+    llmModel: body.llmModel,
     settings,
     input: body,
   });
@@ -23,6 +24,7 @@ export async function buildGeneratedResponse({
     try {
       const generatedImageUrl = await generateImage({
         prompt: buildImagePrompt(body),
+        imageModel: body.imageModel,
         settings,
       });
       imageUrl = await uploadImage({ imageUrl: generatedImageUrl });
@@ -32,8 +34,8 @@ export async function buildGeneratedResponse({
   }
 
   return {
-    llmModel: getLLMModel(body.llmProvider),
-    imageModel: getImageModel(body.imageProvider),
+    llmModel: getLLMModel(body.llmProvider, body.llmModel),
+    imageModel: getImageModel(body.imageProvider, body.imageModel),
     imageUrl,
     imageError,
     targets,

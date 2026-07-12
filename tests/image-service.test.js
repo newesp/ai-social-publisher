@@ -22,9 +22,24 @@ test("generates Gemini images with the interactions endpoint payload", async () 
   assert.equal(calls[0].url, "https://generativelanguage.googleapis.com/v1beta/interactions");
   assert.equal(calls[0].options.headers["x-goog-api-key"], "google-key");
   assert.deepEqual(JSON.parse(calls[0].options.body), {
-    model: "gemini-3.1-flash-image",
+    model: "gemini-2.5-flash-lite",
     input: [{ type: "text", text: "Create a picture of a nano banana dish" }],
   });
+});
+
+test("uses the requested Gemini image model", async () => {
+  const calls = [];
+  await generateGeminiImage({
+    prompt: "Create a product image",
+    imageModel: "gemini-3.5-flash",
+    settings: { googleAiApiKey: "google-key" },
+    fetchImpl: async (_url, options) => {
+      calls.push(options);
+      return { ok: true, json: async () => ({ output: [{ type: "image", image: "base64-image" }] }), text: async () => "" };
+    },
+  });
+
+  assert.equal(JSON.parse(calls[0].body).model, "gemini-3.5-flash");
 });
 
 test("returns Gemini image output as a data URL", async () => {

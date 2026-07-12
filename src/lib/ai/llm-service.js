@@ -3,6 +3,7 @@ import { filterActivePlatforms } from "../platforms/platform-config.js";
 
 export async function generatePlatformTargets({
   llmProvider = "google",
+  llmModel,
   settings,
   input,
   fetchImpl = fetch,
@@ -14,8 +15,8 @@ export async function generatePlatformTargets({
     const prompt = buildPlatformPrompt(platform, input);
     const content =
       llmProvider === "openai"
-        ? await generateWithOpenAI(prompt, settings, fetchImpl)
-        : await generateWithGemini(prompt, settings, fetchImpl);
+        ? await generateWithOpenAI(prompt, llmModel, settings, fetchImpl)
+        : await generateWithGemini(prompt, llmModel, settings, fetchImpl);
 
     targets.push({
       platform,
@@ -42,7 +43,7 @@ export function buildPlatformPrompt(platform, input) {
   ].join("\n");
 }
 
-async function generateWithOpenAI(prompt, settings, fetchImpl) {
+async function generateWithOpenAI(prompt, llmModel, settings, fetchImpl) {
   if (!settings.openAiApiKey) {
     throw new Error("OPENAI_API_KEY is required.");
   }
@@ -55,7 +56,7 @@ async function generateWithOpenAI(prompt, settings, fetchImpl) {
         Authorization: `Bearer ${settings.openAiApiKey}`,
       },
       body: JSON.stringify({
-        model: getLLMModel("openai"),
+        model: getLLMModel("openai", llmModel),
         input: prompt,
       }),
     }),
@@ -65,12 +66,12 @@ async function generateWithOpenAI(prompt, settings, fetchImpl) {
   return extractOpenAIText(body);
 }
 
-async function generateWithGemini(prompt, settings, fetchImpl) {
+async function generateWithGemini(prompt, llmModel, settings, fetchImpl) {
   if (!settings.googleAiApiKey) {
     throw new Error("GOOGLE_AI_API_KEY is required.");
   }
 
-  const model = getLLMModel("google");
+  const model = getLLMModel("google", llmModel);
   const response = await requestProvider("Gemini", () =>
     fetchImpl("https://generativelanguage.googleapis.com/v1beta/interactions", {
       method: "POST",

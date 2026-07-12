@@ -2,7 +2,7 @@ import { getImageModel } from "./model-config.js";
 
 const GEMINI_INTERACTIONS_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
-export async function generateGeminiImage({ prompt, settings, fetchImpl = fetch }) {
+export async function generateGeminiImage({ prompt, imageModel, settings, fetchImpl = fetch }) {
   if (!settings.googleAiApiKey) {
     throw new Error("GOOGLE_AI_API_KEY is required.");
   }
@@ -15,7 +15,7 @@ export async function generateGeminiImage({ prompt, settings, fetchImpl = fetch 
         "x-goog-api-key": settings.googleAiApiKey,
       },
       body: JSON.stringify({
-        model: getImageModel("google"),
+        model: getImageModel("google", imageModel),
         input: [{ type: "text", text: prompt }],
       }),
     }),

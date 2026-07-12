@@ -61,7 +61,23 @@ test("generates active platform targets with Gemini responses", async () => {
   ]);
   assert.equal(calls[0].url, "https://generativelanguage.googleapis.com/v1beta/interactions");
   assert.equal(calls[0].options.headers["x-goog-api-key"], "google-key");
-  assert.equal(JSON.parse(calls[0].options.body).model, "gemini-3.5-flash");
+  assert.equal(JSON.parse(calls[0].options.body).model, "gemini-3.1-flash-lite-image");
+});
+
+test("uses the requested LLM model in provider requests", async () => {
+  const calls = [];
+  await generatePlatformTargets({
+    llmProvider: "google",
+    llmModel: "gemini-3.1-flash-image",
+    settings: { googleAiApiKey: "google-key" },
+    input: { platforms: ["meta"] },
+    fetchImpl: async (_url, options) => {
+      calls.push(options);
+      return { ok: true, json: async () => ({ output: "Generated content" }), text: async () => "" };
+    },
+  });
+
+  assert.equal(JSON.parse(calls[0].body).model, "gemini-3.1-flash-image");
 });
 
 test("fails fast when provider credentials are missing", async () => {
