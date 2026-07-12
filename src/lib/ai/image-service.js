@@ -17,6 +17,7 @@ export async function generateGeminiImage({ prompt, imageModel, settings, fetchI
       body: JSON.stringify({
         model: getImageModel("google", imageModel),
         input: [{ type: "text", text: prompt }],
+        response_format: { type: "image", mime_type: "image/jpeg", delivery: "inline" },
       }),
     }),
   );
@@ -42,6 +43,9 @@ async function readJsonResponse(response) {
 }
 
 function extractImagePayload(body) {
+  if (body.output_image?.data) {
+    return toDataUrl(body.output_image.data, body.output_image.mime_type ?? body.output_image.mimeType);
+  }
   if (typeof body.image === "string") return toDataUrl(body.image);
   const imageItem = Array.isArray(body.output)
     ? body.output.find((item) => item.type === "image" && item.image)
