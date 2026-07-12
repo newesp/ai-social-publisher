@@ -85,6 +85,18 @@ export async function publishPost({
     );
   }
 
+  return publishClaimedPost({ post, repository, readSettings, publishTargets, now });
+}
+
+export async function publishClaimedPost({
+  post,
+  repository,
+  readSettings,
+  publishTargets = publishPlatformTargets,
+  now = new Date(),
+}) {
+  const owner = requireOwner(post.ownerEmail);
+
   let results;
   try {
     const settings = await readSettings(owner);
@@ -108,7 +120,7 @@ export async function publishPost({
       error: "Publishing failed before a provider response was recorded.",
     }));
   }
-  return repository.recordPublishResults(owner, id, results, now);
+  return repository.recordPublishResults(owner, post.id, results, now);
 }
 
 function terminalResults(targets, providerResults, settings, owner) {

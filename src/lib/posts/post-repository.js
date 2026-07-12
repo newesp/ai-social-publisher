@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, lte } from "drizzle-orm";
 
 import { createDbClient } from "../db/index.js";
 import { postTargets, posts } from "../db/schema.js";
@@ -43,6 +43,25 @@ export function createPostRepository(db = createDbClient()) {
         return findPostByOwner(tx, ownerEmail, postId);
       });
     },
+    async claimDueScheduledPosts(now) {
+      return retryBusyTransaction(() => db.transaction(async (tx) => {
+        const duePosts = await tx.update(posts).set({
+          status: POST_STATUS.PUBLISHING,
+          publishingStartedAt: now,
+          updatedAt: now,
+        }).where(and(
+          eq(posts.status, POST_STATUS.SCHEDULED),
+          lte(posts.scheduledFor, now),
+        )).returning();
+        const claimedPosts = [];
+        for (const duePost of duePosts) {
+          await tx.update(postTargets).set({ status: POST_STATUS.PUBLISHING, updatedAt: now })
+            .where(eq(postTargets.postId, duePost.id));
+          claimedPosts.push(await findPostByOwner(tx, duePost.ownerEmail, duePost.id));
+        }
+        return claimedPosts;
+      }));
+    },
     async recordPublishResults(ownerEmail, postId, results, now) {
       return db.transaction(async (tx) => {
         const current = await findPostByOwner(tx, ownerEmail, postId);
@@ -64,6 +83,17 @@ export function createPostRepository(db = createDbClient()) {
       });
     },
   };
+}
+
+async function retryBusyTransaction(transaction, attempts = 8) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await transaction();
+    } catch (error) {
+      if (error?.code !== "SQLITE_BUSY" || attempt === attempts - 1) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 10 * (attempt + 1)));
+    }
+  }
 }
 
 async function findPostByOwner(db, ownerEmail, postId) {
