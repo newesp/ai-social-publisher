@@ -18,6 +18,25 @@ test("wizard surfaces an image-generation error returned alongside generated tex
   assert.equal(source.includes("data.imageError"), true);
 });
 
+test("wizard renders provider-specific model selects and sends selected models to generate", async () => {
+  const source = await readFile(new URL("../src/components/CreatePostWizard.js", import.meta.url), "utf8");
+
+  assert.equal(source.includes("getLLMModelOptions"), true);
+  assert.equal(source.includes("getImageModelOptions"), true);
+  assert.equal(source.includes("value={form.llmModel}"), true);
+  assert.equal(source.includes("value={form.imageModel}"), true);
+  assert.equal(source.includes("useEffect"), true);
+  assert.equal(source.includes("writeModelPreferences"), true);
+  assert.equal(source.includes('body: JSON.stringify(form)'), true);
+});
+
+test("wizard exposes OpenAI's one-option model controls", async () => {
+  const source = await readFile(new URL("../src/components/CreatePostWizard.js", import.meta.url), "utf8");
+
+  assert.equal(source.includes('getLLMModelOptions(form.llmProvider)'), true);
+  assert.equal(source.includes('getImageModelOptions(form.imageProvider)'), true);
+});
+
 test("history loads API rows and exposes cancellation only for scheduled posts", async () => {
   const source = await readFile(new URL("../src/app/history/page.js", import.meta.url), "utf8");
 

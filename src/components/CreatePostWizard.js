@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Badge,
   Button,
@@ -24,6 +24,8 @@ import { buildPlatformPreviews } from "../lib/platform-preview/build-platform-pr
 import { ACTIVE_PLATFORMS } from "../lib/platforms/platform-config.js";
 import { buildPostSubmission, SCHEDULE_TIME } from "../lib/wizard/post-submission.js";
 import { WIZARD_STEPS, getInitialPostForm, shouldGenerateOnPreviewAdvance } from "../lib/wizard/wizard-flow.js";
+import { getImageModelOptions, getLLMModelOptions } from "../lib/ai/model-config.js";
+import { getPreferredModel, readModelPreferences, writeModelPreferences } from "../lib/wizard/model-preferences.js";
 import { PlatformPreview } from "./PlatformPreview.js";
 
 export function CreatePostWizard() {
@@ -38,6 +40,15 @@ export function CreatePostWizard() {
   const [publishStatus, setPublishStatus] = useState("idle");
   const [publishResult, setPublishResult] = useState(null);
 
+  useEffect(() => {
+    const preferences = readModelPreferences();
+    setForm((currentForm) => ({
+      ...currentForm,
+      llmModel: getPreferredModel("llm", currentForm.llmProvider, preferences),
+      imageModel: getPreferredModel("image", currentForm.imageProvider, preferences),
+    }));
+  }, []);
+
   const targets = useMemo(() => generatedTargets ?? createDraftTargets(form), [form, generatedTargets]);
   const previews = useMemo(() => buildPlatformPreviews({ imageUrl, targets }), [imageUrl, targets]);
   const updateForm = (nextForm) => {
@@ -45,6 +56,21 @@ export function CreatePostWizard() {
     setGeneratedTargets(null);
     setGenerationStatus("idle");
     setImageUrl(null);
+  };
+  const persistModelPreference = (kind, provider, model) => {
+    const preferences = readModelPreferences();
+    writeModelPreferences({ ...preferences, [kind]: { ...preferences[kind], [provider]: model } });
+  };
+  const updateProvider = (kind, provider) => {
+    const preferences = readModelPreferences();
+    const model = getPreferredModel(kind, provider, preferences);
+    persistModelPreference(kind, provider, model);
+    updateForm({ ...form, [`${kind}Provider`]: provider, [`${kind}Model`]: model });
+  };
+  const updateModel = (kind, model) => {
+    const provider = form[`${kind}Provider`];
+    persistModelPreference(kind, provider, model);
+    updateForm({ ...form, [`${kind}Model`]: model });
   };
 
   return (
@@ -72,8 +98,8 @@ export function CreatePostWizard() {
 
           <Stepper.Step label="AI 供應商">
             <SimpleGrid cols={{ base: 1, md: 2 }} spacing="lg" mt="md">
-              <Stack><Text fw={600}>LLM 供應商</Text><SegmentedControl value={form.llmProvider} onChange={(llmProvider) => updateForm({ ...form, llmProvider })} data={[{ label: "Gemini", value: "google" }, { label: "OpenAI", value: "openai" }]} /></Stack>
-              <Stack><Text fw={600}>圖片供應商</Text><SegmentedControl value={form.imageProvider} onChange={(imageProvider) => updateForm({ ...form, imageProvider })} data={[{ label: "Google Gemini Image", value: "google" }, { label: "OpenAI GPT Image", value: "openai" }]} /></Stack>
+              <Stack><Text fw={600}>LLM 供應商</Text><SegmentedControl value={form.llmProvider} onChange={(llmProvider) => updateProvider("llm", llmProvider)} data={[{ label: "Gemini", value: "google" }, { label: "OpenAI", value: "openai" }]} /><Select label="LLM Model" value={form.llmModel} onChange={(llmModel) => updateModel("llm", llmModel ?? getLLMModelOptions(form.llmProvider)[0])} data={getLLMModelOptions(form.llmProvider).map((model) => ({ value: model, label: model }))} /></Stack>
+              <Stack><Text fw={600}>圖片供應商</Text><SegmentedControl value={form.imageProvider} onChange={(imageProvider) => updateProvider("image", imageProvider)} data={[{ label: "Google Gemini Image", value: "google" }, { label: "OpenAI GPT Image", value: "openai" }]} /><Select label="Image Model" value={form.imageModel} onChange={(imageModel) => updateModel("image", imageModel ?? getImageModelOptions(form.imageProvider)[0])} data={getImageModelOptions(form.imageProvider).map((model) => ({ value: model, label: model }))} /></Stack>
             </SimpleGrid>
           </Stepper.Step>
 
