@@ -44,27 +44,23 @@ export function createPostRepository(db = createDbClient()) {
       });
     },
     async claimDueScheduledPosts(now) {
-      return db.transaction(async (tx) => {
-        const duePosts = await tx.select().from(posts)
-          .where(and(eq(posts.status, POST_STATUS.SCHEDULED), lte(posts.scheduledFor, now)));
+      return retryBusyTransaction(() => db.transaction(async (tx) => {
+        const duePosts = await tx.update(posts).set({
+          status: POST_STATUS.PUBLISHING,
+          publishingStartedAt: now,
+          updatedAt: now,
+        }).where(and(
+          eq(posts.status, POST_STATUS.SCHEDULED),
+          lte(posts.scheduledFor, now),
+        )).returning();
         const claimedPosts = [];
         for (const duePost of duePosts) {
-          const [claimed] = await tx.update(posts).set({
-            status: POST_STATUS.PUBLISHING,
-            publishingStartedAt: now,
-            updatedAt: now,
-          }).where(and(
-            eq(posts.id, duePost.id),
-            eq(posts.status, POST_STATUS.SCHEDULED),
-            lte(posts.scheduledFor, now),
-          )).returning();
-          if (!claimed) continue;
           await tx.update(postTargets).set({ status: POST_STATUS.PUBLISHING, updatedAt: now })
             .where(eq(postTargets.postId, duePost.id));
           claimedPosts.push(await findPostByOwner(tx, duePost.ownerEmail, duePost.id));
         }
         return claimedPosts;
-      });
+      }));
     },
     async recordPublishResults(ownerEmail, postId, results, now) {
       return db.transaction(async (tx) => {
@@ -87,6 +83,17 @@ export function createPostRepository(db = createDbClient()) {
       });
     },
   };
+}
+
+async function retryBusyTransaction(transaction, attempts = 8) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await transaction();
+    } catch (error) {
+      if (error?.code !== "SQLITE_BUSY" || attempt === attempts - 1) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 10 * (attempt + 1)));
+    }
+  }
 }
 
 async function findPostByOwner(db, ownerEmail, postId) {
