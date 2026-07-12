@@ -5,11 +5,24 @@ import { loadEnvironmentText, validateRuntimeConfig } from "../scripts/runtime-c
 
 test("accepts the complete demo runtime configuration", () => {
   assert.doesNotThrow(() => validateRuntimeConfig({
-    AUTH_MODE: "demo",
-    SETTINGS_ENCRYPTION_KEY: "test-settings-key",
-    TURSO_DATABASE_URL: "libsql://example.turso.io",
-    TURSO_AUTH_TOKEN: "test-token",
+      AUTH_MODE: "demo",
+      SETTINGS_ENCRYPTION_KEY: "test-settings-key",
+      TURSO_DATABASE_URL: "libsql://example.turso.io",
+      TURSO_AUTH_TOKEN: "test-token",
+      BLOB_READ_WRITE_TOKEN: "test-blob-token",
   }));
+});
+
+test("rejects a configuration missing the Blob upload token", () => {
+  assert.throws(
+    () => validateRuntimeConfig({
+      AUTH_MODE: "demo",
+      SETTINGS_ENCRYPTION_KEY: "test-settings-key",
+      TURSO_DATABASE_URL: "libsql://example.turso.io",
+      TURSO_AUTH_TOKEN: "test-token",
+    }),
+    /BLOB_READ_WRITE_TOKEN/,
+  );
 });
 
 test("rejects a demo configuration missing the settings encryption key", () => {
@@ -30,6 +43,7 @@ test("rejects production configuration without an explicit Google allowlist", ()
       SETTINGS_ENCRYPTION_KEY: "test-settings-key",
       TURSO_DATABASE_URL: "libsql://example.turso.io",
       TURSO_AUTH_TOKEN: "test-token",
+      BLOB_READ_WRITE_TOKEN: "test-blob-token",
     }),
     /ALLOWED_GOOGLE_EMAILS/,
   );
@@ -42,6 +56,7 @@ test("rejects a production allowlist that contains no email address", () => {
       SETTINGS_ENCRYPTION_KEY: "test-settings-key",
       TURSO_DATABASE_URL: "libsql://example.turso.io",
       TURSO_AUTH_TOKEN: "test-token",
+      BLOB_READ_WRITE_TOKEN: "test-blob-token",
       ALLOWED_GOOGLE_EMAILS: ", ,",
     }),
     /ALLOWED_GOOGLE_EMAILS/,
@@ -55,6 +70,7 @@ test("rejects an invalid Turso database URL", () => {
       SETTINGS_ENCRYPTION_KEY: "test-settings-key",
       TURSO_DATABASE_URL: "not-a-url",
       TURSO_AUTH_TOKEN: "test-token",
+      BLOB_READ_WRITE_TOKEN: "test-blob-token",
     }),
     /TURSO_DATABASE_URL/,
   );

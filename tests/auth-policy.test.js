@@ -85,6 +85,15 @@ test("unauthenticated route guards produce a 401 response", async () => {
   assert.deepEqual(response, { body: { error: "Authentication is required." }, status: 401 });
 });
 
+test("unexpected route failures do not return owner emails or settings tokens", () => {
+  const response = routeErrorResponse(
+    new Error("owner@example.com failed with owner-token"),
+    { json: (body, init) => ({ body, ...init }) },
+  );
+
+  assert.deepEqual(response, { body: { error: "Request failed." }, status: 500 });
+});
+
 test("middleware excludes NextAuth and cron endpoints", async () => {
   const middlewareSource = await readFile(new URL("../src/middleware.js", import.meta.url), "utf8");
 

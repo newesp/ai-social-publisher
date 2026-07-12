@@ -12,6 +12,12 @@ test("wizard submits posts through the persisted posts API and offers only the f
   assert.equal(source.includes("buildPostSubmission"), true);
 });
 
+test("wizard surfaces an image-generation error returned alongside generated text", async () => {
+  const source = await readFile(new URL("../src/components/CreatePostWizard.js", import.meta.url), "utf8");
+
+  assert.equal(source.includes("data.imageError"), true);
+});
+
 test("history loads API rows and exposes cancellation only for scheduled posts", async () => {
   const source = await readFile(new URL("../src/app/history/page.js", import.meta.url), "utf8");
 
