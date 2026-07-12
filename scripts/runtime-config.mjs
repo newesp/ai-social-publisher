@@ -6,7 +6,7 @@ export function validateRuntimeConfig(env) {
     throw new Error("AUTH_MODE must be set to demo or production.");
   }
 
-  for (const key of ["SETTINGS_ENCRYPTION_KEY", "TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN"]) {
+  for (const key of ["SETTINGS_ENCRYPTION_KEY", "TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN", "BLOB_READ_WRITE_TOKEN"]) {
     if (!String(env[key] ?? "").trim()) {
       throw new Error(`${key} must be configured.`);
     }

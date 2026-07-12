@@ -121,7 +121,7 @@ async function regenerateContent({ form, setGeneratedTargets, setImageUrl, setGe
     const response = await fetch("/api/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error ?? "內容產生失敗。");
-    setGeneratedTargets(data.targets); setImageUrl(data.imageUrl ?? null); setGenerationStatus("success");
+    setGeneratedTargets(data.targets); setImageUrl(data.imageUrl ?? null); setGenerationError(data.imageError ?? ""); setGenerationStatus("success");
   } catch (error) { setGenerationError(error.message); setGenerationStatus("error"); }
 }
 
