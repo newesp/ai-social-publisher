@@ -1,12 +1,14 @@
 import { cancelScheduledPost, createPost, listPosts, publishPost } from "./post-service.js";
 
-export function createPublishingConnectionResolver({ connections, line }) {
+export function createPublishingConnectionResolver({ connections, line, meta }) {
   return async function getConnection(ownerEmail, connectionId) {
     const connection = await connections.getById(ownerEmail, connectionId);
     if (!connection) return null;
     const usable = connection.platform === "line"
       ? await line.ensureUsable(ownerEmail, connectionId)
-      : connection;
+      : connection.platform === "meta"
+        ? await meta.ensureUsable(ownerEmail, connectionId)
+        : connection;
     return {
       ...usable,
       markNeedsReconnect: () => connections.markNeedsReconnect(ownerEmail, connectionId),

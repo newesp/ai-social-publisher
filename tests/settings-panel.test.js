@@ -35,6 +35,8 @@ test("settings renders actionable loading, disconnected, active, reconnect, and 
     assert.equal(source.includes(expected), true, `missing ${expected}`);
   }
   assert.equal(source.includes("setLineCredentials({ channelId: \"\", channelSecret: \"\" })"), true);
+  assert.equal(source.includes("response.status === 409"), true);
+  assert.equal(source.includes("Cancel or wait for pending posts"), true);
 });
 
 test("successful Meta Page selection removes the opaque callback query before refreshing availability", async () => {

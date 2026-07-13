@@ -36,6 +36,22 @@ export function createPlatformConnectionStore({ repository, encryptionKey }) {
       });
       return record ? toConnection(record, encryptionKey) : null;
     },
+    async acquireRenewalLease(ownerEmail, connectionId, leaseId, leaseExpiresAt, acquiredAt) {
+      const record = await repository.acquireRenewalLease(
+        requireId(connectionId), normalizeOwner(ownerEmail), requireId(leaseId), toDate(leaseExpiresAt), toDate(acquiredAt),
+      );
+      return record ? toConnection(record, encryptionKey) : null;
+    },
+    async completeRenewalLease(ownerEmail, connectionId, leaseId, credentials) {
+      const record = await repository.completeRenewalLease(requireId(connectionId), normalizeOwner(ownerEmail), requireId(leaseId), {
+        encryptedCredentials: encryptJson(requireCredentials(credentials), encryptionKey),
+        credentialExpiresAt: toDateOrNull(credentials?.expiresAt ?? credentials?.credentialExpiresAt), updatedAt: new Date(),
+      });
+      return record ? toConnection(record, encryptionKey) : null;
+    },
+    async releaseRenewalLease(ownerEmail, connectionId, leaseId) {
+      return Boolean(await repository.releaseRenewalLease(requireId(connectionId), normalizeOwner(ownerEmail), requireId(leaseId)));
+    },
     async markNeedsReconnect(ownerEmail, connectionId) {
       const record = await repository.markConnectionNeedsReconnect(requireId(connectionId), normalizeOwner(ownerEmail), new Date());
       return record ? toConnection(record, encryptionKey) : null;
@@ -47,6 +63,13 @@ export function createPlatformConnectionStore({ repository, encryptionKey }) {
     async archiveDefault(ownerEmail, platform) {
       const record = await repository.archiveActiveDefaultConnection(normalizeOwner(ownerEmail), requirePlatform(platform), new Date());
       return record ? toAvailability(record) : null;
+    },
+    async disconnectDefault(ownerEmail, platform) {
+      const result = await repository.disconnectActiveConnection(
+        normalizeOwner(ownerEmail), requirePlatform(platform), encryptJson({}, encryptionKey), new Date(),
+      );
+      if (result.status !== "disconnected") return result;
+      return { status: "disconnected", credentials: decryptJson(result.connection.encryptedCredentials, encryptionKey) };
     },
     async listAvailability(ownerEmail) {
       return (await repository.listConnectionAvailability(normalizeOwner(ownerEmail))).map(toAvailability);

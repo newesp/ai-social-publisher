@@ -1,11 +1,17 @@
+import crypto from "node:crypto";
+
 const TOKEN_URL = "https://api.line.me/v2/oauth/accessToken";
 const BOT_INFO_URL = "https://api.line.me/v2/bot/info";
 const ROTATE_WITHIN_MS = 72 * 60 * 60 * 1000;
 const CONNECTION_ERROR = "LINE connection could not be completed.";
 const RECONNECT_ERROR = "LINE connection needs to be reconnected.";
 const RENEWAL_WARNING = "LINE token renewal failed; the current token is still being used.";
+const RENEWAL_IN_PROGRESS_WARNING = "LINE token renewal is in progress; the current token is still being used.";
+const RENEWAL_IN_PROGRESS_ERROR = "LINE token renewal is in progress. Please retry shortly.";
+const LEASE_MS = 2 * 60 * 1000;
+const sharedRenewals = new Map();
 
-export function createLineChannelService({ fetchImpl = fetch, connections, now = () => new Date() }) {
+export function createLineChannelService({ fetchImpl = fetch, connections, now = () => new Date(), renewalFlights = sharedRenewals }) {
   return {
     async connect(ownerEmail, input) {
       const owner = normalizeOwner(ownerEmail);
@@ -22,27 +28,46 @@ export function createLineChannelService({ fetchImpl = fetch, connections, now =
 
     async ensureUsable(ownerEmail, connectionId) {
       const owner = normalizeOwner(ownerEmail);
-      const connection = await connections.getById(owner, requireConnectionId(connectionId));
-      requireUsableLineConnection(connection);
-      const time = currentTime(now);
-      if (hasMoreThanRotationWindow(connection.expiresAt, time)) return connection;
-
-      try {
-        const issued = await issueAndVerify(fetchImpl, requireStoredCredentials(connection.credentials), time);
-        const updated = await connections.replaceCredentialsIfUnchanged(owner, connection.id, connection.updatedAt, issued.credentials);
-        if (updated) return updated;
-
-        const winner = await connections.getById(owner, connection.id);
-        requireUsableLineConnection(winner);
-        if (isValidAt(winner.expiresAt, time)) return winner;
-      } catch {
-        if (isValidAt(connection.expiresAt, time)) return { ...connection, warning: RENEWAL_WARNING };
-      }
-
-      await connections.markNeedsReconnect(owner, connection.id);
-      throw routeError(RECONNECT_ERROR, 409);
+      const id = requireConnectionId(connectionId);
+      const key = `${owner}:${id}`;
+      if (renewalFlights.has(key)) return renewalFlights.get(key);
+      const operation = ensureUsableWithLease({ owner, id, connections, fetchImpl, now });
+      renewalFlights.set(key, operation);
+      try { return await operation; } finally { renewalFlights.delete(key); }
     },
   };
+}
+
+async function ensureUsableWithLease({ owner, id, connections, fetchImpl, now }) {
+  const connection = await connections.getById(owner, id);
+  requireUsableLineConnection(connection);
+  const time = currentTime(now);
+  if (hasMoreThanRotationWindow(connection.expiresAt, time)) return connection;
+
+  const leaseId = crypto.randomUUID();
+  const acquired = await connections.acquireRenewalLease(owner, connection.id, leaseId, new Date(time.getTime() + LEASE_MS), time);
+  if (!acquired) {
+    const current = await connections.getById(owner, connection.id);
+    requireUsableLineConnection(current);
+    if (isValidAt(current.expiresAt, time)) return { ...current, warning: RENEWAL_IN_PROGRESS_WARNING };
+    throw routeError(RENEWAL_IN_PROGRESS_ERROR, 503);
+  }
+
+  try {
+    const issued = await issueAndVerify(fetchImpl, requireStoredCredentials(connection.credentials), time);
+    const updated = await connections.completeRenewalLease(owner, connection.id, leaseId, issued.credentials);
+    if (updated) return updated;
+
+    const winner = await connections.getById(owner, connection.id);
+    requireUsableLineConnection(winner);
+    if (isValidAt(winner.expiresAt, time)) return winner;
+  } catch {
+    try { await connections.releaseRenewalLease(owner, connection.id, leaseId); } catch { /* The short lease expires independently. */ }
+    if (isValidAt(connection.expiresAt, time)) return { ...connection, warning: RENEWAL_WARNING };
+  }
+
+  await connections.markNeedsReconnect(owner, connection.id);
+  throw routeError(RECONNECT_ERROR, 409);
 }
 
 async function issueAndVerify(fetchImpl, { channelId, channelSecret }, now) {

@@ -1,10 +1,19 @@
+import crypto from "node:crypto";
+
 const GRAPH_API_URL = "https://graph.facebook.com/v25.0";
 const AUTHORIZATION_URL = "https://www.facebook.com/v25.0/dialog/oauth";
 const SCOPES = ["pages_show_list", "pages_read_engagement", "pages_manage_posts"];
 const TRANSACTION_ERROR = "OAuth transaction is expired or already used.";
 const META_ERROR = "Meta connection could not be completed.";
+const META_RECONNECT_ERROR = "Meta connection needs to be reconnected.";
+const META_VALIDATION_WARNING = "Meta credential validation is temporarily unavailable; the current Page token is still being used.";
+const META_RENEWAL_WARNING = "Meta credential refresh failed; the validated Page token is still being used.";
+const META_RENEWAL_IN_PROGRESS = "Meta credential refresh is in progress. Please retry shortly.";
+const RENEW_WITHIN_MS = 7 * 24 * 60 * 60 * 1000;
+const LEASE_MS = 2 * 60 * 1000;
+const sharedRenewals = new Map();
 
-export function createMetaOAuthService({ env = process.env, fetchImpl = fetch, transactions, connections, now = () => new Date() }) {
+export function createMetaOAuthService({ env = process.env, fetchImpl = fetch, transactions, connections, now = () => new Date(), renewalFlights = sharedRenewals }) {
   return {
     async start(ownerEmail, returnPath) {
       const owner = normalizeOwner(ownerEmail);
@@ -73,7 +82,93 @@ export function createMetaOAuthService({ env = process.env, fetchImpl = fetch, t
       });
       return toAvailability(connection);
     },
+
+    async ensureUsable(ownerEmail, connectionId) {
+      const owner = normalizeOwner(ownerEmail);
+      const id = requireValue(connectionId, "The Meta connection is not available.");
+      const key = `${owner}:${id}`;
+      if (renewalFlights.has(key)) return renewalFlights.get(key);
+      const operation = ensureMetaUsable({ owner, id, env, fetchImpl, connections, now });
+      renewalFlights.set(key, operation);
+      try { return await operation; } finally { renewalFlights.delete(key); }
+    },
   };
+}
+
+async function ensureMetaUsable({ owner, id, env, fetchImpl, connections, now }) {
+  const connection = await connections.getById(owner, id);
+  requireUsableMetaConnection(connection);
+  const time = currentTime(now);
+  const validation = await validatePage(fetchImpl, connection.credentials);
+  if (validation === "transient") return { ...connection, warning: META_VALIDATION_WARNING };
+  const pageValid = validation === "valid";
+  const userExpiry = parseExpiresAt(connection.credentials?.userTokenExpiresAt ?? connection.expiresAt);
+  const renewalAppropriate = !pageValid || (userExpiry && userExpiry.getTime() <= time.getTime() + RENEW_WITHIN_MS);
+  if (!renewalAppropriate) return connection;
+  if (!userExpiry || userExpiry.getTime() <= time.getTime()) {
+    if (pageValid) return { ...connection, warning: META_RENEWAL_WARNING };
+    await connections.markNeedsReconnect(owner, id);
+    throw routeError(META_RECONNECT_ERROR, 409);
+  }
+
+  const leaseId = crypto.randomUUID();
+  const acquired = await connections.acquireRenewalLease(owner, id, leaseId, new Date(time.getTime() + LEASE_MS), time);
+  if (!acquired) {
+    const winner = await connections.getById(owner, id);
+    requireUsableMetaConnection(winner);
+    if (pageValid) return { ...winner, warning: META_RENEWAL_WARNING };
+    throw routeError(META_RENEWAL_IN_PROGRESS, 503);
+  }
+
+  try {
+    const config = requireConfig(env);
+    const retainedToken = requireToken({ access_token: connection.credentials?.longLivedUserAccessToken }, "access_token");
+    const renewedUser = await exchangeLongLivedToken(fetchImpl, config, retainedToken);
+    const pages = await listPages(fetchImpl, renewedUser);
+    const page = pages.find((candidate) => candidate.id === String(connection.credentials?.pageId ?? ""));
+    if (!page) throw metaError();
+    const expiresAt = expiresAtFrom(renewedUser.expires_in, time);
+    if (!expiresAt) throw metaError();
+    const updated = await connections.completeRenewalLease(owner, id, leaseId, {
+      ...connection.credentials,
+      pageId: page.id, pageName: page.name, pageAccessToken: page.accessToken,
+      longLivedUserAccessToken: renewedUser.access_token, userTokenExpiresAt: expiresAt.toISOString(), expiresAt: expiresAt.toISOString(),
+    });
+    if (updated) return updated;
+    const winner = await connections.getById(owner, id);
+    requireUsableMetaConnection(winner);
+    return winner;
+  } catch {
+    try { await connections.releaseRenewalLease(owner, id, leaseId); } catch { /* The bounded lease expires independently. */ }
+    if (pageValid) return { ...connection, warning: META_RENEWAL_WARNING };
+    await connections.markNeedsReconnect(owner, id);
+    throw routeError(META_RECONNECT_ERROR, 409);
+  }
+}
+
+async function validatePage(fetchImpl, credentials) {
+  const pageId = String(credentials?.pageId ?? "").trim();
+  const pageAccessToken = String(credentials?.pageAccessToken ?? "").trim();
+  if (!pageId || !pageAccessToken) return "rejected";
+  let response;
+  try {
+    const url = new URL(`${GRAPH_API_URL}/${encodeURIComponent(pageId)}`);
+    url.searchParams.set("fields", "id");
+    response = await fetchImpl(url.toString(), { headers: { Authorization: `Bearer ${pageAccessToken}` } });
+  } catch {
+    return "transient";
+  }
+  let body = {};
+  try { body = await response.json(); } catch { /* Provider bodies are never surfaced. */ }
+  if (response?.ok) return String(body?.id ?? "") === pageId ? "valid" : "rejected";
+  if (response?.status === 401 || response?.status === 403 || Number(body?.error?.code) === 190) return "rejected";
+  return "transient";
+}
+
+function requireUsableMetaConnection(connection) {
+  if (!connection || connection.platform !== "meta" || !["active", "archived"].includes(connection.state)) {
+    throw routeError("The Meta connection is not available.", 404);
+  }
 }
 
 async function exchangeCode(fetchImpl, config, code) {

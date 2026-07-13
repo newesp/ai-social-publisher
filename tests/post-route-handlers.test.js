@@ -37,6 +37,23 @@ test("publishing connection resolution runs LINE ensureUsable before returning c
   ]);
 });
 
+test("publishing connection resolution runs Meta ensureUsable through the same immediate and scheduled resolver", async () => {
+  const calls = [];
+  const resolver = createPublishingConnectionResolver({
+    connections: {
+      async getById(ownerEmail, id) { calls.push(["get", ownerEmail, id]); return { id, ownerEmail, platform: "meta", state: "archived" }; },
+      async markNeedsReconnect() {},
+    },
+    line: { async ensureUsable() { throw new Error("LINE must not run"); } },
+    meta: { async ensureUsable(ownerEmail, id) { calls.push(["ensure", ownerEmail, id]); return { id, ownerEmail, platform: "meta", state: "archived", credentials: { pageAccessToken: "validated" } }; } },
+  });
+
+  const connection = await resolver("owner@example.com", "meta-1");
+
+  assert.equal(connection.credentials.pageAccessToken, "validated");
+  assert.deepEqual(calls, [["get", "owner@example.com", "meta-1"], ["ensure", "owner@example.com", "meta-1"]]);
+});
+
 function createMemoryRepository() {
   const posts = [];
   const targets = [];

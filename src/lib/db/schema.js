@@ -1,4 +1,5 @@
-import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { sql } from "drizzle-orm";
+import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const posts = sqliteTable("posts", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -26,10 +27,15 @@ export const platformConnections = sqliteTable("platform_connections", {
   state: text("state").notNull(),
   encryptedCredentials: text("encrypted_credentials").notNull(),
   credentialExpiresAt: integer("credential_expires_at", { mode: "timestamp" }),
+  renewalLeaseId: text("renewal_lease_id"),
+  renewalLeaseExpiresAt: integer("renewal_lease_expires_at", { mode: "timestamp" }),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
 }, (table) => [
   index("platform_connections_owner_platform_state_idx").on(table.ownerEmail, table.platform, table.state),
+  uniqueIndex("platform_connections_one_active_owner_platform_idx")
+    .on(table.ownerEmail, table.platform)
+    .where(sql`${table.state} = 'active'`),
 ]);
 
 export const oauthTransactions = sqliteTable("oauth_transactions", {

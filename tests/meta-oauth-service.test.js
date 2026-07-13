@@ -121,6 +121,93 @@ test("pending Page choices stay owner-scoped and omit credentials", async () => 
   await assert.rejects(service.getPendingPages("other@example.com", pending.id), /expired or already used/i);
 });
 
+test("ensureUsable validates the bound Page with Graph v25 and an Authorization header", async () => {
+  const connections = createLifecycleConnections([metaConnection()]);
+  const calls = [];
+  const service = createMetaOAuthService({ env, transactions: createTransactions(), connections, now: () => now, fetchImpl: async (url, options) => {
+    calls.push([String(url), options]);
+    return jsonResponse({ id: "page-1" });
+  } });
+
+  const usable = await service.ensureUsable("owner@example.com", "meta-1");
+
+  assert.equal(usable.credentials.pageAccessToken, "page-token");
+  assert.equal(calls[0][0], "https://graph.facebook.com/v25.0/page-1?fields=id");
+  assert.equal(calls[0][1].headers.Authorization, "Bearer page-token");
+  assert.equal(calls.length, 1);
+});
+
+test("ensureUsable recovers a rejected Page token through retained User authorization", async () => {
+  const connections = createLifecycleConnections([metaConnection()]);
+  const service = createMetaOAuthService({ env, transactions: createTransactions(), connections, now: () => now, fetchImpl: sequenceFetch([
+    { error: { code: 190, message: "private page rejection page-token" }, __status: 401 },
+    { access_token: "renewed-user-token", expires_in: 5_184_000 },
+    { data: [{ id: "page-1", name: "Owner Page", access_token: "renewed-page-token" }] },
+  ]) });
+
+  const usable = await service.ensureUsable("owner@example.com", "meta-1");
+
+  assert.equal(usable.credentials.pageAccessToken, "renewed-page-token");
+  assert.equal(usable.state, "archived");
+  assert.equal(connections.completed, 1);
+  assert.equal(JSON.stringify(usable).includes("private page rejection"), false);
+});
+
+test("ensureUsable marks only an unrenewable rejected Page connection for reconnect", async () => {
+  const connections = createLifecycleConnections([metaConnection({ ownerEmail: "owner@example.com", expiresAt: new Date("2026-07-12T00:00:00.000Z"), credentials: { ...metaConnection().credentials, userTokenExpiresAt: "2026-07-12T00:00:00.000Z" } })]);
+  const service = createMetaOAuthService({ env, transactions: createTransactions(), connections, now: () => now, fetchImpl: async () => jsonResponse({ error: { code: 190 } }, false, 401) });
+
+  await assert.rejects(service.ensureUsable("owner@example.com", "meta-1"), /reconnect/i);
+
+  assert.deepEqual(connections.marked, [["owner@example.com", "meta-1"]]);
+  await assert.rejects(service.ensureUsable("other@example.com", "meta-1"), /not available/i);
+});
+
+test("ensureUsable keeps a valid Page token on transient validation failure without marking reconnect", async () => {
+  const connections = createLifecycleConnections([metaConnection()]);
+  const service = createMetaOAuthService({ env, transactions: createTransactions(), connections, now: () => now, fetchImpl: async () => new Response("private outage", { status: 503 }) });
+
+  const usable = await service.ensureUsable("owner@example.com", "meta-1");
+
+  assert.equal(usable.credentials.pageAccessToken, "page-token");
+  assert.match(usable.warning, /validation/i);
+  assert.deepEqual(connections.marked, []);
+  assert.equal(JSON.stringify(usable).includes("private outage"), false);
+});
+
+test("ensureUsable treats a mismatched Page ID as credential rejection", async () => {
+  const base = metaConnection();
+  const connections = createLifecycleConnections([{ ...base, expiresAt: new Date("2026-07-12T00:00:00.000Z"), credentials: { ...base.credentials, userTokenExpiresAt: "2026-07-12T00:00:00.000Z" } }]);
+  const service = createMetaOAuthService({ env, transactions: createTransactions(), connections, now: () => now, fetchImpl: async () => jsonResponse({ id: "other-page" }) });
+
+  await assert.rejects(service.ensureUsable("owner@example.com", "meta-1"), /reconnect/i);
+  assert.deepEqual(connections.marked, [["owner@example.com", "meta-1"]]);
+});
+
+test("concurrent Meta refresh callers share one validation, exchange, lookup, and credential update", async () => {
+  const base = metaConnection();
+  const connections = createLifecycleConnections([{ ...base, expiresAt: new Date("2026-07-14T00:00:00.000Z"), credentials: { ...base.credentials, userTokenExpiresAt: "2026-07-14T00:00:00.000Z" } }]);
+  let calls = 0;
+  const fetchImpl = sequenceFetch([
+    { id: "page-1" },
+    { access_token: "renewed-user-token", expires_in: 5_184_000 },
+    { data: [{ id: "page-1", name: "Owner Page", access_token: "renewed-page-token" }] },
+  ]);
+  const options = { env, transactions: createTransactions(), connections, now: () => now, fetchImpl: async (...args) => { calls += 1; return fetchImpl(...args); } };
+  const firstService = createMetaOAuthService(options);
+  const secondService = createMetaOAuthService(options);
+
+  const [first, second] = await Promise.all([
+    firstService.ensureUsable("owner@example.com", "meta-1"),
+    secondService.ensureUsable("owner@example.com", "meta-1"),
+  ]);
+
+  assert.equal(calls, 3);
+  assert.equal(connections.completed, 1);
+  assert.equal(first.credentials.pageAccessToken, "renewed-page-token");
+  assert.equal(second.credentials.pageAccessToken, "renewed-page-token");
+});
+
 function createTransactions() {
   const records = new Map();
   const created = [];
@@ -157,8 +244,42 @@ function createConnections() {
   };
 }
 
-function sequenceFetch(results) {
-  return async () => jsonResponse(results.shift());
+function metaConnection(overrides = {}) {
+  return {
+    id: "meta-1", ownerEmail: "owner@example.com", platform: "meta", state: "archived", displayName: "Owner Page",
+    expiresAt: new Date("2026-09-11T00:00:00.000Z"), updatedAt: new Date("2026-07-12T00:00:00.000Z"),
+    credentials: { pageId: "page-1", pageName: "Owner Page", pageAccessToken: "page-token", longLivedUserAccessToken: "user-token", userTokenExpiresAt: "2026-09-11T00:00:00.000Z" },
+    ...overrides,
+  };
 }
-function jsonResponse(value, ok = true) { return { ok, async json() { return value; } }; }
+
+function createLifecycleConnections(initial) {
+  const records = new Map(initial.map((record) => [record.id, structuredClone(record)]));
+  const marked = [];
+  let completed = 0;
+  return {
+    marked,
+    get completed() { return completed; },
+    async getById(owner, id) { const record = records.get(id); return record?.ownerEmail === owner ? structuredClone(record) : null; },
+    async acquireRenewalLease(owner, id, leaseId, expiresAt, acquiredAt) {
+      const record = records.get(id);
+      if (record?.ownerEmail !== owner || !["active", "archived"].includes(record.state)) return null;
+      if (record.renewalLeaseId && new Date(record.renewalLeaseExpiresAt) > acquiredAt) return null;
+      record.renewalLeaseId = leaseId; record.renewalLeaseExpiresAt = expiresAt; return structuredClone(record);
+    },
+    async completeRenewalLease(owner, id, leaseId, credentials) {
+      const record = records.get(id);
+      if (record?.ownerEmail !== owner || record.renewalLeaseId !== leaseId) return null;
+      record.credentials = credentials; record.expiresAt = new Date(credentials.userTokenExpiresAt); record.renewalLeaseId = null; record.renewalLeaseExpiresAt = null; completed += 1;
+      return structuredClone(record);
+    },
+    async releaseRenewalLease(owner, id, leaseId) { const record = records.get(id); if (record?.ownerEmail === owner && record.renewalLeaseId === leaseId) record.renewalLeaseId = null; },
+    async markNeedsReconnect(owner, id) { const record = records.get(id); if (record?.ownerEmail !== owner) return null; record.state = "needs_reconnect"; marked.push([owner, id]); return structuredClone(record); },
+  };
+}
+
+function sequenceFetch(results) {
+  return async () => { const result = results.shift(); return jsonResponse(result, result?.__status ? false : true, result?.__status); };
+}
+function jsonResponse(value, ok = true, status = ok ? 200 : 500) { return { ok, status, async json() { return value; } }; }
 async function unexpectedFetch() { throw new Error("fetch should not have been called"); }

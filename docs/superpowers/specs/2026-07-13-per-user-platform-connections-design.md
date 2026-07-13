@@ -6,7 +6,7 @@ Every Google SSO user connects and publishes to their own Meta Page and LINE Off
 
 ## Scope and constraints
 
-- Existing user-scoped encrypted settings remain the credential store for AI settings and selected default connection IDs. A dedicated, encrypted per-user connection record stores each platform credential set so a scheduled post can retain its selected account after the user changes their default.
+- Existing user-scoped encrypted settings remain the credential store for AI settings only. A dedicated, encrypted per-user connection record stores each platform credential set so a scheduled post can retain its selected account after the user changes their default; the single `active` record for an owner/platform is the current default.
 - The service needs one Meta OAuth App (`META_APP_ID`, `META_APP_SECRET`, and a callback URL). These are service integration credentials, not a user's Page credentials.
 - Meta users authorize their own account, choose exactly one Page, and the application stores that Page's ID and access token for that user.
 - A normal LINE Login cannot grant control of a Messaging API Channel. Each user must make a one-time connection by supplying the Channel ID and Channel Secret for their own existing Messaging API Channel. The application, not the user, issues and rotates its Channel Access Token.
@@ -40,16 +40,16 @@ Every Google SSO user connects and publishes to their own Meta Page and LINE Off
 
 Add an encrypted `platform_connections` store, with one record per owner, platform, and connected account:
 
-- non-secret fields: connection ID, owner email, platform, display name, state (`active`, `archived`, `needs_reconnect`), created and updated times
+- non-secret fields: connection ID, owner email, platform, display name, state (`active`, `archived`, `needs_reconnect`, `disconnected`), short renewal lease metadata, and created and updated times
 - encrypted Meta fields: Page ID, Page name, Page Access Token, long-lived User Access Token, User Token expiry, and connection time
 - encrypted LINE fields: Channel ID, Channel Secret, Channel Access Token, Token expiry, and connection time
 
-User settings retain only `metaDefaultConnectionId` and `lineDefaultConnectionId`. Add `platform_connection_id` to `post_targets`, referencing the immutable connection chosen at post creation. `metaPageId` and `metaPageName` are safe to return in connection status. Token values and secret values are never returned. A derived connection-status endpoint returns only platform, state, display name, optional expiry status, and reconnection guidance.
+User settings do not store default connection IDs. The one `active` connection per normalized owner/platform is the default for new targets; a partial unique database index enforces this invariant. Add `platform_connection_id` to `post_targets`, referencing the immutable connection chosen at post creation. Token values and secret values are never returned. A derived connection-status endpoint returns only platform, state, display name, optional expiry status, and reconnection guidance.
 
 The database design is explicit:
 
-- `platform_connections`: random opaque ID; owner email; platform; display name; state; encrypted credentials; credential-expiry time; created and updated timestamps. Index owner/platform/state and enforce that a default connection belongs to the same owner and platform.
-- `post_targets.platform_connection_id`: nullable only while existing rows are made terminal during deployment, then required for all new rows and enforced as a foreign key. Reads and writes must join on both target owner and connection owner; possession of a connection ID alone never authorizes access.
+- `platform_connections`: random opaque ID; owner email; platform; display name; state; encrypted credentials; credential-expiry time; opaque renewal lease ID/expiry; created and updated timestamps. Index owner/platform/state and enforce at most one `active` row per owner/platform with a partial unique index.
+- `post_targets.platform_connection_id`: nullable only for bootstrap rows. Application and create-transaction validation require it for every new target and recheck connection ID, normalized owner, platform, and `active` state before any parent/target insert. The existing foreign key preserves immutable history. A future table-rebuild migration can add `NOT NULL` after bootstrap cleanup; safe in-place SQLite/Turso hardening is outside this wave.
 - `oauth_transactions`: opaque ID; owner email; provider; encrypted pending Meta Page list and tokens; safe return path; expiry; consumed timestamp. Transactions expire after ten minutes and are single use.
 
 Connection-status responses may include the non-secret `expiresAt` timestamp so the UI can say that renewal is automatic. They never include any token, client secret, channel secret, or OAuth pending data. This release keeps normalized, verified Google email as the ownership key to match the existing posts and settings schema; a future migration to Google subject (`sub`) is explicitly out of scope.
@@ -61,13 +61,13 @@ Connection-status responses may include the non-secret `expiresAt` timestamp so 
 3. The callback handles provider cancellation and errors with a settings-page explanation. On success it validates and consumes state, exchanges the authorization code for a User Token, exchanges it for a long-lived User Token, and retrieves manageable Pages.
 4. The callback stores the pending Page list and tokens only in the encrypted, ten-minute `oauth_transactions` record, then routes the user to a safe in-app Page selection screen.
 5. The selection endpoint confirms that the Page belongs to the pending list, creates a new encrypted connection record, and makes it the current user's default Meta connection. A previous default becomes archived rather than being overwritten.
-6. Before publish and during a background renewal pass, the service validates credentials. It exchanges retained User authorization only while Meta permits it; a Page Token may also be invalidated by revoked access or changed permissions. If the token cannot be renewed or Meta rejects it, the connection becomes `needs_reconnect` and the user receives a clear reconnect action rather than a false promise of silent recovery.
+6. The common immediate/scheduler/cron resolver validates the bound Page token through Graph `v25.0` before publish and confirms the returned Page ID. When retained User authorization is still valid and refresh is appropriate, it uses the server-side exchange and `/me/accounts` lookup best-effort behind the same renewal lease. A transient validation or refresh failure may keep using a currently valid Page token with a generic warning; a rejected Page token that cannot be recovered makes only that owner's connection `needs_reconnect`. This is pre-publish/background validation, not a guarantee of permanent Meta renewal.
 
 ### LINE token lifecycle
 
 1. The authenticated user submits their Channel ID and Secret only over the connection endpoint.
 2. The server sends `application/x-www-form-urlencoded` credentials to `POST https://api.line.me/v2/oauth/accessToken` with `grant_type=client_credentials`, `client_id`, and `client_secret`. It records the returned short-lived Token and `expires_in` (30 days), then calls `GET /v2/bot/info` to confirm the Official Account identity before creating the encrypted connection record and making it the user's default.
-3. Before publish and in a scheduled renewal pass, the service reissues a Token when it has 72 hours or less remaining. Rotation is compare-and-swap/transaction protected: a concurrent cron or publish worker reuses the winning refreshed record rather than issuing duplicate Tokens.
+3. Before publish and in a scheduled renewal pass, the service reissues a Token when it has 72 hours or less remaining. It acquires an owner-scoped, expiring database lease before any provider request. Same-process callers share one in-flight promise; cross-process losers never issue a duplicate Token and either use a still-valid Token with a safe warning or fail retryably when it is expired.
 4. If renewal fails while the existing Token remains valid, publishing may use that still-valid Token and report a recoverable renewal warning. If the Token is expired or LINE rejects a send, the connection becomes `needs_reconnect`; the target fails safely until the user reconnects that account.
 
 ### Publishing and scheduling
@@ -75,7 +75,7 @@ Connection-status responses may include the non-secret `expiresAt` timestamp so 
 - Create-post validation accepts only platforms with an active default connection for the caller. Server-side validation prevents forged API requests from targeting disconnected platforms.
 - At creation, each selected target stores the current connection ID. Immediate publishing and scheduled publishing load credentials by that immutable target connection ID, not by the user's current default.
 - Changing a Page or LINE Channel affects only posts created after the change. An archived connection remains encrypted and eligible for renewal until every target that references it reaches a terminal status or is cancelled.
-- Target connection binding and creation occur in the same database transaction. The publish path refuses a stale or disconnected client request even if the browser still showed the checkbox.
+- Target connection revalidation and creation occur in the same database transaction. The publish path refuses a stale or disconnected client request even if the browser still showed the checkbox, while a target committed against an active connection remains bound and publishable if a later Change account archives it.
 - A renewal failure is represented as a safe, generic publish failure and never exposes credentials or provider response bodies.
 
 ## Security and error handling

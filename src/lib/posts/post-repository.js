@@ -1,19 +1,29 @@
 import { and, desc, eq, inArray, lte } from "drizzle-orm";
 
 import { createDbClient } from "../db/index.js";
-import { postTargets, posts } from "../db/schema.js";
+import { platformConnections, postTargets, posts } from "../db/schema.js";
 import { POST_STATUS, resolvePostStatus } from "./post-status.js";
 
 export function createPostRepository(db = createDbClient()) {
   return {
     async createPostWithTargets({ post, targetRows }) {
-      return db.transaction(async (tx) => {
+      return retryBusyTransaction(() => db.transaction(async (tx) => {
+        for (const target of targetRows) {
+          if (!target.platformConnectionId) throw reconnectError();
+          const [connection] = await tx.select({ id: platformConnections.id }).from(platformConnections).where(and(
+            eq(platformConnections.id, target.platformConnectionId),
+            eq(platformConnections.ownerEmail, post.ownerEmail),
+            eq(platformConnections.platform, target.platform),
+            eq(platformConnections.state, "active"),
+          )).limit(1);
+          if (!connection) throw reconnectError();
+        }
         const [createdPost] = await tx.insert(posts).values(post).returning();
         const createdTargets = targetRows.length
           ? await tx.insert(postTargets).values(targetRows.map((target) => ({ ...target, postId: createdPost.id }))).returning()
           : [];
         return { ...createdPost, targets: createdTargets };
-      });
+      }));
     },
     async listPostsByOwner(ownerEmail) {
       const postRows = await db.select().from(posts).where(eq(posts.ownerEmail, ownerEmail)).orderBy(desc(posts.createdAt));
@@ -83,6 +93,12 @@ export function createPostRepository(db = createDbClient()) {
       });
     },
   };
+}
+
+function reconnectError() {
+  const error = new Error("The selected platform connection needs to be reconnected.");
+  error.status = 409;
+  return error;
 }
 
 async function retryBusyTransaction(transaction, attempts = 8) {

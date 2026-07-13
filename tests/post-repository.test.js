@@ -8,8 +8,9 @@ import { pathToFileURL } from "node:url";
 import { createClient } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
 
-import { postTargets, posts } from "../src/lib/db/schema.js";
+import { platformConnections, postTargets, posts } from "../src/lib/db/schema.js";
 import { createPostRepository } from "../src/lib/posts/post-repository.js";
+import { createPlatformConnectionsRepository } from "../src/lib/platform-connections/platform-connections-repository.js";
 
 const NOW = new Date("2026-07-11T01:05:00.000Z");
 
@@ -48,7 +49,10 @@ function createTransactionOnlyDb() {
       return {
         from(table) {
           return {
-            where() { return query(table === posts ? [post] : targets); },
+            where() {
+              if (table === platformConnections) return { limit: async () => [{ id: "meta-connection" }] };
+              return query(table === posts ? [post] : targets);
+            },
           };
         },
       };
@@ -72,7 +76,7 @@ test("post repository commits each parent-and-target state transition in one tra
 
   await repository.createPostWithTargets({
     post: { ownerEmail: "owner@example.com", status: "draft", createdAt: now, updatedAt: now },
-    targetRows: [{ platform: "meta", status: "draft", createdAt: now, updatedAt: now }],
+    targetRows: [{ platform: "meta", platformConnectionId: "meta-connection", status: "draft", createdAt: now, updatedAt: now }],
   });
   await repository.cancelScheduledPost("owner@example.com", 1, now);
   await repository.claimPostForPublish("owner@example.com", 1, now);
@@ -114,6 +118,47 @@ test("competing claimDueScheduledPosts calls cannot return the same due row", as
   });
 });
 
+test("createPostWithTargets revalidates stale bindings in its transaction and rolls back the parent", async () => {
+  await withDatabase(async ({ db }) => {
+    await db.insert(platformConnections).values(connectionRecord("meta-stale", "owner@example.com", "meta", "archived"));
+    const repository = createPostRepository(db);
+
+    await assert.rejects(repository.createPostWithTargets({
+      post: postValues("owner@example.com", "stale"),
+      targetRows: [targetValues("meta", "meta-stale")],
+    }), { status: 409, message: "The selected platform connection needs to be reconnected." });
+
+    assert.equal((await db.select().from(posts)).length, 0);
+    assert.equal((await db.select().from(postTargets)).length, 0);
+  });
+});
+
+test("concurrent post binding and disconnect serialize to exactly one safe outcome", async () => {
+  await withDatabase(async ({ db, createRepository, createConnectionsRepository }) => {
+    await db.insert(platformConnections).values(connectionRecord("meta-race", "owner@example.com", "meta", "active"));
+    const postsRepository = await createRepository();
+    const connectionsRepository = await createConnectionsRepository();
+
+    const [created, disconnected] = await Promise.allSettled([
+      postsRepository.createPostWithTargets({ post: postValues("owner@example.com", "race"), targetRows: [targetValues("meta", "meta-race")] }),
+      connectionsRepository.disconnectActiveConnection("owner@example.com", "meta", "cleared", NOW),
+    ]);
+
+    const postExists = (await db.select().from(posts)).length === 1;
+    const [connection] = await db.select().from(platformConnections);
+    assert.equal(postExists && connection.state === "disconnected", false);
+    if (created.status === "fulfilled") {
+      assert.equal(disconnected.status, "fulfilled");
+      assert.equal(disconnected.value.status, "blocked");
+      assert.equal(connection.state, "active");
+    } else {
+      assert.equal(disconnected.status, "fulfilled");
+      assert.equal(disconnected.value.status, "disconnected");
+      assert.equal(postExists, false);
+    }
+  });
+});
+
 async function withDatabase(run) {
   const directory = await mkdtemp(join(tmpdir(), "scheduler-repository-"));
   const url = pathToFileURL(join(directory, "posts.db")).href;
@@ -129,6 +174,12 @@ async function withDatabase(run) {
         secondaryClients.push(client);
         await client.execute("PRAGMA busy_timeout = 1000");
         return createPostRepository(drizzle(client));
+      },
+      createConnectionsRepository: async () => {
+        const client = createClient({ url });
+        secondaryClients.push(client);
+        await client.execute("PRAGMA busy_timeout = 1000");
+        return createPlatformConnectionsRepository(drizzle(client));
       },
     });
   } finally {
@@ -174,7 +225,24 @@ async function createSchema(client) {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
+    CREATE TABLE platform_connections (
+      id TEXT PRIMARY KEY NOT NULL, owner_email TEXT NOT NULL, platform TEXT NOT NULL, display_name TEXT NOT NULL,
+      state TEXT NOT NULL, encrypted_credentials TEXT NOT NULL, credential_expires_at INTEGER,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, renewal_lease_id TEXT, renewal_lease_expires_at INTEGER
+    );
   `);
+}
+
+function postValues(ownerEmail, productName) {
+  return { ownerEmail, productName, productFeatures: "features", status: "draft", createdAt: NOW, updatedAt: NOW };
+}
+
+function targetValues(platform, platformConnectionId) {
+  return { platform, platformConnectionId, content: "content", hashtagsJson: "[]", status: "draft", createdAt: NOW, updatedAt: NOW };
+}
+
+function connectionRecord(id, ownerEmail, platform, state) {
+  return { id, ownerEmail, platform, displayName: id, state, encryptedCredentials: "encrypted", createdAt: NOW, updatedAt: NOW };
 }
 
 async function insertPost(db, { productName, status, scheduledFor }) {

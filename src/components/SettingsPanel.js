@@ -162,6 +162,10 @@ export function SettingsPanel() {
     setConnectionError("");
     try {
       const response = await fetch(`/api/platform-connections/${platform}/disconnect`, { method: "POST" });
+      if (response.status === 409) {
+        setConnectionError("Cancel or wait for pending posts before disconnecting this platform.");
+        return;
+      }
       if (!response.ok) throw new Error();
       await loadConnections();
     } catch {

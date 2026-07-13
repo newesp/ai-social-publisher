@@ -162,6 +162,23 @@ test("archiveDefault delegates one owner-platform-state operation without readin
   assert.equal(calls[0][2] instanceof Date, true);
 });
 
+test("disconnectDefault atomically clears credentials and returns them only to the provider-revoke caller", async () => {
+  const calls = [];
+  const encryptedOriginal = (await import("../src/lib/settings/credential-crypto.js")).encryptJson({ accessToken: "line-secret" }, "test-key");
+  const repository = {
+    async disconnectActiveConnection(owner, platform, cleared, updatedAt) {
+      calls.push([owner, platform, cleared, updatedAt]);
+      return { status: "disconnected", connection: { encryptedCredentials: encryptedOriginal } };
+    },
+  };
+  const result = await createPlatformConnectionStore({ repository, encryptionKey: "test-key" }).disconnectDefault(" OWNER@example.com ", "line");
+
+  assert.equal(result.credentials.accessToken, "line-secret");
+  assert.equal(calls[0][0], "owner@example.com");
+  assert.equal(calls[0][1], "line");
+  assert.equal(calls[0][2].includes("line-secret"), false);
+});
+
 test("OAuth transactions are single-use, owner-bound, and expire after ten minutes", async () => {
   const repository = createMemoryRepository();
   const store = createOAuthTransactionStore({ repository, encryptionKey: "test-key" });

@@ -6,7 +6,7 @@ import { createOAuthTransactionStore } from "./oauth-transaction-store.js";
 import { createPlatformConnectionStore } from "./platform-connection-store.js";
 import { createPlatformConnectionsRepository } from "./platform-connections-repository.js";
 
-export function createPlatformConnectionRouteHandlers({ requireOwner, getServices = () => getPlatformConnectionServices(), respond = (body, init) => Response.json(body, init), redirect = (url) => Response.redirect(url, 302) }) {
+export function createPlatformConnectionRouteHandlers({ requireOwner, getServices = () => getPlatformConnectionServices(), fetchImpl = fetch, respond = (body, init) => Response.json(body, init), redirect = (url) => Response.redirect(url, 302) }) {
   return {
     async GET() {
       const ownerEmail = await requireOwner();
@@ -55,8 +55,26 @@ export function createPlatformConnectionRouteHandlers({ requireOwner, getService
       requireSameOrigin(request);
       const safePlatform = requireManagedPlatform(platform);
       const { connections } = await getServices();
-      const archived = await connections.archiveDefault(ownerEmail, safePlatform);
-      return respond({ connection: archived ? toAvailability(archived) : null });
+      const result = await connections.disconnectDefault(ownerEmail, safePlatform);
+      if (result.status === "blocked") {
+        return respond({ error: "Cancel or wait for pending posts before disconnecting this platform." }, { status: 409 });
+      }
+      if (result.status !== "disconnected") return respond({ connection: null });
+      if (safePlatform === "meta") {
+        return respond({ connection: null, notice: "You can separately revoke app access in Meta." });
+      }
+      const accessToken = String(result.credentials?.accessToken ?? "").trim();
+      if (!accessToken) return respond({ connection: null });
+      try {
+        const response = await fetchImpl("https://api.line.me/v2/oauth/revoke", {
+          method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ access_token: accessToken }),
+        });
+        if (!response?.ok) throw new Error("revoke failed");
+        return respond({ connection: null });
+      } catch {
+        return respond({ connection: null, warning: "LINE was disconnected locally, but token revocation could not be confirmed." });
+      }
     },
   };
 }
