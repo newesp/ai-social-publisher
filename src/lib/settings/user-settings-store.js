@@ -11,7 +11,7 @@ export function createUserSettingsStore({ repository, encryptionKey }) {
   return {
     async read(ownerEmail) {
       const record = await repository.findByOwnerEmail(assertOwnerEmail(ownerEmail));
-      return record ? decryptJson(record.encryptedSettings, encryptionKey) : {};
+      return record ? pickCurrentSettings(decryptJson(record.encryptedSettings, encryptionKey)) : {};
     },
 
     async getMasked(ownerEmail) {
@@ -22,7 +22,7 @@ export function createUserSettingsStore({ repository, encryptionKey }) {
     async update(ownerEmail, updates) {
       const normalizedOwnerEmail = assertOwnerEmail(ownerEmail);
       const currentRecord = await repository.findByOwnerEmail(normalizedOwnerEmail);
-      const current = currentRecord ? decryptJson(currentRecord.encryptedSettings, encryptionKey) : {};
+      const current = currentRecord ? pickCurrentSettings(decryptJson(currentRecord.encryptedSettings, encryptionKey)) : {};
       const next = applyUpdates(current, updates);
 
       await repository.save({
@@ -38,11 +38,15 @@ export function createUserSettingsStore({ repository, encryptionKey }) {
 
 export function maskSettings(settings) {
   return Object.fromEntries(
-    Object.entries(settings).map(([key, value]) => [
+    Object.entries(pickCurrentSettings(settings)).map(([key, value]) => [
       key,
       PUBLIC_SETTING_KEYS.has(key) ? value : maskSecret(value),
     ]),
   );
+}
+
+function pickCurrentSettings(settings) {
+  return Object.fromEntries(Object.entries(settings ?? {}).filter(([key]) => SETTING_KEYS.has(key)));
 }
 
 function applyUpdates(current, updates) {

@@ -126,6 +126,7 @@ export function SettingsPanel() {
       setMetaPages([]);
       setMetaTransactionId("");
       setSelectedMetaPage("");
+      window.history.replaceState({}, "", "/settings?tab=publishing");
       await loadConnections();
     } catch {
       setConnectionError("Meta Page could not be selected. Please try again.");

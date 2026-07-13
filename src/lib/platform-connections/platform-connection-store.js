@@ -44,6 +44,10 @@ export function createPlatformConnectionStore({ repository, encryptionKey }) {
       const record = await repository.archiveConnection(requireId(connectionId), normalizeOwner(ownerEmail), new Date());
       return record ? toConnection(record, encryptionKey) : null;
     },
+    async archiveDefault(ownerEmail, platform) {
+      const record = await repository.archiveActiveDefaultConnection(normalizeOwner(ownerEmail), requirePlatform(platform), new Date());
+      return record ? toAvailability(record) : null;
+    },
     async listAvailability(ownerEmail) {
       return (await repository.listConnectionAvailability(normalizeOwner(ownerEmail))).map(toAvailability);
     },

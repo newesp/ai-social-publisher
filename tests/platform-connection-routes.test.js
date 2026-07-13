@@ -31,6 +31,20 @@ test("POST handlers reject cross-origin requests before initializing platform st
   assert.equal(storesCreated, 0);
 });
 
+test("POST handlers reject requests without an Origin before initializing platform stores", async () => {
+  let storesCreated = 0;
+  const handlers = createPlatformConnectionRouteHandlers({
+    requireOwner: async () => "owner@example.com",
+    getServices: async () => { storesCreated += 1; return {}; },
+  });
+  const request = new Request("https://publisher.example/api/platform-connections/meta/start", {
+    method: "POST", body: "{}",
+  });
+
+  await assert.rejects(handlers.startMeta(request), (error) => error.status === 403 && /origin/i.test(error.message));
+  assert.equal(storesCreated, 0);
+});
+
 test("Meta selection passes only the authenticated owner and returns a safe connection", async () => {
   const calls = [];
   const handlers = createPlatformConnectionRouteHandlers({
@@ -189,17 +203,13 @@ test("disconnect strictly rejects unsupported platforms", async () => {
   assert.equal(storesCreated, 0);
 });
 
-test("disconnect archives only the authenticated owner's active default and returns safe availability", async () => {
+test("disconnect atomically archives only the authenticated owner's active default and returns safe availability", async () => {
   const calls = [];
   const handlers = createPlatformConnectionRouteHandlers({
     requireOwner: async () => "owner@example.com",
     getServices: async () => ({ connections: {
-      async getDefault(...args) {
-        calls.push(["getDefault", ...args]);
-        return { id: "connection-1", ownerEmail: "owner@example.com", platform: "meta", state: "active", displayName: "Owner Page", credentials: { pageAccessToken: "secret" } };
-      },
-      async archive(...args) {
-        calls.push(["archive", ...args]);
+      async archiveDefault(...args) {
+        calls.push(args);
         return { id: "connection-1", ownerEmail: "owner@example.com", platform: "meta", state: "archived", displayName: "Owner Page", credentials: { pageAccessToken: "secret" } };
       },
     } }),
@@ -210,25 +220,20 @@ test("disconnect archives only the authenticated owner's active default and retu
   }), "meta");
   const body = await response.json();
 
-  assert.deepEqual(calls, [
-    ["getDefault", "owner@example.com", "meta"],
-    ["archive", "owner@example.com", "connection-1"],
-  ]);
+  assert.deepEqual(calls, [["owner@example.com", "meta"]]);
   assert.deepEqual(body, { connection: { platform: "meta", state: "archived", displayName: "Owner Page", expiresAt: null } });
   assert.equal(JSON.stringify(body).includes("connection-1"), false);
   assert.equal(JSON.stringify(body).includes("secret"), false);
 });
 
 test("disconnect is idempotent when the owner has no active default", async () => {
-  let archiveCalls = 0;
   const handlers = createPlatformConnectionRouteHandlers({
     requireOwner: async () => "owner@example.com",
     getServices: async () => ({ connections: {
-      async getDefault(ownerEmail, platform) {
+      async archiveDefault(ownerEmail, platform) {
         assert.deepEqual([ownerEmail, platform], ["owner@example.com", "line"]);
         return null;
       },
-      async archive() { archiveCalls += 1; },
     } }),
   });
 
@@ -237,5 +242,4 @@ test("disconnect is idempotent when the owner has no active default", async () =
   }), "line");
 
   assert.deepEqual(await response.json(), { connection: null });
-  assert.equal(archiveCalls, 0);
 });

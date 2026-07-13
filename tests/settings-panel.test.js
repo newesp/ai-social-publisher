@@ -37,6 +37,15 @@ test("settings renders actionable loading, disconnected, active, reconnect, and 
   assert.equal(source.includes("setLineCredentials({ channelId: \"\", channelSecret: \"\" })"), true);
 });
 
+test("successful Meta Page selection removes the opaque callback query before refreshing availability", async () => {
+  const source = await readFile(new URL("../src/components/SettingsPanel.js", import.meta.url), "utf8");
+  const cleanup = source.indexOf('window.history.replaceState({}, "", "/settings?tab=publishing")');
+  const refresh = source.indexOf("await loadConnections()", cleanup);
+
+  assert.notEqual(cleanup, -1);
+  assert.equal(refresh > cleanup, true);
+});
+
 test("login explains that each signed-in account connects its own platforms", async () => {
   const source = await readFile(new URL("../src/app/login/page.js", import.meta.url), "utf8");
 

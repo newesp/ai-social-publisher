@@ -55,9 +55,7 @@ export function createPlatformConnectionRouteHandlers({ requireOwner, getService
       requireSameOrigin(request);
       const safePlatform = requireManagedPlatform(platform);
       const { connections } = await getServices();
-      const current = await connections.getDefault(ownerEmail, safePlatform);
-      if (!current) return respond({ connection: null });
-      const archived = await connections.archive(ownerEmail, current.id);
+      const archived = await connections.archiveDefault(ownerEmail, safePlatform);
       return respond({ connection: archived ? toAvailability(archived) : null });
     },
   };
@@ -73,7 +71,7 @@ export function getPlatformConnectionServices(env = process.env) {
 
 export function requireSameOrigin(request) {
   const origin = request.headers.get("origin");
-  if (origin && origin !== new URL(request.url).origin) throw routeError("Invalid request origin.", 403);
+  if (!origin || origin !== new URL(request.url).origin) throw routeError("Invalid request origin.", 403);
 }
 
 async function jsonBody(request) {

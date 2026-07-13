@@ -46,6 +46,12 @@ function createMemoryRepository() {
       connections.set(id, next);
       return next;
     },
+    async archiveActiveDefaultConnection(ownerEmail, platform, updatedAt) {
+      const active = [...connections.values()].filter((record) => record.ownerEmail === ownerEmail
+        && record.platform === platform && record.state === "active");
+      for (const record of active) connections.set(record.id, { ...record, state: "archived", updatedAt });
+      return active[0] ? connections.get(active[0].id) : null;
+    },
     async listConnectionAvailability(ownerEmail) {
       return [...connections.values()].filter((record) => record.ownerEmail === ownerEmail);
     },
@@ -132,6 +138,28 @@ test("replacing a default connection archives prior active records atomically", 
   assert.deepEqual([...repository.connections.values()].filter((record) => record.ownerEmail === "owner@example.com"
     && record.platform === "meta" && record.state === "active").map((record) => record.id), [replacement.id]);
   assert.equal(repository.connections.get(replacement.id).encryptedCredentials.includes("new-token"), false);
+});
+
+test("archiveDefault delegates one owner-platform-state operation without reading a stale connection id", async () => {
+  const calls = [];
+  const store = createPlatformConnectionStore({
+    repository: {
+      async archiveActiveDefaultConnection(...args) {
+        calls.push(args);
+        return { platform: "meta", state: "archived", displayName: "Owner Page", credentialExpiresAt: null };
+      },
+      async findDefaultByOwnerAndPlatform() { throw new Error("must not read before archive"); },
+      async archiveConnection() { throw new Error("must not archive by stale id"); },
+    },
+    encryptionKey: "test-key",
+  });
+
+  assert.deepEqual(await store.archiveDefault("OWNER@example.com", "meta"), {
+    platform: "meta", state: "archived", displayName: "Owner Page", expiresAt: null,
+  });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].slice(0, 2), ["owner@example.com", "meta"]);
+  assert.equal(calls[0][2] instanceof Date, true);
 });
 
 test("OAuth transactions are single-use, owner-bound, and expire after ten minutes", async () => {

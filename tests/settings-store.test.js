@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { createUserSettingsStore } from "../src/lib/settings/user-settings-store.js";
+import { encryptJson } from "../src/lib/settings/credential-crypto.js";
 
 function createMemoryRepository() {
   const records = new Map();
@@ -74,4 +75,36 @@ test("rejects masked placeholders instead of persisting them", async () => {
     /masked placeholder/i,
   );
   assert.deepEqual(await store.read("owner@example.com"), { openAiApiKey: "openai-secret" });
+});
+
+test("legacy records expose only current AI settings and drop platform credentials on update", async () => {
+  const { store, repository } = createStore();
+  const encryptionKey = "test-only-settings-encryption-key";
+  repository.records.set("owner@example.com", {
+    ownerEmail: "owner@example.com",
+    encryptedSettings: encryptJson({
+      googleAiApiKey: "google-secret",
+      openAiApiKey: "openai-secret",
+      metaPageId: "legacy-page-id",
+      metaPageAccessToken: "legacy-meta-token",
+      lineChannelAccessToken: "legacy-line-token",
+      unexpectedLegacySetting: "legacy-value",
+    }, encryptionKey),
+    updatedAt: new Date(),
+  });
+
+  assert.deepEqual(await store.read("owner@example.com"), {
+    googleAiApiKey: "google-secret",
+    openAiApiKey: "openai-secret",
+  });
+  assert.deepEqual(await store.getMasked("owner@example.com"), {
+    googleAiApiKey: "goo...ret",
+    openAiApiKey: "ope...ret",
+  });
+
+  await store.update("owner@example.com", { googleAiApiKey: "new-google-secret" });
+  assert.deepEqual(await store.read("owner@example.com"), {
+    googleAiApiKey: "new-google-secret",
+    openAiApiKey: "openai-secret",
+  });
 });

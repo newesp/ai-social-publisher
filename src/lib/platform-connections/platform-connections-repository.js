@@ -55,6 +55,12 @@ export function createPlatformConnectionsRepository(db = createDbClient()) {
       )).returning();
       return record ?? null;
     },
+    async archiveActiveDefaultConnection(ownerEmail, platform, updatedAt) {
+      const records = await db.update(platformConnections).set({ state: "archived", updatedAt }).where(and(
+        eq(platformConnections.ownerEmail, ownerEmail), eq(platformConnections.platform, platform), eq(platformConnections.state, "active"),
+      )).returning();
+      return records[0] ?? null;
+    },
     async listConnectionAvailability(ownerEmail) {
       return db.select({ platform: platformConnections.platform, state: platformConnections.state,
         displayName: platformConnections.displayName, credentialExpiresAt: platformConnections.credentialExpiresAt })
