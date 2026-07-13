@@ -48,19 +48,25 @@ test("connect rejects invalid credentials without calling LINE", async () => {
 });
 
 test("connect rejects an incomplete LINE bot identity without persisting a connection", async () => {
-  const connections = createConnections();
-  const service = createLineChannelService({
-    connections, now: () => now,
-    fetchImpl: async (url) => url.endsWith("/oauth/accessToken")
-      ? jsonResponse({ access_token: "line-access-token", expires_in: 2_592_000 })
-      : jsonResponse({ displayName: "Owner Official Account" }),
-  });
+  for (const profile of [
+    { displayName: "Owner Official Account" },
+    { userId: "U123", displayName: 123 },
+    { userId: "U123", displayName: "   " },
+  ]) {
+    const connections = createConnections();
+    const service = createLineChannelService({
+      connections, now: () => now,
+      fetchImpl: async (url) => url.endsWith("/oauth/accessToken")
+        ? jsonResponse({ access_token: "line-access-token", expires_in: 2_592_000 })
+        : jsonResponse(profile),
+    });
 
-  await assert.rejects(
-    service.connect("owner@example.com", { channelId: "channel-id", channelSecret: "channel-secret" }),
-    /could not be completed/i,
-  );
-  assert.equal(connections.replaced.length, 0);
+    await assert.rejects(
+      service.connect("owner@example.com", { channelId: "channel-id", channelSecret: "channel-secret" }),
+      /could not be completed/i,
+    );
+    assert.equal(connections.replaced.length, 0);
+  }
 });
 
 test("ensureUsable does not rotate a LINE token with more than 72 hours remaining", async () => {

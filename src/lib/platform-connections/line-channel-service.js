@@ -54,7 +54,7 @@ async function issueAndVerify(fetchImpl, { channelId, channelSecret }, now) {
   const expiresIn = Number(issued?.expires_in);
   if (!accessToken || !Number.isFinite(expiresIn) || expiresIn <= 0) throw lineError();
   const profile = await providerJson(fetchImpl, BOT_INFO_URL, { headers: { Authorization: `Bearer ${accessToken}` } });
-  const officialAccountName = String(profile?.displayName ?? "").trim();
+  const officialAccountName = typeof profile?.displayName === "string" ? profile.displayName.trim() : "";
   const botUserId = typeof profile?.userId === "string" ? profile.userId.trim() : "";
   if (!officialAccountName || !botUserId) throw lineError();
   const expiresAt = new Date(now.getTime() + expiresIn * 1000);
