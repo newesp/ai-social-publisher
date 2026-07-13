@@ -55,14 +55,15 @@ async function issueAndVerify(fetchImpl, { channelId, channelSecret }, now) {
   if (!accessToken || !Number.isFinite(expiresIn) || expiresIn <= 0) throw lineError();
   const profile = await providerJson(fetchImpl, BOT_INFO_URL, { headers: { Authorization: `Bearer ${accessToken}` } });
   const officialAccountName = String(profile?.displayName ?? "").trim();
-  if (!officialAccountName) throw lineError();
+  const botUserId = typeof profile?.userId === "string" ? profile.userId.trim() : "";
+  if (!officialAccountName || !botUserId) throw lineError();
   const expiresAt = new Date(now.getTime() + expiresIn * 1000);
   return {
     officialAccountName,
     expiresAt,
     credentials: {
       channelId, channelSecret, accessToken, expiresAt: expiresAt.toISOString(), officialAccountName,
-      botUserId: String(profile?.userId ?? "").trim() || null,
+      botUserId,
     },
   };
 }
