@@ -1,8 +1,17 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 
+import { createClient } from "@libsql/client";
+import { drizzle } from "drizzle-orm/libsql";
+
+import { userSettings } from "../src/lib/db/schema.js";
 import { decryptJson, encryptJson } from "../src/lib/settings/credential-crypto.js";
 import {
+  createLegacyCleanupRepository,
   LEGACY_RECONNECTION_MESSAGE,
   migrateLegacyPlatformData,
   removeLegacyPlatformCredentials,
@@ -154,6 +163,31 @@ test("changed settings ciphertext aborts and rolls back the cleanup transaction"
   assert.deepEqual(repository.savedOwners, []);
 });
 
+test("database cleanup repository rejects stale ciphertext and rolls back prior writes", async () => {
+  await withSettingsDatabase(async (db) => {
+    const first = encryptedRecord("first@example.com", { metaPageAccessToken: "first-legacy-token" });
+    const conflicted = encryptedRecord("conflicted@example.com", { lineChannelAccessToken: "line-legacy-token" });
+    await db.insert(userSettings).values([first, conflicted]);
+    const repository = createLegacyCleanupRepository(db);
+    const now = new Date("2026-07-13T08:00:00.000Z");
+
+    await assert.rejects(repository.transaction(async (transaction) => {
+      await transaction.saveUserSetting({
+        ...first,
+        encryptedSettings: encryptJson({}, ENCRYPTION_KEY),
+        updatedAt: now,
+      }, first.encryptedSettings);
+      await transaction.saveUserSetting({
+        ...conflicted,
+        encryptedSettings: encryptJson({}, ENCRYPTION_KEY),
+        updatedAt: now,
+      }, "stale-ciphertext");
+    }), /changed during legacy credential cleanup/i);
+
+    assert.deepEqual(await db.select().from(userSettings), [first, conflicted]);
+  });
+});
+
 test("only unbound pending, draft, and scheduled targets become terminal failed", async () => {
   const now = new Date("2026-07-13T08:00:00.000Z");
   const targets = [
@@ -221,3 +255,25 @@ test("direct execution requires migration credentials before creating a database
   }), /TURSO_DATABASE_URL/);
   assert.equal(created, false);
 });
+
+async function withSettingsDatabase(run) {
+  const directory = await mkdtemp(join(tmpdir(), "legacy-cleanup-repository-"));
+  const client = createClient({ url: pathToFileURL(join(directory, "settings.db")).href });
+  try {
+    await client.executeMultiple(`
+      CREATE TABLE user_settings (
+        owner_email TEXT PRIMARY KEY NOT NULL,
+        encrypted_settings TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+    await run(drizzle(client));
+  } finally {
+    await client.close();
+    try {
+      await rm(directory, { recursive: true, force: true });
+    } catch (error) {
+      if (error.code !== "EBUSY") throw error;
+    }
+  }
+}
