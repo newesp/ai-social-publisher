@@ -40,7 +40,7 @@ Every Google SSO user connects and publishes to their own Meta Page and LINE Off
 
 Add an encrypted `platform_connections` store, with one record per owner, platform, and connected account:
 
-- non-secret fields: connection ID, owner email, platform, display name, state (`active`, `legacy`, `archived`, `needs_reconnect`), created and updated times
+- non-secret fields: connection ID, owner email, platform, display name, state (`active`, `archived`, `needs_reconnect`), created and updated times
 - encrypted Meta fields: Page ID, Page name, Page Access Token, long-lived User Access Token, User Token expiry, and connection time
 - encrypted LINE fields: Channel ID, Channel Secret, Channel Access Token, Token expiry, and connection time
 
@@ -49,7 +49,7 @@ User settings retain only `metaDefaultConnectionId` and `lineDefaultConnectionId
 The database design is explicit:
 
 - `platform_connections`: random opaque ID; owner email; platform; display name; state; encrypted credentials; credential-expiry time; created and updated timestamps. Index owner/platform/state and enforce that a default connection belongs to the same owner and platform.
-- `post_targets.platform_connection_id`: nullable during the migration only, then a foreign key to `platform_connections`. Reads and writes must join on both target owner and connection owner; possession of a connection ID alone never authorizes access.
+- `post_targets.platform_connection_id`: nullable only while existing rows are made terminal during deployment, then required for all new rows and enforced as a foreign key. Reads and writes must join on both target owner and connection owner; possession of a connection ID alone never authorizes access.
 - `oauth_transactions`: opaque ID; owner email; provider; encrypted pending Meta Page list and tokens; safe return path; expiry; consumed timestamp. Transactions expire after ten minutes and are single use.
 
 Connection-status responses may include the non-secret `expiresAt` timestamp so the UI can say that renewal is automatic. They never include any token, client secret, channel secret, or OAuth pending data. This release keeps normalized, verified Google email as the ownership key to match the existing posts and settings schema; a future migration to Google subject (`sub`) is explicitly out of scope.
@@ -87,18 +87,19 @@ Connection-status responses may include the non-secret `expiresAt` timestamp so 
 - APIs return masked connection status only; errors are generic and redact secrets.
 - Reconnection never overwrites another user's settings.
 
-## Legacy migration and credential precedence
+## Legacy credential removal and reconnect bootstrap
 
 1. There is no shared environment-variable fallback for publishing after this feature ships. `META_PAGE_ID`, `META_PAGE_ACCESS_TOKEN`, and `LINE_CHANNEL_ACCESS_TOKEN` are removed from the application runtime contract and `.env.example`.
-2. An idempotent migration converts a user's existing encrypted `metaPageId` plus `metaPageAccessToken` into that user's Meta connection and marks it `legacy` until they complete OAuth. It remains usable only while provider validation succeeds; reconnecting upgrades it to managed automatic renewal.
-3. An existing `lineChannelAccessToken` is verified with `GET /v2/bot/info`. If valid, it becomes a `legacy` LINE connection and remains usable until expiry; because it lacks Channel ID and Secret, the UI asks the user to reconnect to enable automatic renewal. If validation fails, it becomes `needs_reconnect` and is not offered in Step 1.
-4. Migration never copies credentials between owners. Legacy fields remain encrypted for one release only, then are purged after the migrated connection is confirmed; all new publishing reads connection IDs exclusively.
+2. A one-time deployment migration removes only the legacy platform keys (`metaPageId`, `metaPageAccessToken`, and `lineChannelAccessToken`) from every encrypted `user_settings` record while preserving AI settings. It creates no platform connection and copies no credential between owners.
+3. Existing users therefore start with Meta and LINE disconnected and must complete the new connection flow. Until then, their platform cards show “Reconnect required” or “Not connected”, and Step 1 hides both checkboxes.
+4. Existing posts and scheduled targets created before `platform_connection_id` existed cannot be safely associated with an account after the credentials are removed. The deployment marks those targets as failed with a reconnect-required reason; they are never silently sent to a newly connected Page or Channel. Users can reconnect and create a new post or schedule.
+5. The new `platform_connection_id` column is nullable only for this bootstrap cleanup. Once old targets are terminal, all new post creation and publishing paths require a connection ID, and a follow-up schema migration can enforce `NOT NULL`.
 
 ## Testing
 
 - Unit tests cover OAuth state validation, cancellation, expiry and owner isolation; Meta code/token/Page selection and reconnect behavior; LINE issuance at the pinned endpoint, Official Account identity verification, 72-hour renewal, concurrent rotation, and invalid credential handling; and no-secret API responses.
 - UI tests cover connection-state cards and visibility/default selection of Step 1 platform checkboxes.
-- Publishing tests verify that disconnected or stale UI platforms are rejected, targets receive an immutable connection ID in the create transaction, scheduled jobs renew and publish through that target's connection rather than the owner's current default, and legacy credentials cannot fall back to a shared environment value.
+- Publishing tests verify that disconnected or stale UI platforms are rejected, targets receive an immutable connection ID in the create transaction, scheduled jobs renew and publish through that target's connection rather than the owner's current default, pre-feature targets fail safely during bootstrap, and legacy credentials cannot fall back to a shared environment value.
 - Authorization and regression tests verify that any signed-in user can manage only their own platform connections and that no UI text or API guard retains the former admin-only token-management policy.
 - Run the existing test suite and production build; no live provider call is part of automated verification.
 
