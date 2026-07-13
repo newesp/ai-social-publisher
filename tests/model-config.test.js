@@ -10,13 +10,13 @@ import {
   getImageModel,
 } from "../src/lib/ai/model-config.js";
 
-test("uses gemini-3.1-flash-lite-image as the default Google text model", () => {
-  assert.equal(getLLMModel("google"), "gemini-3.1-flash-lite-image");
+test("uses gemini-2.5-flash-lite as the default Google text model", () => {
+  assert.equal(getLLMModel("google"), "gemini-2.5-flash-lite");
 });
 
-test("uses gemini-2.5-flash-lite as the default Google image model", () => {
+test("uses gemini-3.1-flash-lite-image as the default Google image model", () => {
   assert.equal(DEFAULT_IMAGE_PROVIDER, "google");
-  assert.equal(getImageModel("google"), "gemini-2.5-flash-lite");
+  assert.equal(getImageModel("google"), "gemini-3.1-flash-lite-image");
 });
 
 test("uses gpt-image-2 as the default OpenAI image model", () => {
@@ -30,13 +30,13 @@ test("keeps legacy image models out of the primary provider list", () => {
 
 test("exposes the supported model options for each provider", () => {
   assert.deepEqual(getLLMModelOptions("google"), [
-    "gemini-3.1-flash-lite-image",
-    "gemini-3.1-flash-image",
-  ]);
-  assert.deepEqual(getImageModelOptions("google"), [
     "gemini-2.5-flash-lite",
     "gemini-3.1-flash-lite",
     "gemini-3.5-flash",
+  ]);
+  assert.deepEqual(getImageModelOptions("google"), [
+    "gemini-3.1-flash-lite-image",
+    "gemini-3.1-flash-image",
   ]);
   assert.deepEqual(getLLMModelOptions("openai"), ["gpt-4o"]);
   assert.deepEqual(getImageModelOptions("openai"), ["gpt-image-2"]);

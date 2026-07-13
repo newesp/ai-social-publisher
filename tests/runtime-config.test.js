@@ -13,6 +13,30 @@ test("accepts the complete demo runtime configuration", () => {
   }));
 });
 
+test("accepts Vercel OIDC Blob credentials with a store ID", () => {
+  assert.doesNotThrow(() => validateRuntimeConfig({
+    AUTH_MODE: "demo",
+    SETTINGS_ENCRYPTION_KEY: "test-settings-key",
+    TURSO_DATABASE_URL: "libsql://example.turso.io",
+    TURSO_AUTH_TOKEN: "test-token",
+    VERCEL_OIDC_TOKEN: "test-oidc-token",
+    BLOB_STORE_ID: "store_example",
+  }));
+});
+
+test("rejects Vercel OIDC Blob credentials without a store ID", () => {
+  assert.throws(
+    () => validateRuntimeConfig({
+      AUTH_MODE: "demo",
+      SETTINGS_ENCRYPTION_KEY: "test-settings-key",
+      TURSO_DATABASE_URL: "libsql://example.turso.io",
+      TURSO_AUTH_TOKEN: "test-token",
+      VERCEL_OIDC_TOKEN: "test-oidc-token",
+    }),
+    /BLOB_STORE_ID/,
+  );
+});
+
 test("rejects a configuration missing the Blob upload token", () => {
   assert.throws(
     () => validateRuntimeConfig({
