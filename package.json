@@ -11,6 +11,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "migrate:platform-connections": "node scripts/remove-legacy-platform-credentials.mjs",
     "test": "node --test"
   },
   "dependencies": {

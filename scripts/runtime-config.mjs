@@ -1,12 +1,19 @@
 import { readFileSync } from "node:fs";
 
+export const REQUIRED_RUNTIME_CONFIG_KEYS = Object.freeze([
+  "SETTINGS_ENCRYPTION_KEY",
+  "TURSO_DATABASE_URL",
+  "TURSO_AUTH_TOKEN",
+  "BLOB_READ_WRITE_TOKEN",
+]);
+
 export function validateRuntimeConfig(env) {
   const mode = String(env.AUTH_MODE ?? "").trim().toLowerCase();
   if (mode !== "demo" && mode !== "production") {
     throw new Error("AUTH_MODE must be set to demo or production.");
   }
 
-  for (const key of ["SETTINGS_ENCRYPTION_KEY", "TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN", "BLOB_READ_WRITE_TOKEN"]) {
+  for (const key of REQUIRED_RUNTIME_CONFIG_KEYS) {
     if (!String(env[key] ?? "").trim()) {
       throw new Error(`${key} must be configured.`);
     }

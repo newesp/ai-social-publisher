@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { loadEnvironmentText, validateRuntimeConfig } from "../scripts/runtime-config.mjs";
+import { REQUIRED_RUNTIME_CONFIG_KEYS, loadEnvironmentText, validateRuntimeConfig } from "../scripts/runtime-config.mjs";
 
 test("accepts the complete demo runtime configuration", () => {
   assert.doesNotThrow(() => validateRuntimeConfig({
@@ -11,6 +11,34 @@ test("accepts the complete demo runtime configuration", () => {
       TURSO_AUTH_TOKEN: "test-token",
       BLOB_READ_WRITE_TOKEN: "test-blob-token",
   }));
+});
+
+test("runtime configuration does not require shared platform tokens or Meta OAuth settings", () => {
+  assert.doesNotThrow(() => validateRuntimeConfig({
+    AUTH_MODE: "demo",
+    SETTINGS_ENCRYPTION_KEY: "test-settings-key",
+    TURSO_DATABASE_URL: "libsql://example.turso.io",
+    TURSO_AUTH_TOKEN: "test-token",
+    BLOB_READ_WRITE_TOKEN: "test-blob-token",
+  }));
+  assert.deepEqual(REQUIRED_RUNTIME_CONFIG_KEYS, [
+    "SETTINGS_ENCRYPTION_KEY",
+    "TURSO_DATABASE_URL",
+    "TURSO_AUTH_TOKEN",
+    "BLOB_READ_WRITE_TOKEN",
+  ]);
+});
+
+test("environment example contains server-only Meta OAuth settings and no shared publishing credentials", async () => {
+  const example = await import("node:fs/promises").then(({ readFile }) => readFile(".env.example", "utf8"));
+
+  for (const key of ["META_APP_ID", "META_APP_SECRET", "META_OAUTH_REDIRECT_URI"]) {
+    assert.match(example, new RegExp(`^${key}=`, "m"));
+    assert.doesNotMatch(example, new RegExp(`^NEXT_PUBLIC_${key}=`, "m"));
+  }
+  for (const key of ["META_PAGE_ID", "META_PAGE_ACCESS_TOKEN", "LINE_CHANNEL_ACCESS_TOKEN"]) {
+    assert.doesNotMatch(example, new RegExp(`^${key}=`, "m"));
+  }
 });
 
 test("rejects a configuration missing the Blob upload token", () => {
