@@ -36,6 +36,19 @@ export function createPlatformConnectionsRepository(db = createDbClient()) {
       )).returning();
       return record ?? null;
     },
+    async replaceConnectionCredentialsIfUnchanged(id, ownerEmail, previousUpdatedAt, changes) {
+      const [record] = await db.update(platformConnections).set(changes).where(and(
+        eq(platformConnections.id, id), eq(platformConnections.ownerEmail, ownerEmail), eq(platformConnections.state, "active"),
+        eq(platformConnections.updatedAt, previousUpdatedAt),
+      )).returning();
+      return record ?? null;
+    },
+    async markConnectionNeedsReconnect(id, ownerEmail, updatedAt) {
+      const [record] = await db.update(platformConnections).set({ state: "needs_reconnect", updatedAt }).where(and(
+        eq(platformConnections.id, id), eq(platformConnections.ownerEmail, ownerEmail), eq(platformConnections.state, "active"),
+      )).returning();
+      return record ?? null;
+    },
     async archiveConnection(id, ownerEmail, updatedAt) {
       const [record] = await db.update(platformConnections).set({ state: "archived", updatedAt }).where(and(
         eq(platformConnections.id, id), eq(platformConnections.ownerEmail, ownerEmail),

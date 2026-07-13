@@ -90,3 +90,53 @@ test("Meta pending Page route obtains choices only for the authenticated owner a
   assert.deepEqual(body, { pages: [{ id: "page-1", name: "Owner Page" }] });
   assert.equal(JSON.stringify(body).includes("secret"), false);
 });
+
+test("LINE connect is owner-scoped, same-origin protected, and returns only safe availability", async () => {
+  const calls = [];
+  const handlers = createPlatformConnectionRouteHandlers({
+    requireOwner: async () => "owner@example.com",
+    getServices: async () => ({ line: { async connect(...args) { calls.push(args); return {
+      id: "connection-1", ownerEmail: "owner@example.com", platform: "line", state: "active", displayName: "Owner OA",
+      expiresAt: new Date("2026-08-12T00:00:00.000Z"), credentials: { channelSecret: "secret", accessToken: "token" },
+    }; } } }),
+  });
+
+  const response = await handlers.connectLine(new Request("https://publisher.example/api/platform-connections/line", {
+    method: "POST", headers: { origin: "https://publisher.example", "content-type": "application/json" }, body: JSON.stringify({ channelId: "channel-id", channelSecret: "channel-secret" }),
+  }));
+  const body = await response.json();
+
+  assert.deepEqual(calls, [["owner@example.com", { channelId: "channel-id", channelSecret: "channel-secret" }]]);
+  assert.deepEqual(body, { connection: { platform: "line", state: "active", displayName: "Owner OA", expiresAt: "2026-08-12T00:00:00.000Z" } });
+  assert.equal(JSON.stringify(body).includes("secret"), false);
+  assert.equal(JSON.stringify(body).includes("token"), false);
+});
+
+test("LINE connect rejects cross-origin requests before initializing platform stores", async () => {
+  let storesCreated = 0;
+  const handlers = createPlatformConnectionRouteHandlers({
+    requireOwner: async () => "owner@example.com",
+    getServices: async () => { storesCreated += 1; return {}; },
+  });
+  const request = new Request("https://publisher.example/api/platform-connections/line", {
+    method: "POST", headers: { origin: "https://attacker.example" }, body: "{}",
+  });
+
+  await assert.rejects(handlers.connectLine(request), (error) => error.status === 403 && /origin/i.test(error.message));
+  assert.equal(storesCreated, 0);
+});
+
+test("LINE connect accepts only a Channel ID and Channel Secret JSON object", async () => {
+  let calls = 0;
+  const handlers = createPlatformConnectionRouteHandlers({
+    requireOwner: async () => "owner@example.com",
+    getServices: async () => ({ line: { async connect() { calls += 1; } } }),
+  });
+  const request = new Request("https://publisher.example/api/platform-connections/line", {
+    method: "POST", headers: { origin: "https://publisher.example", "content-type": "application/json" },
+    body: JSON.stringify({ channelId: "channel-id", channelSecret: "channel-secret", unexpected: "value" }),
+  });
+
+  await assert.rejects(handlers.connectLine(request), (error) => error.status === 400 && /channel id.*channel secret/i.test(error.message));
+  assert.equal(calls, 0);
+});

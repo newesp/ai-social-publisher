@@ -29,6 +29,17 @@ export function createPlatformConnectionStore({ repository, encryptionKey }) {
       });
       return record ? toConnection(record, encryptionKey) : null;
     },
+    async replaceCredentialsIfUnchanged(ownerEmail, connectionId, previousUpdatedAt, credentials) {
+      const record = await repository.replaceConnectionCredentialsIfUnchanged(requireId(connectionId), normalizeOwner(ownerEmail), toDate(previousUpdatedAt), {
+        encryptedCredentials: encryptJson(requireCredentials(credentials), encryptionKey),
+        credentialExpiresAt: toDateOrNull(credentials?.expiresAt ?? credentials?.credentialExpiresAt), updatedAt: new Date(),
+      });
+      return record ? toConnection(record, encryptionKey) : null;
+    },
+    async markNeedsReconnect(ownerEmail, connectionId) {
+      const record = await repository.markConnectionNeedsReconnect(requireId(connectionId), normalizeOwner(ownerEmail), new Date());
+      return record ? toConnection(record, encryptionKey) : null;
+    },
     async archive(ownerEmail, connectionId) {
       const record = await repository.archiveConnection(requireId(connectionId), normalizeOwner(ownerEmail), new Date());
       return record ? toConnection(record, encryptionKey) : null;
@@ -61,3 +72,4 @@ function requireDisplayName(displayName) { const value = String(displayName ?? "
 function requireCredentials(credentials) { if (!credentials || typeof credentials !== "object" || Array.isArray(credentials)) throw new Error("Connection credentials are required."); return credentials; }
 function requireId(connectionId) { const value = String(connectionId ?? "").trim(); if (!value) throw new Error("A platform connection is required."); return value; }
 function toDateOrNull(value) { if (value == null) return null; const date = value instanceof Date ? value : new Date(value); if (Number.isNaN(date.getTime())) throw new Error("Connection credential expiry must be a valid date."); return date; }
+function toDate(value) { if (value == null) throw new Error("A connection update time is required."); return toDateOrNull(value); }

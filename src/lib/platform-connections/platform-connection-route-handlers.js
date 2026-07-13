@@ -1,6 +1,7 @@
 import { createDbClient } from "../db/index.js";
 
 import { createMetaOAuthService } from "./meta-oauth-service.js";
+import { createLineChannelService } from "./line-channel-service.js";
 import { createOAuthTransactionStore } from "./oauth-transaction-store.js";
 import { createPlatformConnectionStore } from "./platform-connection-store.js";
 import { createPlatformConnectionsRepository } from "./platform-connections-repository.js";
@@ -36,6 +37,13 @@ export function createPlatformConnectionRouteHandlers({ requireOwner, getService
       const body = await jsonBody(request);
       return respond({ connection: toAvailability(await meta.selectPage(ownerEmail, body.transactionId, body.pageId)) });
     },
+    async connectLine(request) {
+      const ownerEmail = await requireOwner();
+      requireSameOrigin(request);
+      const { line } = await getServices();
+      const body = requireLineConnectBody(request, await jsonBody(request));
+      return respond({ connection: toAvailability(await line.connect(ownerEmail, body)) }, { status: 201 });
+    },
     async getMetaPending(request) {
       const ownerEmail = await requireOwner();
       const { meta } = await getServices();
@@ -50,7 +58,7 @@ export function getPlatformConnectionServices(env = process.env) {
   const options = { repository, encryptionKey: env.SETTINGS_ENCRYPTION_KEY };
   const connections = createPlatformConnectionStore(options);
   const transactions = createOAuthTransactionStore(options);
-  return { connections, transactions, meta: createMetaOAuthService({ env, transactions, connections }) };
+  return { connections, transactions, meta: createMetaOAuthService({ env, transactions, connections }), line: createLineChannelService({ connections }) };
 }
 
 export function requireSameOrigin(request) {
@@ -60,6 +68,15 @@ export function requireSameOrigin(request) {
 
 async function jsonBody(request) {
   try { return await request.json(); } catch { throw routeError("A JSON request body is required.", 400); }
+}
+
+function requireLineConnectBody(request, body) {
+  const contentType = String(request.headers.get("content-type") ?? "").split(";", 1)[0].trim().toLowerCase();
+  const keys = body && typeof body === "object" && !Array.isArray(body) ? Object.keys(body) : [];
+  if (contentType !== "application/json" || keys.length !== 2 || !keys.includes("channelId") || !keys.includes("channelSecret")) {
+    throw routeError("A JSON LINE Channel ID and Channel Secret are required.", 400);
+  }
+  return body;
 }
 
 function toCallbackRedirect(requestUrl, result) {
