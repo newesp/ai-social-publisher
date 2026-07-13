@@ -11,30 +11,6 @@ import { drizzle } from "drizzle-orm/libsql";
 import { platformConnections, postTargets, posts } from "../src/lib/db/schema.js";
 import { createPlatformConnectionsRepository } from "../src/lib/platform-connections/platform-connections-repository.js";
 
-test("archiveActiveDefaultConnection atomically archives every current active owner-platform row only", async () => {
-  await withDatabase(async ({ db }) => {
-    const now = new Date("2026-07-13T00:00:00.000Z");
-    await db.insert(platformConnections).values([
-      connection("owner-meta-old", "owner@example.com", "meta", "active"),
-      connection("owner-meta-new", "owner@example.com", "meta", "active"),
-      connection("owner-line", "owner@example.com", "line", "active"),
-      connection("other-meta", "other@example.com", "meta", "active"),
-    ]);
-    const repository = createPlatformConnectionsRepository(db);
-
-    const archived = await repository.archiveActiveDefaultConnection("owner@example.com", "meta", now);
-
-    assert.equal(archived.ownerEmail, "owner@example.com");
-    assert.equal(archived.platform, "meta");
-    assert.equal(archived.state, "archived");
-    const rows = await db.select().from(platformConnections);
-    assert.deepEqual(rows.filter((row) => row.ownerEmail === "owner@example.com" && row.platform === "meta").map((row) => row.state), ["archived", "archived"]);
-    assert.equal(rows.find((row) => row.id === "owner-line").state, "active");
-    assert.equal(rows.find((row) => row.id === "other-meta").state, "active");
-    assert.equal(await repository.archiveActiveDefaultConnection("owner@example.com", "meta", now), null);
-  });
-});
-
 test("disconnectActiveConnection blocks non-terminal bound targets without mutating credentials", async () => {
   await withDatabase(async ({ db }) => {
     const repository = createPlatformConnectionsRepository(db);
@@ -101,9 +77,52 @@ test("renewal lease CAS allows one winner, preserves archived state, and permits
   });
 });
 
+test("Meta selection atomically deletes one valid OAuth row and replaces the default", async () => {
+  await withDatabase(async ({ db, createRepository }) => {
+    const repository = createPlatformConnectionsRepository(db);
+    const timestamp = new Date("2026-07-13T00:00:00.000Z");
+    await repository.createOAuthTransaction({
+      id: "picker-1", ownerEmail: "owner@example.com", provider: "meta", encryptedPayload: "encrypted",
+      returnPath: "/settings", expiresAt: new Date("2026-07-13T00:10:00.000Z"), consumedAt: null, createdAt: timestamp,
+    });
+    await db.insert(platformConnections).values(connection("old-meta", "owner@example.com", "meta", "active"));
+
+    const other = await createRepository();
+    const [first, second] = await Promise.all([
+      repository.replaceDefaultConnectionFromOAuth(connection("new-meta-a", "owner@example.com", "meta", "active"), "picker-1", "owner@example.com", "meta", timestamp),
+      other.replaceDefaultConnectionFromOAuth(connection("new-meta-b", "owner@example.com", "meta", "active"), "picker-1", "owner@example.com", "meta", timestamp),
+    ]);
+
+    assert.equal([first, second].filter(Boolean).length, 1);
+    assert.equal(await repository.findOAuthTransactionByIdAndOwner("picker-1", "owner@example.com", timestamp), null);
+    const rows = await db.select().from(platformConnections);
+    assert.equal(rows.filter((row) => row.state === "active").length, 1);
+  });
+});
+
+test("failed Meta replacement rolls back OAuth deletion and expired purge is bounded", async () => {
+  await withDatabase(async ({ db }) => {
+    const repository = createPlatformConnectionsRepository(db);
+    const now = new Date("2026-07-13T00:00:00.000Z");
+    await db.insert(platformConnections).values(connection("duplicate-id", "owner@example.com", "meta", "active"));
+    await repository.createOAuthTransaction({ id: "retry-picker", ownerEmail: "owner@example.com", provider: "meta", encryptedPayload: "encrypted", returnPath: "/settings", expiresAt: new Date(now.getTime() + 60_000), consumedAt: null, createdAt: now });
+    await assert.rejects(repository.replaceDefaultConnectionFromOAuth(connection("duplicate-id", "owner@example.com", "meta", "active"), "retry-picker", "owner@example.com", "meta", now));
+    assert.notEqual(await repository.findOAuthTransactionByIdAndOwner("retry-picker", "owner@example.com", now), null);
+    assert.equal((await db.select().from(platformConnections))[0].state, "active");
+
+    for (let index = 0; index < 101; index += 1) {
+      await repository.createOAuthTransaction({ id: `expired-${index}`, ownerEmail: "owner@example.com", provider: "meta", encryptedPayload: "encrypted", returnPath: "/settings", expiresAt: new Date(now.getTime() - 1), consumedAt: null, createdAt: now });
+    }
+    assert.equal(await repository.purgeExpiredOAuthTransactions(now), 100);
+    assert.equal(await repository.purgeExpiredOAuthTransactions(now), 1);
+  });
+});
+
 async function withDatabase(run) {
   const directory = await mkdtemp(join(tmpdir(), "platform-connections-repository-"));
-  const client = createClient({ url: pathToFileURL(join(directory, "connections.db")).href });
+  const url = pathToFileURL(join(directory, "connections.db")).href;
+  const client = createClient({ url });
+  const secondaryClients = [];
   try {
     await client.executeMultiple(`
       CREATE TABLE platform_connections (
@@ -129,9 +148,20 @@ async function withDatabase(run) {
         platform_connection_id TEXT, content TEXT NOT NULL, hashtags_json TEXT NOT NULL, status TEXT NOT NULL,
         external_post_id TEXT, error_message TEXT, published_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
       );
+      CREATE TABLE oauth_transactions (
+        id TEXT PRIMARY KEY NOT NULL, owner_email TEXT NOT NULL, provider TEXT NOT NULL, encrypted_payload TEXT NOT NULL,
+        return_path TEXT NOT NULL, expires_at INTEGER NOT NULL, consumed_at INTEGER, created_at INTEGER NOT NULL
+      );
     `);
-    await run({ db: drizzle(client) });
+    await client.execute("PRAGMA journal_mode = WAL");
+    await client.execute("PRAGMA busy_timeout = 1000");
+    await run({ db: drizzle(client), createRepository: async () => {
+      const secondary = createClient({ url }); secondaryClients.push(secondary);
+      await secondary.execute("PRAGMA busy_timeout = 1000");
+      return createPlatformConnectionsRepository(drizzle(secondary));
+    } });
   } finally {
+    await Promise.all(secondaryClients.map((secondary) => secondary.close()));
     await client.close();
     try {
       await rm(directory, { recursive: true, force: true });

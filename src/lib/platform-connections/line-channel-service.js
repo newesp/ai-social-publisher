@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 
+import { authorizationLifecycleError, fetchWithDeadline, retryableLifecycleError } from "./connection-lifecycle.js";
+
 const TOKEN_URL = "https://api.line.me/v2/oauth/accessToken";
 const BOT_INFO_URL = "https://api.line.me/v2/bot/info";
 const ROTATE_WITHIN_MS = 72 * 60 * 60 * 1000;
@@ -11,7 +13,8 @@ const RENEWAL_IN_PROGRESS_ERROR = "LINE token renewal is in progress. Please ret
 const LEASE_MS = 2 * 60 * 1000;
 const sharedRenewals = new Map();
 
-export function createLineChannelService({ fetchImpl = fetch, connections, now = () => new Date(), renewalFlights = sharedRenewals }) {
+export function createLineChannelService({ fetchImpl = fetch, connections, now = () => new Date(), renewalFlights = sharedRenewals,
+  requestTimeoutMs = 10_000, pollAttempts = 3, pollDelay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   return {
     async connect(ownerEmail, input) {
       const owner = normalizeOwner(ownerEmail);
@@ -31,14 +34,14 @@ export function createLineChannelService({ fetchImpl = fetch, connections, now =
       const id = requireConnectionId(connectionId);
       const key = `${owner}:${id}`;
       if (renewalFlights.has(key)) return renewalFlights.get(key);
-      const operation = ensureUsableWithLease({ owner, id, connections, fetchImpl, now });
+      const operation = ensureUsableWithLease({ owner, id, connections, fetchImpl, now, requestTimeoutMs, pollAttempts, pollDelay });
       renewalFlights.set(key, operation);
       try { return await operation; } finally { renewalFlights.delete(key); }
     },
   };
 }
 
-async function ensureUsableWithLease({ owner, id, connections, fetchImpl, now }) {
+async function ensureUsableWithLease({ owner, id, connections, fetchImpl, now, requestTimeoutMs, pollAttempts, pollDelay }) {
   const connection = await connections.getById(owner, id);
   requireUsableLineConnection(connection);
   const time = currentTime(now);
@@ -53,32 +56,46 @@ async function ensureUsableWithLease({ owner, id, connections, fetchImpl, now })
     throw routeError(RENEWAL_IN_PROGRESS_ERROR, 503);
   }
 
+  let ownsLease = true;
   try {
-    const issued = await issueAndVerify(fetchImpl, requireStoredCredentials(connection.credentials), time);
+    const issued = await issueAndVerify(fetchImpl, requireStoredCredentials(connection.credentials), time, { lifecycle: true, requestTimeoutMs });
     const updated = await connections.completeRenewalLease(owner, connection.id, leaseId, issued.credentials);
     if (updated) return updated;
-
-    const winner = await connections.getById(owner, connection.id);
-    requireUsableLineConnection(winner);
-    if (isValidAt(winner.expiresAt, time)) return winner;
-  } catch {
-    try { await connections.releaseRenewalLease(owner, connection.id, leaseId); } catch { /* The short lease expires independently. */ }
+    ownsLease = false;
+    return observeLineWinner({ connections, owner, id, original: connection, time, pollAttempts, pollDelay });
+  } catch (error) {
+    if (error?.authorizationRejected) {
+      await connections.markNeedsReconnect(owner, connection.id);
+      throw routeError(RECONNECT_ERROR, 409);
+    }
     if (isValidAt(connection.expiresAt, time)) return { ...connection, warning: RENEWAL_WARNING };
+    throw error?.retryable ? error : retryableLifecycleError(RENEWAL_IN_PROGRESS_ERROR);
+  } finally {
+    if (ownsLease) {
+      try { await connections.releaseRenewalLease(owner, connection.id, leaseId); } catch { /* The bounded lease expires independently. */ }
+    }
   }
-
-  await connections.markNeedsReconnect(owner, connection.id);
-  throw routeError(RECONNECT_ERROR, 409);
 }
 
-async function issueAndVerify(fetchImpl, { channelId, channelSecret }, now) {
+async function observeLineWinner({ connections, owner, id, original, time, pollAttempts, pollDelay }) {
+  for (let attempt = 0; attempt < pollAttempts; attempt += 1) {
+    const winner = await connections.getById(owner, id);
+    requireUsableLineConnection(winner);
+    if (new Date(winner.updatedAt).getTime() > new Date(original.updatedAt).getTime() && isValidAt(winner.expiresAt, time)) return winner;
+    if (attempt + 1 < pollAttempts) await pollDelay(10 * (attempt + 1));
+  }
+  throw retryableLifecycleError(RENEWAL_IN_PROGRESS_ERROR);
+}
+
+async function issueAndVerify(fetchImpl, { channelId, channelSecret }, now, { lifecycle = false, requestTimeoutMs = 10_000 } = {}) {
   const body = new URLSearchParams({ grant_type: "client_credentials", client_id: channelId, client_secret: channelSecret });
   const issued = await providerJson(fetchImpl, TOKEN_URL, {
     method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body,
-  });
+  }, { lifecycle, requestTimeoutMs });
   const accessToken = String(issued?.access_token ?? "").trim();
   const expiresIn = Number(issued?.expires_in);
   if (!accessToken || !Number.isFinite(expiresIn) || expiresIn <= 0) throw lineError();
-  const profile = await providerJson(fetchImpl, BOT_INFO_URL, { headers: { Authorization: `Bearer ${accessToken}` } });
+  const profile = await providerJson(fetchImpl, BOT_INFO_URL, { headers: { Authorization: `Bearer ${accessToken}` } }, { lifecycle, requestTimeoutMs });
   const officialAccountName = typeof profile?.displayName === "string" ? profile.displayName.trim() : "";
   const botUserId = typeof profile?.userId === "string" ? profile.userId.trim() : "";
   if (!officialAccountName || !botUserId) throw lineError();
@@ -93,11 +110,15 @@ async function issueAndVerify(fetchImpl, { channelId, channelSecret }, now) {
   };
 }
 
-async function providerJson(fetchImpl, url, options) {
+async function providerJson(fetchImpl, url, options, { lifecycle, requestTimeoutMs }) {
   let response;
-  try { response = await fetchImpl(url, options); } catch { throw lineError(); }
-  if (!response?.ok) throw lineError();
-  try { return await response.json(); } catch { throw lineError(); }
+  try { response = await fetchWithDeadline(fetchImpl, url, options, requestTimeoutMs); } catch (error) { if (lifecycle) throw error; throw lineError(); }
+  if (!response?.ok) {
+    if (lifecycle && (response?.status === 400 || response?.status === 401)) throw authorizationLifecycleError(RECONNECT_ERROR);
+    if (lifecycle) throw retryableLifecycleError();
+    throw lineError();
+  }
+  try { return await response.json(); } catch { if (lifecycle) throw retryableLifecycleError(); throw lineError(); }
 }
 
 function requireChannelCredentials(input) {

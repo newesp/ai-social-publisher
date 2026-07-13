@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 
+import { authorizationLifecycleError, fetchWithDeadline, retryableLifecycleError } from "./connection-lifecycle.js";
+
 const GRAPH_API_URL = "https://graph.facebook.com/v25.0";
 const AUTHORIZATION_URL = "https://www.facebook.com/v25.0/dialog/oauth";
 const SCOPES = ["pages_show_list", "pages_read_engagement", "pages_manage_posts"];
@@ -13,13 +15,16 @@ const RENEW_WITHIN_MS = 7 * 24 * 60 * 60 * 1000;
 const LEASE_MS = 2 * 60 * 1000;
 const sharedRenewals = new Map();
 
-export function createMetaOAuthService({ env = process.env, fetchImpl = fetch, transactions, connections, now = () => new Date(), renewalFlights = sharedRenewals }) {
+export function createMetaOAuthService({ env = process.env, fetchImpl = fetch, transactions, connections, now = () => new Date(), renewalFlights = sharedRenewals,
+  requestTimeoutMs = 10_000, pollAttempts = 3, pollDelay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   return {
     async start(ownerEmail, returnPath) {
       const owner = normalizeOwner(ownerEmail);
       const config = requireConfig(env);
       const safeReturnPath = toSettingsPath(returnPath);
-      const transaction = await transactions.create(owner, "meta", { phase: "authorization", returnPath: safeReturnPath }, safeReturnPath, currentTime(now));
+      const time = currentTime(now);
+      await transactions.purgeExpired(time);
+      const transaction = await transactions.create(owner, "meta", { phase: "authorization", returnPath: safeReturnPath }, safeReturnPath, time);
       const url = new URL(AUTHORIZATION_URL);
       url.searchParams.set("client_id", config.appId);
       url.searchParams.set("redirect_uri", config.redirectUri);
@@ -63,12 +68,14 @@ export function createMetaOAuthService({ env = process.env, fetchImpl = fetch, t
 
     async selectPage(ownerEmail, transactionId, pageId) {
       const owner = normalizeOwner(ownerEmail);
-      const pending = await transactions.consume(owner, requireValue(transactionId, TRANSACTION_ERROR), currentTime(now));
+      const id = requireValue(transactionId, TRANSACTION_ERROR);
+      const time = currentTime(now);
+      const pending = await transactions.read(owner, id, time);
       if (pending?.phase !== "page_selection" || !Array.isArray(pending.pages)) throw transactionError();
       const page = pending.pages.find((candidate) => candidate.id === String(pageId ?? "").trim());
       if (!page) throw routeError("The selected Meta Page is not available.", 400);
 
-      const connection = await connections.replaceDefault(owner, {
+      const connection = await connections.replaceDefaultFromOAuth(owner, {
         platform: "meta",
         displayName: page.name,
         credentials: {
@@ -79,7 +86,8 @@ export function createMetaOAuthService({ env = process.env, fetchImpl = fetch, t
           userTokenExpiresAt: pending.expiresAt ?? null,
         },
         expiresAt: parseExpiresAt(pending.expiresAt),
-      });
+      }, id, time);
+      if (!connection) throw transactionError();
       return toAvailability(connection);
     },
 
@@ -88,18 +96,18 @@ export function createMetaOAuthService({ env = process.env, fetchImpl = fetch, t
       const id = requireValue(connectionId, "The Meta connection is not available.");
       const key = `${owner}:${id}`;
       if (renewalFlights.has(key)) return renewalFlights.get(key);
-      const operation = ensureMetaUsable({ owner, id, env, fetchImpl, connections, now });
+      const operation = ensureMetaUsable({ owner, id, env, fetchImpl, connections, now, requestTimeoutMs, pollAttempts, pollDelay });
       renewalFlights.set(key, operation);
       try { return await operation; } finally { renewalFlights.delete(key); }
     },
   };
 }
 
-async function ensureMetaUsable({ owner, id, env, fetchImpl, connections, now }) {
+async function ensureMetaUsable({ owner, id, env, fetchImpl, connections, now, requestTimeoutMs, pollAttempts, pollDelay }) {
   const connection = await connections.getById(owner, id);
   requireUsableMetaConnection(connection);
   const time = currentTime(now);
-  const validation = await validatePage(fetchImpl, connection.credentials);
+  const validation = await validatePage(fetchImpl, connection.credentials, requestTimeoutMs);
   if (validation === "transient") return { ...connection, warning: META_VALIDATION_WARNING };
   const pageValid = validation === "valid";
   const userExpiry = parseExpiresAt(connection.credentials?.userTokenExpiresAt ?? connection.expiresAt);
@@ -120,11 +128,12 @@ async function ensureMetaUsable({ owner, id, env, fetchImpl, connections, now })
     throw routeError(META_RENEWAL_IN_PROGRESS, 503);
   }
 
+  let ownsLease = true;
   try {
     const config = requireConfig(env);
     const retainedToken = requireToken({ access_token: connection.credentials?.longLivedUserAccessToken }, "access_token");
-    const renewedUser = await exchangeLongLivedToken(fetchImpl, config, retainedToken);
-    const pages = await listPages(fetchImpl, renewedUser);
+    const renewedUser = await exchangeLongLivedToken(fetchImpl, config, retainedToken, { lifecycle: true, requestTimeoutMs });
+    const pages = await listPages(fetchImpl, renewedUser, { lifecycle: true, requestTimeoutMs });
     const page = pages.find((candidate) => candidate.id === String(connection.credentials?.pageId ?? ""));
     if (!page) throw metaError();
     const expiresAt = expiresAtFrom(renewedUser.expires_in, time);
@@ -135,18 +144,34 @@ async function ensureMetaUsable({ owner, id, env, fetchImpl, connections, now })
       longLivedUserAccessToken: renewedUser.access_token, userTokenExpiresAt: expiresAt.toISOString(), expiresAt: expiresAt.toISOString(),
     });
     if (updated) return updated;
-    const winner = await connections.getById(owner, id);
-    requireUsableMetaConnection(winner);
-    return winner;
-  } catch {
-    try { await connections.releaseRenewalLease(owner, id, leaseId); } catch { /* The bounded lease expires independently. */ }
+    ownsLease = false;
+    return observeMetaWinner({ connections, owner, id, original: connection, pollAttempts, pollDelay });
+  } catch (error) {
     if (pageValid) return { ...connection, warning: META_RENEWAL_WARNING };
-    await connections.markNeedsReconnect(owner, id);
-    throw routeError(META_RECONNECT_ERROR, 409);
+    if (error?.authorizationRejected) {
+      await connections.markNeedsReconnect(owner, id);
+      throw routeError(META_RECONNECT_ERROR, 409);
+    }
+    throw error?.retryable ? error : retryableLifecycleError(META_RENEWAL_IN_PROGRESS);
+  } finally {
+    if (ownsLease) {
+      try { await connections.releaseRenewalLease(owner, id, leaseId); } catch { /* The bounded lease expires independently. */ }
+    }
   }
 }
 
-async function validatePage(fetchImpl, credentials) {
+async function observeMetaWinner({ connections, owner, id, original, pollAttempts, pollDelay }) {
+  for (let attempt = 0; attempt < pollAttempts; attempt += 1) {
+    const winner = await connections.getById(owner, id);
+    requireUsableMetaConnection(winner);
+    if (new Date(winner.updatedAt).getTime() > new Date(original.updatedAt).getTime()
+      && winner.credentials?.pageAccessToken !== original.credentials?.pageAccessToken) return winner;
+    if (attempt + 1 < pollAttempts) await pollDelay(10 * (attempt + 1));
+  }
+  throw retryableLifecycleError(META_RENEWAL_IN_PROGRESS);
+}
+
+async function validatePage(fetchImpl, credentials, requestTimeoutMs) {
   const pageId = String(credentials?.pageId ?? "").trim();
   const pageAccessToken = String(credentials?.pageAccessToken ?? "").trim();
   if (!pageId || !pageAccessToken) return "rejected";
@@ -154,14 +179,14 @@ async function validatePage(fetchImpl, credentials) {
   try {
     const url = new URL(`${GRAPH_API_URL}/${encodeURIComponent(pageId)}`);
     url.searchParams.set("fields", "id");
-    response = await fetchImpl(url.toString(), { headers: { Authorization: `Bearer ${pageAccessToken}` } });
+    response = await fetchWithDeadline(fetchImpl, url.toString(), { headers: { Authorization: `Bearer ${pageAccessToken}` } }, requestTimeoutMs);
   } catch {
     return "transient";
   }
   let body = {};
   try { body = await response.json(); } catch { /* Provider bodies are never surfaced. */ }
   if (response?.ok) return String(body?.id ?? "") === pageId ? "valid" : "rejected";
-  if (response?.status === 401 || response?.status === 403 || Number(body?.error?.code) === 190) return "rejected";
+  if (response?.status === 401 || Number(body?.error?.code) === 190) return "rejected";
   return "transient";
 }
 
@@ -180,20 +205,19 @@ async function exchangeCode(fetchImpl, config, code) {
   return requireToken(await readProviderJson(fetchImpl, url), "access_token");
 }
 
-async function exchangeLongLivedToken(fetchImpl, config, shortLivedToken) {
+async function exchangeLongLivedToken(fetchImpl, config, shortLivedToken, options) {
   const url = new URL(`${GRAPH_API_URL}/oauth/access_token`);
   url.searchParams.set("grant_type", "fb_exchange_token");
   url.searchParams.set("client_id", config.appId);
   url.searchParams.set("client_secret", config.appSecret);
   url.searchParams.set("fb_exchange_token", shortLivedToken.access_token);
-  return requireToken(await readProviderJson(fetchImpl, url), "access_token");
+  return requireToken(await readProviderJson(fetchImpl, url, {}, options), "access_token");
 }
 
-async function listPages(fetchImpl, longLivedToken) {
+async function listPages(fetchImpl, longLivedToken, options) {
   const url = new URL(`${GRAPH_API_URL}/me/accounts`);
   url.searchParams.set("fields", "id,name,access_token");
-  url.searchParams.set("access_token", longLivedToken.access_token);
-  const body = await readProviderJson(fetchImpl, url);
+  const body = await readProviderJson(fetchImpl, url, { headers: { Authorization: `Bearer ${longLivedToken.access_token}` } }, options);
   if (!Array.isArray(body?.data)) throw metaError();
   return body.data.map((page) => {
     const id = String(page?.id ?? "").trim();
@@ -204,14 +228,23 @@ async function listPages(fetchImpl, longLivedToken) {
   });
 }
 
-async function readProviderJson(fetchImpl, url) {
+async function readProviderJson(fetchImpl, url, requestOptions = {}, { lifecycle = false, requestTimeoutMs = 10_000 } = {}) {
   let response;
   try {
-    response = await fetchImpl(url.toString());
-  } catch {
+    response = await fetchWithDeadline(fetchImpl, url.toString(), requestOptions, requestTimeoutMs);
+  } catch (error) {
+    if (lifecycle) throw error;
     throw metaError();
   }
-  if (!response?.ok) throw metaError();
+  if (!response?.ok) {
+    let body = {};
+    try { body = await response.json(); } catch { /* Provider bodies are discarded. */ }
+    if (lifecycle && (response.status === 400 || response.status === 401 || Number(body?.error?.code) === 190)) {
+      throw authorizationLifecycleError(META_RECONNECT_ERROR);
+    }
+    if (lifecycle) throw retryableLifecycleError();
+    throw metaError();
+  }
   try {
     return await response.json();
   } catch {

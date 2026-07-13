@@ -57,7 +57,24 @@ function createMemoryRepository() {
       post.status = "publishing";
       post.publishingStartedAt = now;
       post.updatedAt = now;
-      for (const target of targets.filter((item) => item.postId === id)) target.status = "publishing";
+      for (const target of targets.filter((item) => item.postId === id && item.status === "draft")) target.status = "publishing";
+      return withTargets(post);
+    },
+    async requeueClaimedPost(ownerEmail, id, status, retryAt, now) {
+      const post = posts.find((item) => item.ownerEmail === ownerEmail && item.id === id && item.status === "publishing");
+      if (!post) return null;
+      post.status = status; post.scheduledFor = retryAt; post.publishingStartedAt = null; post.updatedAt = now;
+      for (const target of targets.filter((item) => item.postId === id && item.status === "publishing")) target.status = status;
+      return withTargets(post);
+    },
+    async recordPublishProgressAndRequeue(ownerEmail, id, results, status, retryAt, now) {
+      const post = posts.find((item) => item.ownerEmail === ownerEmail && item.id === id);
+      for (const result of results.filter((item) => item.status === "published")) {
+        const target = targets.find((item) => item.postId === id && item.platform === result.platform);
+        Object.assign(target, { status: "published", externalPostId: result.externalId ?? null, publishedAt: now, updatedAt: now });
+      }
+      for (const target of targets.filter((item) => item.postId === id && item.status === "publishing")) target.status = status;
+      Object.assign(post, { status, scheduledFor: retryAt, publishingStartedAt: null, updatedAt: now });
       return withTargets(post);
     },
     async recordPublishResults(ownerEmail, id, results, now) {
@@ -291,6 +308,46 @@ test("a pre-feature target without a connection id fails safely without any fall
   assert.equal(publishCalls, 0);
   assert.equal(post.targets[0].status, "failed");
   assert.equal(post.targets[0].errorMessage, "The selected platform connection needs to be reconnected.");
+});
+
+test("immediate lifecycle retry requeues the claim and returns generic 503", async () => {
+  const repository = createMemoryRepository();
+  const created = await createPost({ ownerEmail: "owner@example.com", input: { ...input, targets: [input.targets[0]] }, mode: "now", repository, resolveConnection });
+  const transient = new Error("private repository outage owner@example.com");
+  transient.status = 503;
+  transient.retryable = true;
+
+  await assert.rejects(publishPost({
+    ownerEmail: "owner@example.com", postId: created.id, repository,
+    getConnection: async () => { throw transient; },
+  }), (error) => error.status === 503 && error.retryable === true && !error.message.includes("private"));
+
+  assert.equal(repository.posts[0].status, "draft");
+  assert.equal(repository.targets[0].status, "draft");
+});
+
+test("partial transient publish retries only unfinished targets", async () => {
+  const repository = createMemoryRepository();
+  const created = await createPost({ ownerEmail: "owner@example.com", input, mode: "now", repository, resolveConnection });
+  await assert.rejects(publishPost({
+    ownerEmail: "owner@example.com", postId: created.id, repository,
+    getConnection: async (ownerEmail, id) => ({ ...Object.values(defaultConnections).find((item) => item.id === id), ownerEmail }),
+    publishTargets: async () => [
+      { platform: "meta", status: "published", externalId: "meta-1" },
+      { platform: "line", status: "failed", error: "temporary", retryable: true },
+    ],
+  }), (error) => error.status === 503 && error.retryable);
+  assert.deepEqual(repository.targets.map((target) => [target.platform, target.status]), [["meta", "published"], ["line", "draft"]]);
+
+  const retried = await publishPost({
+    ownerEmail: "owner@example.com", postId: created.id, repository,
+    getConnection: async (ownerEmail, id) => ({ ...Object.values(defaultConnections).find((item) => item.id === id), ownerEmail }),
+    publishTargets: async ({ targets }) => {
+      assert.deepEqual(targets.map((target) => target.platform), ["line"]);
+      return [{ platform: "line", status: "published", externalId: "line-1" }];
+    },
+  });
+  assert.equal(retried.status, "published");
 });
 
 test("redacts nested connection credentials before persisting a publisher error", async () => {

@@ -2,6 +2,7 @@ import { normalizeEmail } from "../auth/policy.js";
 import { buildPlatformPreviews } from "../platform-preview/build-platform-previews.js";
 import { filterActivePlatforms } from "../platforms/platform-config.js";
 import { publishTargets as publishPlatformTargets } from "../platforms/publish-service.js";
+import { retryableLifecycleError } from "../platform-connections/connection-lifecycle.js";
 import { POST_STATUS } from "./post-status.js";
 import { computeScheduledFor } from "./schedule-time.js";
 
@@ -110,6 +111,7 @@ export async function publishClaimedPost({
     const publishableTargets = [];
     const unavailableResults = [];
     for (const target of post.targets) {
+      if (target.status === POST_STATUS.PUBLISHED) continue;
       if (!target.platformConnectionId) {
         unavailableResults.push(failedReconnectResult(target.platform));
         continue;
@@ -117,7 +119,8 @@ export async function publishClaimedPost({
       let connection;
       try {
         connection = await getConnection?.(owner, target.platformConnectionId);
-      } catch {
+      } catch (error) {
+        if (error?.retryable || Number(error?.status) >= 500) throw retryableLifecycleError();
         unavailableResults.push(failedReconnectResult(target.platform));
         continue;
       }
@@ -148,7 +151,23 @@ export async function publishClaimedPost({
       ...terminalResults(publishableTargets, await publishTargets({ targets, connections }), connections, owner),
       ...unavailableResults,
     ];
-  } catch {
+    if (results.some((result) => result.retryable)) {
+      const retryStatus = post.scheduledFor ? POST_STATUS.SCHEDULED : POST_STATUS.DRAFT;
+      const retryAt = retryStatus === POST_STATUS.SCHEDULED ? new Date(now.getTime() + 60_000) : null;
+      await repository.recordPublishProgressAndRequeue(owner, post.id, results, retryStatus, retryAt, now);
+      const error = retryableLifecycleError();
+      error.alreadyRequeued = true;
+      throw error;
+    }
+  } catch (error) {
+    if (error?.retryable) {
+      const retryStatus = post.scheduledFor ? POST_STATUS.SCHEDULED : POST_STATUS.DRAFT;
+      const retryAt = retryStatus === POST_STATUS.SCHEDULED ? new Date(now.getTime() + 60_000) : null;
+      if (!error.alreadyRequeued) {
+        try { await repository.requeueClaimedPost(owner, post.id, retryStatus, retryAt, now); } catch { /* Keep the outward failure generic and retryable. */ }
+      }
+      throw retryableLifecycleError("Publishing credentials are temporarily unavailable. Please retry shortly.");
+    }
     results = post.targets.map((target) => ({
       platform: target.platform,
       status: POST_STATUS.FAILED,

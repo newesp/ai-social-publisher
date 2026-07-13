@@ -298,6 +298,25 @@ test("post handlers bind selected targets through the authenticated owner's reso
   assert.equal(JSON.stringify(await response.json()).includes("meta-immutable"), false);
 });
 
+test("publish-now composes one connection resolver per request and reuses it for all targets", async () => {
+  const repository = createMemoryRepository();
+  let factories = 0;
+  const handlers = createPostRouteHandlers({
+    requireAppUser: async () => "owner@example.com", requirePublisher: async () => "owner@example.com",
+    getRepository: async () => repository, resolveConnection,
+    createGetConnection: () => { factories += 1; return getConnection; },
+    publishTargets: async ({ targets }) => targets.map((target) => ({ platform: target.platform, status: "published" })),
+    now: () => new Date("2026-07-09T00:00:00.000Z"),
+  });
+
+  await handlers.POST(new Request("http://localhost/api/posts", { method: "POST", body: JSON.stringify({
+    productName: "Demo", productFeatures: "Fast", mode: "now",
+    targets: [{ platform: "meta", content: "Meta", hashtags: [] }, { platform: "line", content: "Line", hashtags: [] }],
+  }) }));
+
+  assert.equal(factories, 1);
+});
+
 test("legacy direct publish route is retired instead of accepting a client-controlled post payload", async () => {
   const source = await readFile(new URL("../src/app/api/posts/[id]/publish/route.js", import.meta.url), "utf8");
 

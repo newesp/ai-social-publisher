@@ -172,12 +172,62 @@ test("ensureUsable keeps a still-valid token with a recoverable warning when ren
 
 test("ensureUsable marks only the owner connection as needing reconnect when an expired token cannot renew", async () => {
   const connections = createConnections([connection({ expiresAt: "2026-07-13T00:00:00.000Z" })]);
-  const service = createLineChannelService({ connections, now: () => now, fetchImpl: async () => jsonResponse({}, false) });
+  const service = createLineChannelService({ connections, now: () => now, fetchImpl: async () => jsonResponse({}, false, 401) });
 
   await assert.rejects(service.ensureUsable("owner@example.com", "connection-1"), /reconnect/i);
 
   assert.deepEqual(connections.marked, [["owner@example.com", "connection-1"]]);
   await assert.rejects(service.ensureUsable("other@example.com", "connection-1"), /not available/i);
+});
+
+test("expired LINE renewal 503 stays retryable and does not mark reconnect", async () => {
+  const connections = createConnections([connection({ expiresAt: "2026-07-12T00:00:00.000Z" })]);
+  const service = createLineChannelService({ connections, now: () => now, fetchImpl: async () => jsonResponse({ private: "body" }, false, 503) });
+
+  await assert.rejects(service.ensureUsable("owner@example.com", "connection-1"), (error) => error.status === 503 && error.retryable === true && !error.message.includes("body"));
+  assert.deepEqual(connections.marked, []);
+});
+
+test("lost LINE renewal fencing never marks or returns stale expired credentials", async () => {
+  const connections = createConnections([connection({ expiresAt: "2026-07-12T00:00:00.000Z" })]);
+  connections.forceCompletionLoss = true;
+  const service = createLineChannelService({
+    connections, now: () => now, pollDelay: async () => {}, pollAttempts: 2,
+    fetchImpl: async (url) => url.endsWith("/oauth/accessToken")
+      ? jsonResponse({ access_token: "late-a-token", expires_in: 2_592_000 })
+      : jsonResponse({ userId: "U123", displayName: "Owner Official Account" }),
+  });
+
+  await assert.rejects(service.ensureUsable("owner@example.com", "connection-1"), (error) => error.status === 503 && error.retryable === true);
+  assert.deepEqual(connections.marked, []);
+});
+
+test("a LINE renewal loser observes and returns a demonstrably newer fenced winner", async () => {
+  const connections = createConnections([connection({ expiresAt: "2026-07-12T00:00:00.000Z" })]);
+  connections.forceCompletionLoss = true;
+  const service = createLineChannelService({
+    connections, now: () => now, pollAttempts: 2,
+    pollDelay: async () => connections.installWinner("connection-1", "winner-token"),
+    fetchImpl: async (url) => url.endsWith("/oauth/accessToken")
+      ? jsonResponse({ access_token: "late-loser-token", expires_in: 2_592_000 })
+      : jsonResponse({ userId: "U123", displayName: "Owner Official Account" }),
+  });
+
+  const usable = await service.ensureUsable("owner@example.com", "connection-1");
+
+  assert.equal(usable.credentials.accessToken, "winner-token");
+  assert.deepEqual(connections.marked, []);
+});
+
+test("LINE provider deadline abort is retryable and releases the lease", async () => {
+  const connections = createConnections([connection({ expiresAt: "2026-07-12T00:00:00.000Z" })]);
+  const service = createLineChannelService({
+    connections, now: () => now, requestTimeoutMs: 5,
+    fetchImpl: async (_url, options) => new Promise((_resolve, reject) => options.signal.addEventListener("abort", () => reject(new Error("aborted private")))),
+  });
+  await assert.rejects(service.ensureUsable("owner@example.com", "connection-1"), (error) => error.status === 503 && error.retryable === true);
+  assert.equal(connections.released.length, 1);
+  assert.deepEqual(connections.marked, []);
 });
 
 function connection(overrides = {}) {
@@ -194,10 +244,19 @@ function createConnections(initial = []) {
   const replaced = [];
   const replaceAttempts = [];
   const marked = [];
+  const released = [];
   let resolveLease;
   const leaseAcquired = new Promise((resolve) => { resolveLease = resolve; });
   return {
-    replaced, replaceAttempts, marked, leaseAcquired,
+    replaced, replaceAttempts, marked, released, forceCompletionLoss: false, leaseAcquired,
+    installWinner(id, accessToken) {
+      const record = records.get(id);
+      record.credentials = { ...record.credentials, accessToken, expiresAt: "2026-08-12T00:00:00.000Z" };
+      record.expiresAt = new Date(record.credentials.expiresAt);
+      record.updatedAt = new Date(record.updatedAt.getTime() + 1);
+      record.renewalLeaseId = null;
+      record.renewalLeaseExpiresAt = null;
+    },
     async replaceDefault(ownerEmail, input) {
       const created = { id: `connection-${replaced.length + 1}`, ownerEmail, platform: input.platform, displayName: input.displayName, state: "active", expiresAt: input.expiresAt, updatedAt: now, credentials: input.credentials };
       records.set(created.id, created); replaced.push({ ownerEmail, input }); return created;
@@ -212,14 +271,14 @@ function createConnections(initial = []) {
     },
     async completeRenewalLease(ownerEmail, id, leaseId, credentials) {
       const record = records.get(id);
-      const updated = record?.ownerEmail === ownerEmail && record.renewalLeaseId === leaseId;
+      const updated = !this.forceCompletionLoss && record?.ownerEmail === ownerEmail && record.renewalLeaseId === leaseId;
       replaceAttempts.push({ ownerEmail, id, credentials, updated });
       if (!updated) return null;
       record.credentials = credentials; record.expiresAt = new Date(credentials.expiresAt); record.updatedAt = new Date(record.updatedAt.getTime() + 1);
       record.renewalLeaseId = null; record.renewalLeaseExpiresAt = null;
       return structuredClone(record);
     },
-    async releaseRenewalLease(ownerEmail, id, leaseId) { const record = records.get(id); if (record?.ownerEmail === ownerEmail && record.renewalLeaseId === leaseId) { record.renewalLeaseId = null; record.renewalLeaseExpiresAt = null; } },
+    async releaseRenewalLease(ownerEmail, id, leaseId) { released.push([ownerEmail, id, leaseId]); const record = records.get(id); if (record?.ownerEmail === ownerEmail && record.renewalLeaseId === leaseId) { record.renewalLeaseId = null; record.renewalLeaseExpiresAt = null; } },
     async replaceCredentialsIfUnchanged(ownerEmail, id, previousUpdatedAt, credentials) {
       const record = records.get(id);
       const updated = record?.ownerEmail === ownerEmail && ["active", "archived"].includes(record.state) && record.updatedAt.getTime() === previousUpdatedAt.getTime();
@@ -231,4 +290,4 @@ function createConnections(initial = []) {
   };
 }
 
-function jsonResponse(value, ok = true) { return { ok, async json() { return value; } }; }
+function jsonResponse(value, ok = true, status = ok ? 200 : 500) { return { ok, status, async json() { return value; } }; }

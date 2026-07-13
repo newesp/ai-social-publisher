@@ -6,15 +6,10 @@ import { createCronRouteHandlers, runDuePostScheduler } from "../../../lib/sched
 import { publishTargets } from "../../../lib/platforms/publish-service.js";
 import { getPlatformConnectionServices } from "../../../lib/platform-connections/platform-connection-route-handlers.js";
 
-async function getConnection(ownerEmail, connectionId) {
-  const services = getPlatformConnectionServices();
-  return createPublishingConnectionResolver(services)(ownerEmail, connectionId);
-}
-
 const handlers = createCronRouteHandlers({
   runScheduler: () => runDuePostScheduler({
     repository: createPostRepository(),
-    getConnection,
+    createGetConnection: () => createPublishingConnectionResolver(getPlatformConnectionServices()),
     publishTargets,
   }),
   respond: (body, init) => NextResponse.json(body, init),

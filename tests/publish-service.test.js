@@ -171,7 +171,33 @@ test("does not mark a connection for reconnect on transient provider failures", 
   });
 
   assert.deepEqual(marked, []);
-  assert.deepEqual(results, [{ platform: "line", status: "failed", error: "line publishing failed." }]);
+  assert.deepEqual(results, [{ platform: "line", status: "failed", error: "line publishing failed.", retryable: true }]);
+});
+
+test("treats a provider network failure as retryable without exposing the transport error", async () => {
+  const results = await publishTargets({
+    targets: [{ platform: "line", platformConnectionId: "line-a", publishPayload: { text: "LINE A" } }],
+    connections: [{ id: "line-a", platform: "line", credentials: { accessToken: "line-token" } }],
+    fetchImpl: async () => { throw new Error("socket failed for secret endpoint"); },
+  });
+
+  assert.deepEqual(results, [{ platform: "line", status: "failed", error: "line publishing failed.", retryable: true }]);
+});
+
+test("does not mark Meta or LINE reconnect for ambiguous 403 policy responses", async () => {
+  for (const platform of ["meta", "line"]) {
+    const marked = [];
+    const connection = platform === "meta"
+      ? { id: "meta-a", platform, credentials: { pageId: "page", pageAccessToken: "token" }, markNeedsReconnect: async () => marked.push(platform) }
+      : { id: "line-a", platform, credentials: { accessToken: "token" }, markNeedsReconnect: async () => marked.push(platform) };
+    await publishTargets({
+      targets: [{ platform, platformConnectionId: connection.id, publishPayload: platform === "meta" ? { message: "m" } : { text: "m" } }],
+      connections: [connection], fetchImpl: async () => new Response(JSON.stringify({ error: { code: 10 } }), {
+        status: 403, headers: { "content-type": "application/json" },
+      }),
+    });
+    assert.deepEqual(marked, []);
+  }
 });
 
 test("marks a text-body 401 credential rejection without exposing its body", async () => {

@@ -49,7 +49,9 @@ export function createPostRepository(db = createDbClient()) {
         const [updated] = await tx.update(posts).set({ status: POST_STATUS.PUBLISHING, publishingStartedAt: now, updatedAt: now })
           .where(and(eq(posts.ownerEmail, ownerEmail), eq(posts.id, postId), eq(posts.status, POST_STATUS.DRAFT))).returning();
         if (!updated) return null;
-        await tx.update(postTargets).set({ status: POST_STATUS.PUBLISHING, updatedAt: now }).where(eq(postTargets.postId, postId));
+        await tx.update(postTargets).set({ status: POST_STATUS.PUBLISHING, updatedAt: now }).where(and(
+          eq(postTargets.postId, postId), eq(postTargets.status, POST_STATUS.DRAFT),
+        ));
         return findPostByOwner(tx, ownerEmail, postId);
       });
     },
@@ -66,10 +68,43 @@ export function createPostRepository(db = createDbClient()) {
         const claimedPosts = [];
         for (const duePost of duePosts) {
           await tx.update(postTargets).set({ status: POST_STATUS.PUBLISHING, updatedAt: now })
-            .where(eq(postTargets.postId, duePost.id));
+            .where(and(eq(postTargets.postId, duePost.id), eq(postTargets.status, POST_STATUS.SCHEDULED)));
           claimedPosts.push(await findPostByOwner(tx, duePost.ownerEmail, duePost.id));
         }
         return claimedPosts;
+      }));
+    },
+    async requeueClaimedPost(ownerEmail, postId, status, retryAt, now) {
+      return retryBusyTransaction(() => db.transaction(async (tx) => {
+        const [updated] = await tx.update(posts).set({
+          status, scheduledFor: status === POST_STATUS.SCHEDULED ? retryAt : null,
+          publishingStartedAt: null, updatedAt: now,
+        }).where(and(eq(posts.ownerEmail, ownerEmail), eq(posts.id, postId), eq(posts.status, POST_STATUS.PUBLISHING))).returning();
+        if (!updated) return null;
+        await tx.update(postTargets).set({ status, updatedAt: now }).where(and(
+          eq(postTargets.postId, postId), eq(postTargets.status, POST_STATUS.PUBLISHING),
+        ));
+        return findPostByOwner(tx, ownerEmail, postId);
+      }));
+    },
+    async recordPublishProgressAndRequeue(ownerEmail, postId, results, status, retryAt, now) {
+      return retryBusyTransaction(() => db.transaction(async (tx) => {
+        const [current] = await tx.select({ id: posts.id }).from(posts).where(and(
+          eq(posts.ownerEmail, ownerEmail), eq(posts.id, postId), eq(posts.status, POST_STATUS.PUBLISHING),
+        )).limit(1);
+        if (!current) return null;
+        for (const result of results.filter((item) => item.status === POST_STATUS.PUBLISHED)) {
+          await tx.update(postTargets).set({
+            status: POST_STATUS.PUBLISHED, externalPostId: result.externalId ?? null, errorMessage: null,
+            publishedAt: now, updatedAt: now,
+          }).where(and(eq(postTargets.postId, postId), eq(postTargets.platform, result.platform), eq(postTargets.status, POST_STATUS.PUBLISHING)));
+        }
+        await tx.update(postTargets).set({ status, updatedAt: now }).where(and(
+          eq(postTargets.postId, postId), eq(postTargets.status, POST_STATUS.PUBLISHING),
+        ));
+        await tx.update(posts).set({ status, scheduledFor: status === POST_STATUS.SCHEDULED ? retryAt : null,
+          publishingStartedAt: null, updatedAt: now }).where(and(eq(posts.ownerEmail, ownerEmail), eq(posts.id, postId)));
+        return findPostByOwner(tx, ownerEmail, postId);
       }));
     },
     async recordPublishResults(ownerEmail, postId, results, now) {

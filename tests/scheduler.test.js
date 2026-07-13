@@ -108,6 +108,42 @@ test("scheduler loads the connection id stored on the scheduled target instead o
   assert.deepEqual(loaded, [["owner@example.com", "meta-7"]]);
 });
 
+test("scheduler lifecycle 503 requeues scheduled work instead of terminalizing it", async () => {
+  const duePost = { ...claimedPost({ id: 9 }), scheduledFor: new Date("2026-07-11T01:00:00.000Z") };
+  const requeued = [];
+  const transient = new Error("private validation outage");
+  transient.status = 503;
+  transient.retryable = true;
+  const repository = {
+    async claimDueScheduledPosts() { return [duePost]; },
+    async requeueClaimedPost(owner, id, status, retryAt) {
+      requeued.push([owner, id, status, retryAt]);
+      return { ...duePost, status, scheduledFor: retryAt };
+    },
+  };
+
+  const result = await runDuePostScheduler({ repository, getConnection: async () => { throw transient; }, now: NOW });
+
+  assert.equal(requeued.length, 1);
+  assert.deepEqual(requeued[0].slice(0, 3), ["owner@example.com", 9, "scheduled"]);
+  assert.equal(requeued[0][3].getTime(), NOW.getTime() + 60_000);
+  assert.deepEqual(result.posts, [{ id: 9, status: "scheduled" }]);
+});
+
+test("scheduler composes one connection resolver per invocation", async () => {
+  let factories = 0;
+  const repository = {
+    async claimDueScheduledPosts() { return [claimedPost({ id: 1 }), claimedPost({ id: 2 })]; },
+    async recordPublishResults(_owner, id) { return { id, status: "published" }; },
+  };
+  await runDuePostScheduler({
+    repository,
+    createGetConnection: () => { factories += 1; return async (ownerEmail, id) => ({ id, ownerEmail, platform: "meta", state: "active", credentials: {} }); },
+    publishTargets: async ({ targets }) => targets.map((target) => ({ platform: target.platform, status: "published" })), now: NOW,
+  });
+  assert.equal(factories, 1);
+});
+
 test("cron route fails closed when the secret is absent or Bearer authorization is invalid", async () => {
   let calls = 0;
   const handlersWithoutSecret = createCronRouteHandlers({

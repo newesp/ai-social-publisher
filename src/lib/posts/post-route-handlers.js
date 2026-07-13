@@ -16,7 +16,7 @@ export function createPublishingConnectionResolver({ connections, line, meta }) 
   };
 }
 
-export function createPostRouteHandlers({ requireAppUser, requirePublisher, getRepository, resolveConnection, getConnection, publishTargets, now = () => new Date(), respond = (body, init) => Response.json(body, init) }) {
+export function createPostRouteHandlers({ requireAppUser, requirePublisher, getRepository, resolveConnection, getConnection, createGetConnection = () => getConnection, publishTargets, now = () => new Date(), respond = (body, init) => Response.json(body, init) }) {
   return {
     async GET() {
       const ownerEmail = await requireAppUser();
@@ -32,8 +32,9 @@ export function createPostRouteHandlers({ requireAppUser, requirePublisher, getR
       let published = post;
       if (input.mode === "now") {
         try {
-          published = await publishPost({ ownerEmail, postId: post.id, repository, getConnection, publishTargets, now: now() });
-        } catch {
+          published = await publishPost({ ownerEmail, postId: post.id, repository, getConnection: createGetConnection(), publishTargets, now: now() });
+        } catch (error) {
+          if (error?.retryable) throw routeError("Publishing is temporarily unavailable. Please retry shortly.", 503);
           throw routeError("Publishing failed and the outcome could not be recorded.", 500);
         }
       }

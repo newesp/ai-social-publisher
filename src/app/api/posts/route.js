@@ -10,17 +10,12 @@ async function resolveConnection(ownerEmail, platform) {
   return getPlatformConnectionServices().connections.getDefault(ownerEmail, platform);
 }
 
-async function getConnection(ownerEmail, connectionId) {
-  const services = getPlatformConnectionServices();
-  return createPublishingConnectionResolver(services)(ownerEmail, connectionId);
-}
-
 const handlers = createPostRouteHandlers({
   requireAppUser,
   requirePublisher,
   getRepository: () => createPostRepository(),
   resolveConnection,
-  getConnection,
+  createGetConnection: () => createPublishingConnectionResolver(getPlatformConnectionServices()),
   publishTargets,
   respond: (body, init) => NextResponse.json(body, init),
 });

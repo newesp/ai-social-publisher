@@ -104,24 +104,6 @@ test("connection credentials are encrypted and isolated by owner", async () => {
   }]);
 });
 
-test("connection credentials are replaced and archived only by their owner", async () => {
-  const repository = createMemoryRepository();
-  const store = createPlatformConnectionStore({ repository, encryptionKey: "test-key" });
-  const connection = await store.create("owner@example.com", {
-    platform: "meta",
-    displayName: "Owner Page",
-    credentials: { pageAccessToken: "old-token" },
-  });
-
-  assert.equal(await store.replaceCredentials("other@example.com", connection.id, { pageAccessToken: "other-token" }), null);
-  const replaced = await store.replaceCredentials("owner@example.com", connection.id, { pageAccessToken: "new-token" });
-  assert.equal(replaced.credentials.pageAccessToken, "new-token");
-  assert.equal(repository.connections.get(connection.id).encryptedCredentials.includes("new-token"), false);
-  assert.equal((await store.archive("other@example.com", connection.id)), null);
-  assert.equal((await store.archive("owner@example.com", connection.id)).state, "archived");
-  assert.equal(await store.getDefault("owner@example.com", "meta"), null);
-});
-
 test("replacing a default connection archives prior active records atomically", async () => {
   const repository = createMemoryRepository();
   const store = createPlatformConnectionStore({ repository, encryptionKey: "test-key" });
@@ -138,28 +120,6 @@ test("replacing a default connection archives prior active records atomically", 
   assert.deepEqual([...repository.connections.values()].filter((record) => record.ownerEmail === "owner@example.com"
     && record.platform === "meta" && record.state === "active").map((record) => record.id), [replacement.id]);
   assert.equal(repository.connections.get(replacement.id).encryptedCredentials.includes("new-token"), false);
-});
-
-test("archiveDefault delegates one owner-platform-state operation without reading a stale connection id", async () => {
-  const calls = [];
-  const store = createPlatformConnectionStore({
-    repository: {
-      async archiveActiveDefaultConnection(...args) {
-        calls.push(args);
-        return { platform: "meta", state: "archived", displayName: "Owner Page", credentialExpiresAt: null };
-      },
-      async findDefaultByOwnerAndPlatform() { throw new Error("must not read before archive"); },
-      async archiveConnection() { throw new Error("must not archive by stale id"); },
-    },
-    encryptionKey: "test-key",
-  });
-
-  assert.deepEqual(await store.archiveDefault("OWNER@example.com", "meta"), {
-    platform: "meta", state: "archived", displayName: "Owner Page", expiresAt: null,
-  });
-  assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].slice(0, 2), ["owner@example.com", "meta"]);
-  assert.equal(calls[0][2] instanceof Date, true);
 });
 
 test("disconnectDefault atomically clears credentials and returns them only to the provider-revoke caller", async () => {

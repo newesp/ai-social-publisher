@@ -30,13 +30,17 @@ test("settings uses safe per-user connection APIs instead of stored publishing c
 
 test("settings renders actionable loading, disconnected, active, reconnect, and error states", async () => {
   const source = await readFile(new URL("../src/components/SettingsPanel.js", import.meta.url), "utf8");
+  const lifecycleSource = await readFile(new URL("../src/lib/platform-connections/settings-platform-lifecycle.js", import.meta.url), "utf8");
 
   for (const expected of ["Loading publishing connections", "Not connected", "Connected", "Reconnect", "Change Page", "Try again", "Channel ID", "Channel Secret"]) {
     assert.equal(source.includes(expected), true, `missing ${expected}`);
   }
   assert.equal(source.includes("setLineCredentials({ channelId: \"\", channelSecret: \"\" })"), true);
   assert.equal(source.includes("response.status === 409"), true);
-  assert.equal(source.includes("Cancel or wait for pending posts"), true);
+  assert.equal(lifecycleSource.includes("Cancel or wait for pending posts"), true);
+  assert.equal(source.includes('role="status"'), true);
+  assert.equal(source.includes("disconnectFeedback"), true);
+  assert.equal(source.includes("platformLifecycleStatus"), true);
 });
 
 test("successful Meta Page selection removes the opaque callback query before refreshing availability", async () => {

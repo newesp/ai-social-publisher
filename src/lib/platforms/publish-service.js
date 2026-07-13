@@ -23,10 +23,12 @@ export async function publishTargets({ targets, connections, fetchImpl = fetch }
       if (error?.providerRejected) {
         try { await connection?.markNeedsReconnect?.(); } catch { /* Preserve the provider outcome if lifecycle persistence is unavailable. */ }
       }
+      const reconnectRequired = error?.providerRejected || error?.message === RECONNECT_ERROR;
       results.push({
         platform: target.platform,
         status: "failed",
-        error: error?.providerRejected || error?.message === RECONNECT_ERROR ? RECONNECT_ERROR : `${target.platform} publishing failed.`,
+        error: reconnectRequired ? RECONNECT_ERROR : `${target.platform} publishing failed.`,
+        ...(reconnectRequired ? {} : { retryable: true }),
       });
     }
   }
@@ -98,8 +100,9 @@ async function readPlatformResponse(platform, response) {
   try { body = await response.json(); } catch { /* Provider response bodies are intentionally discarded. */ }
   if (!response.ok) {
     const error = new Error(`${platform} publish failed.`);
-    error.providerRejected = response.status === 401 || response.status === 403
+    error.providerRejected = response.status === 401
       || (platform === "meta" && Number(body?.error?.code) === 190);
+    error.retryable = !error.providerRejected && (response.status === 403 || response.status === 429 || response.status >= 500);
     throw error;
   }
 

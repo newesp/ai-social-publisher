@@ -118,6 +118,38 @@ test("competing claimDueScheduledPosts calls cannot return the same due row", as
   });
 });
 
+test("requeueClaimedPost atomically restores scheduled work with bounded backoff", async () => {
+  await withDatabase(async ({ db }) => {
+    const due = await insertPost(db, { productName: "retry", status: "scheduled", scheduledFor: new Date("2026-07-11T01:00:00.000Z") });
+    const repository = createPostRepository(db);
+    await repository.claimDueScheduledPosts(NOW);
+    const retryAt = new Date("2026-07-11T01:06:00.000Z");
+
+    const retried = await repository.requeueClaimedPost("owner@example.com", due.id, "scheduled", retryAt, NOW);
+
+    assert.equal(retried.status, "scheduled");
+    assert.equal(retried.scheduledFor.toISOString(), retryAt.toISOString());
+    assert.deepEqual(retried.targets.map((target) => target.status), ["scheduled"]);
+  });
+});
+
+test("partial publish progress requeues only unfinished targets", async () => {
+  await withDatabase(async ({ db }) => {
+    const post = await insertPost(db, { productName: "partial", status: "draft", scheduledFor: null });
+    await db.insert(postTargets).values(targetValues("line", null, post.id));
+    const repository = createPostRepository(db);
+    await repository.claimPostForPublish("owner@example.com", post.id, NOW);
+    const requeued = await repository.recordPublishProgressAndRequeue("owner@example.com", post.id, [
+      { platform: "meta", status: "published", externalId: "meta-1" },
+      { platform: "line", status: "failed", retryable: true },
+    ], "draft", null, NOW);
+    assert.deepEqual(requeued.targets.map((target) => [target.platform, target.status]), [["meta", "published"], ["line", "draft"]]);
+
+    const claimed = await repository.claimPostForPublish("owner@example.com", post.id, NOW);
+    assert.deepEqual(claimed.targets.map((target) => [target.platform, target.status]), [["meta", "published"], ["line", "publishing"]]);
+  });
+});
+
 test("createPostWithTargets revalidates stale bindings in its transaction and rolls back the parent", async () => {
   await withDatabase(async ({ db }) => {
     await db.insert(platformConnections).values(connectionRecord("meta-stale", "owner@example.com", "meta", "archived"));
@@ -237,8 +269,8 @@ function postValues(ownerEmail, productName) {
   return { ownerEmail, productName, productFeatures: "features", status: "draft", createdAt: NOW, updatedAt: NOW };
 }
 
-function targetValues(platform, platformConnectionId) {
-  return { platform, platformConnectionId, content: "content", hashtagsJson: "[]", status: "draft", createdAt: NOW, updatedAt: NOW };
+function targetValues(platform, platformConnectionId, postId) {
+  return { ...(postId ? { postId } : {}), platform, platformConnectionId, content: "content", hashtagsJson: "[]", status: "draft", createdAt: NOW, updatedAt: NOW };
 }
 
 function connectionRecord(id, ownerEmail, platform, state) {

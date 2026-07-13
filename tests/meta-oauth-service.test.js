@@ -76,6 +76,27 @@ test("callback handles provider cancellation without echoing provider details", 
   assert.equal(JSON.stringify(result).includes("provider-private-detail"), false);
 });
 
+test("callback never exposes a provider URL containing the app secret when transport fails", async () => {
+  const transactions = createTransactions();
+  const service = createMetaOAuthService({
+    env,
+    fetchImpl: async (url) => { throw new Error(`request failed: ${url}`); },
+    transactions,
+    connections: createConnections(),
+    now: () => now,
+  });
+  const started = await service.start("owner@example.com", "/settings");
+  const callbackParams = new URL(started.authorizeUrl).searchParams;
+  callbackParams.set("code", "private-oauth-code");
+
+  await assert.rejects(service.completeCallback("owner@example.com", callbackParams), (error) => {
+    assert.equal(error.message, "Meta connection could not be completed.");
+    assert.equal(error.message.includes(env.META_APP_SECRET), false);
+    assert.equal(error.message.includes("private-oauth-code"), false);
+    return true;
+  });
+});
+
 test("callback rejects expired and consumed state", async () => {
   const transactions = createTransactions();
   const service = createMetaOAuthService({ env, fetchImpl: unexpectedFetch, transactions, connections: createConnections(), now: () => now });
@@ -97,11 +118,7 @@ test("selectPage rejects unavailable Pages and atomically replaces only the curr
   }, "/settings", now);
 
   await assert.rejects(service.selectPage("other@example.com", pending.id, "page-1"), /expired or already used/i);
-  const anotherPending = await transactions.create("owner@example.com", "meta", {
-    phase: "page_selection", pages: [{ id: "page-1", name: "Owner Page", accessToken: "page-token" }],
-    longLivedUserAccessToken: "long-user-token", expiresAt: "2026-09-11T00:00:00.000Z",
-  }, "/settings", now);
-  await assert.rejects(service.selectPage("owner@example.com", anotherPending.id, "other-page"), /not available/i);
+  await assert.rejects(service.selectPage("owner@example.com", pending.id, "other-page"), /not available/i);
 
   const selected = await service.selectPage("owner@example.com", pending.id, "page-1");
   assert.deepEqual(selected, { platform: "meta", state: "active", displayName: "Owner Page", expiresAt: new Date("2026-09-11T00:00:00.000Z") });
@@ -139,18 +156,40 @@ test("ensureUsable validates the bound Page with Graph v25 and an Authorization 
 
 test("ensureUsable recovers a rejected Page token through retained User authorization", async () => {
   const connections = createLifecycleConnections([metaConnection()]);
+  const calls = [];
   const service = createMetaOAuthService({ env, transactions: createTransactions(), connections, now: () => now, fetchImpl: sequenceFetch([
     { error: { code: 190, message: "private page rejection page-token" }, __status: 401 },
     { access_token: "renewed-user-token", expires_in: 5_184_000 },
     { data: [{ id: "page-1", name: "Owner Page", access_token: "renewed-page-token" }] },
-  ]) });
+  ], calls) });
 
   const usable = await service.ensureUsable("owner@example.com", "meta-1");
 
   assert.equal(usable.credentials.pageAccessToken, "renewed-page-token");
   assert.equal(usable.state, "archived");
   assert.equal(connections.completed, 1);
+  const accounts = calls.find(([url]) => url.includes("/me/accounts"));
+  assert.equal(new URL(accounts[0]).searchParams.has("access_token"), false);
+  assert.equal(accounts[1].headers.Authorization, "Bearer renewed-user-token");
   assert.equal(JSON.stringify(usable).includes("private page rejection"), false);
+});
+
+test("ambiguous Meta 403 validation is transient rather than reconnect", async () => {
+  const connections = createLifecycleConnections([metaConnection()]);
+  const service = createMetaOAuthService({ env, transactions: createTransactions(), connections, now: () => now, fetchImpl: async () => jsonResponse({ error: { code: 10, message: "policy" } }, false, 403) });
+  const usable = await service.ensureUsable("owner@example.com", "meta-1");
+  assert.match(usable.warning, /validation/i);
+  assert.deepEqual(connections.marked, []);
+});
+
+test("rejected Meta Page plus transient refresh failure stays retryable", async () => {
+  const connections = createLifecycleConnections([metaConnection()]);
+  const service = createMetaOAuthService({ env, transactions: createTransactions(), connections, now: () => now, fetchImpl: sequenceFetch([
+    { error: { code: 190 }, __status: 401 },
+    { error: { message: "private outage" }, __status: 503 },
+  ]) });
+  await assert.rejects(service.ensureUsable("owner@example.com", "meta-1"), (error) => error.status === 503 && error.retryable === true && !error.message.includes("private"));
+  assert.deepEqual(connections.marked, []);
 });
 
 test("ensureUsable marks only an unrenewable rejected Page connection for reconnect", async () => {
@@ -213,6 +252,7 @@ function createTransactions() {
   const created = [];
   return {
     created,
+    async purgeExpired() {},
     async create(ownerEmail, provider, payload, returnPath) {
       const record = { id: `transaction-${created.length + 1}`, ownerEmail, provider, payload, returnPath, consumed: false, expired: false };
       created.push(record); records.set(record.id, record);
@@ -239,6 +279,11 @@ function createConnections() {
     async replaceDefault(ownerEmail, input) {
       const connection = { id: `connection-${this.replaced.length + 1}`, ownerEmail, ...input, state: "active", expiresAt: input.expiresAt ?? null };
       this.replaced.push({ ownerEmail, input, connection });
+      return connection;
+    },
+    async replaceDefaultFromOAuth(ownerEmail, input, transactionId) {
+      const connection = await this.replaceDefault(ownerEmail, input);
+      this.replaced.at(-1).transactionId = transactionId;
       return connection;
     },
   };
@@ -278,8 +323,8 @@ function createLifecycleConnections(initial) {
   };
 }
 
-function sequenceFetch(results) {
-  return async () => { const result = results.shift(); return jsonResponse(result, result?.__status ? false : true, result?.__status); };
+function sequenceFetch(results, calls = []) {
+  return async (...args) => { calls.push(args); const result = results.shift(); return jsonResponse(result, result?.__status ? false : true, result?.__status); };
 }
 function jsonResponse(value, ok = true, status = ok ? 200 : 500) { return { ok, status, async json() { return value; } }; }
 async function unexpectedFetch() { throw new Error("fetch should not have been called"); }

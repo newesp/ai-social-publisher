@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Badge, Button, Group, Paper, PasswordInput, Select, SimpleGrid, Stack, Tabs, Text, TextInput, Title } from "@mantine/core";
 import { IconKey } from "@tabler/icons-react";
+import { disconnectFeedback, platformLifecycleStatus } from "../lib/platform-connections/settings-platform-lifecycle.js";
 
 export function SettingsPanel() {
   const [values, setValues] = useState({});
@@ -13,6 +14,7 @@ export function SettingsPanel() {
   const [connectionsStatus, setConnectionsStatus] = useState("loading");
   const [connectionAction, setConnectionAction] = useState("");
   const [connectionError, setConnectionError] = useState("");
+  const [connectionNotice, setConnectionNotice] = useState("");
   const [lineEditing, setLineEditing] = useState(false);
   const [lineCredentials, setLineCredentials] = useState({ channelId: "", channelSecret: "" });
   const [metaPages, setMetaPages] = useState([]);
@@ -80,6 +82,7 @@ export function SettingsPanel() {
     if (connectionAction) return;
     setConnectionAction("meta-start");
     setConnectionError("");
+    setConnectionNotice("");
     try {
       const response = await fetch("/api/platform-connections/meta/start", {
         method: "POST",
@@ -116,6 +119,7 @@ export function SettingsPanel() {
     if (connectionAction || !metaTransactionId || !selectedMetaPage) return;
     setConnectionAction("meta-select");
     setConnectionError("");
+    setConnectionNotice("");
     try {
       const response = await fetch("/api/platform-connections/meta/select", {
         method: "POST",
@@ -139,6 +143,7 @@ export function SettingsPanel() {
     if (connectionAction || !lineCredentials.channelId.trim() || !lineCredentials.channelSecret.trim()) return;
     setConnectionAction("line-connect");
     setConnectionError("");
+    setConnectionNotice("");
     try {
       const response = await fetch("/api/platform-connections/line", {
         method: "POST",
@@ -160,14 +165,18 @@ export function SettingsPanel() {
     if (connectionAction) return;
     setConnectionAction(`${platform}-disconnect`);
     setConnectionError("");
+    setConnectionNotice("");
     try {
       const response = await fetch(`/api/platform-connections/${platform}/disconnect`, { method: "POST" });
+      const payload = await response.json().catch(() => ({}));
+      const feedback = disconnectFeedback(platform, response.status, payload);
       if (response.status === 409) {
-        setConnectionError("Cancel or wait for pending posts before disconnecting this platform.");
+        setConnectionError(feedback.error);
         return;
       }
       if (!response.ok) throw new Error();
       await loadConnections();
+      setConnectionNotice(feedback.notice);
     } catch {
       setConnectionError(`${platform === "meta" ? "Meta" : "LINE"} could not be disconnected. Please try again.`);
     } finally {
@@ -242,7 +251,10 @@ export function SettingsPanel() {
                   </ConnectionCard>
                 </SimpleGrid>
               ) : null}
-              {connectionsStatus === "success" && connectionError ? <Text c="red.7" size="sm">{connectionError}</Text> : null}
+              <div role="status" aria-live="polite">
+                {connectionsStatus === "success" && connectionError ? <Text c="red.7" size="sm">{connectionError}</Text> : null}
+                {connectionsStatus === "success" && connectionNotice ? <Text c="blue.7" size="sm">{connectionNotice}</Text> : null}
+              </div>
             </Stack>
           </Tabs.Panel>
         </Tabs>
@@ -254,6 +266,7 @@ export function SettingsPanel() {
 function ConnectionCard({ title, connection, children }) {
   const active = connection.state === "active";
   const reconnect = connection.state === "needs_reconnect";
+  const lifecycle = platformLifecycleStatus(connection);
   return (
     <Paper withBorder radius="md" p="md" h="100%">
       <Stack gap="sm" h="100%">
@@ -264,6 +277,7 @@ function ConnectionCard({ title, connection, children }) {
           </div>
           <Badge color={active ? "green" : reconnect ? "orange" : "gray"}>{active ? "Connected" : reconnect ? "Reconnect" : "Not connected"}</Badge>
         </Group>
+        {lifecycle ? <Text size="xs" c="dimmed">{lifecycle}</Text> : null}
         <div style={{ marginTop: "auto" }}>{children}</div>
       </Stack>
     </Paper>

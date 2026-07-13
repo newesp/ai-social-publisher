@@ -60,7 +60,7 @@ Connection-status responses may include the non-secret `expiresAt` timestamp so 
 2. The server creates a short-lived, single-use state bound to that user and a safe local return path, then redirects to Meta OAuth (Graph API `v25.0`) with `pages_show_list`, `pages_read_engagement`, and `pages_manage_posts`.
 3. The callback handles provider cancellation and errors with a settings-page explanation. On success it validates and consumes state, exchanges the authorization code for a User Token, exchanges it for a long-lived User Token, and retrieves manageable Pages.
 4. The callback stores the pending Page list and tokens only in the encrypted, ten-minute `oauth_transactions` record, then routes the user to a safe in-app Page selection screen.
-5. The selection endpoint confirms that the Page belongs to the pending list, creates a new encrypted connection record, and makes it the current user's default Meta connection. A previous default becomes archived rather than being overwritten.
+5. The selection endpoint confirms that the Page belongs to the pending list, then atomically deletes that still-valid owner/provider picker row and creates the new encrypted default connection. A failed replacement preserves the picker for retry; a committed replacement archives the previous default and permanently removes the pending tokens.
 6. The common immediate/scheduler/cron resolver validates the bound Page token through Graph `v25.0` before publish and confirms the returned Page ID. When retained User authorization is still valid and refresh is appropriate, it uses the server-side exchange and `/me/accounts` lookup best-effort behind the same renewal lease. A transient validation or refresh failure may keep using a currently valid Page token with a generic warning; a rejected Page token that cannot be recovered makes only that owner's connection `needs_reconnect`. This is pre-publish/background validation, not a guarantee of permanent Meta renewal.
 
 ### LINE token lifecycle
@@ -68,7 +68,7 @@ Connection-status responses may include the non-secret `expiresAt` timestamp so 
 1. The authenticated user submits their Channel ID and Secret only over the connection endpoint.
 2. The server sends `application/x-www-form-urlencoded` credentials to `POST https://api.line.me/v2/oauth/accessToken` with `grant_type=client_credentials`, `client_id`, and `client_secret`. It records the returned short-lived Token and `expires_in` (30 days), then calls `GET /v2/bot/info` to confirm the Official Account identity before creating the encrypted connection record and making it the user's default.
 3. Before publish and in a scheduled renewal pass, the service reissues a Token when it has 72 hours or less remaining. It acquires an owner-scoped, expiring database lease before any provider request. Same-process callers share one in-flight promise; cross-process losers never issue a duplicate Token and either use a still-valid Token with a safe warning or fail retryably when it is expired.
-4. If renewal fails while the existing Token remains valid, publishing may use that still-valid Token and report a recoverable renewal warning. If the Token is expired or LINE rejects a send, the connection becomes `needs_reconnect`; the target fails safely until the user reconnects that account.
+4. If renewal fails while the existing Token remains valid, publishing may use that still-valid Token and report a recoverable renewal warning. An expired Token plus a timeout, rate limit, network error, or provider 5xx is retryable and does not change connection state. Only an explicit authentication rejection can set `needs_reconnect`.
 
 ### Publishing and scheduling
 
@@ -76,7 +76,8 @@ Connection-status responses may include the non-secret `expiresAt` timestamp so 
 - At creation, each selected target stores the current connection ID. Immediate publishing and scheduled publishing load credentials by that immutable target connection ID, not by the user's current default.
 - Changing a Page or LINE Channel affects only posts created after the change. An archived connection remains encrypted and eligible for renewal until every target that references it reaches a terminal status or is cancelled.
 - Target connection revalidation and creation occur in the same database transaction. The publish path refuses a stale or disconnected client request even if the browser still showed the checkbox, while a target committed against an active connection remains bound and publishable if a later Change account archives it.
-- A renewal failure is represented as a safe, generic publish failure and never exposes credentials or provider response bodies.
+- Retryable lifecycle or publishing failures atomically requeue immediate work to draft and scheduled work with bounded backoff. Any targets already confirmed published remain terminal and are skipped on retry; confirmed missing/disconnected/rejected credentials remain terminal failures.
+- Provider calls use bounded deadlines shorter than renewal leases. Lease completion is fenced: a worker that loses its compare-and-set observes demonstrably newer credentials or returns a typed retryable error, never stale credentials.
 
 ## Security and error handling
 
@@ -85,6 +86,7 @@ Connection-status responses may include the non-secret `expiresAt` timestamp so 
 - Server-only environment variables hold Meta OAuth App credentials. No `NEXT_PUBLIC_` credential is added.
 - Per-user tokens and LINE Channel secrets use the existing AES-GCM settings encryption.
 - APIs return masked connection status only; errors are generic and redact secrets.
+- Page validation and `/me/accounts` send access tokens in the `Authorization` header. Meta's documented server-side `oauth/access_token` exchange necessarily includes `client_secret` in its query; constructed exchange URLs are never logged or propagated through errors.
 - Reconnection never overwrites another user's settings.
 
 ## Legacy credential removal and reconnect bootstrap

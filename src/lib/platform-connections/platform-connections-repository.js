@@ -20,6 +20,20 @@ export function createPlatformConnectionsRepository(db = createDbClient()) {
         return created;
       });
     },
+    async replaceDefaultConnectionFromOAuth(record, transactionId, ownerEmail, provider, now) {
+      return retryBusyTransaction(() => db.transaction(async (tx) => {
+        const [claimed] = await tx.delete(oauthTransactions).where(and(
+          eq(oauthTransactions.id, transactionId), eq(oauthTransactions.ownerEmail, ownerEmail), eq(oauthTransactions.provider, provider),
+          isNull(oauthTransactions.consumedAt), gt(oauthTransactions.expiresAt, now),
+        )).returning({ id: oauthTransactions.id });
+        if (!claimed) return null;
+        await tx.update(platformConnections).set({ state: "archived", updatedAt: record.updatedAt }).where(and(
+          eq(platformConnections.ownerEmail, record.ownerEmail), eq(platformConnections.platform, record.platform), eq(platformConnections.state, "active"),
+        ));
+        const [created] = await tx.insert(platformConnections).values(record).returning();
+        return created;
+      }));
+    },
     async findDefaultByOwnerAndPlatform(ownerEmail, platform) {
       const [record] = await db.select().from(platformConnections).where(and(
         eq(platformConnections.ownerEmail, ownerEmail), eq(platformConnections.platform, platform), eq(platformConnections.state, "active"),
@@ -30,19 +44,6 @@ export function createPlatformConnectionsRepository(db = createDbClient()) {
       const [record] = await db.select().from(platformConnections).where(and(
         eq(platformConnections.id, id), eq(platformConnections.ownerEmail, ownerEmail),
       )).limit(1);
-      return record ?? null;
-    },
-    async replaceConnectionCredentials(id, ownerEmail, changes) {
-      const [record] = await db.update(platformConnections).set(changes).where(and(
-        eq(platformConnections.id, id), eq(platformConnections.ownerEmail, ownerEmail),
-      )).returning();
-      return record ?? null;
-    },
-    async replaceConnectionCredentialsIfUnchanged(id, ownerEmail, previousUpdatedAt, changes) {
-      const [record] = await db.update(platformConnections).set(changes).where(and(
-        eq(platformConnections.id, id), eq(platformConnections.ownerEmail, ownerEmail), inArray(platformConnections.state, ["active", "archived"]),
-        eq(platformConnections.updatedAt, previousUpdatedAt),
-      )).returning();
       return record ?? null;
     },
     async acquireRenewalLease(id, ownerEmail, leaseId, leaseExpiresAt, acquiredAt) {
@@ -72,18 +73,6 @@ export function createPlatformConnectionsRepository(db = createDbClient()) {
         eq(platformConnections.id, id), eq(platformConnections.ownerEmail, ownerEmail), inArray(platformConnections.state, ["active", "archived"]),
       )).returning();
       return record ?? null;
-    },
-    async archiveConnection(id, ownerEmail, updatedAt) {
-      const [record] = await db.update(platformConnections).set({ state: "archived", updatedAt }).where(and(
-        eq(platformConnections.id, id), eq(platformConnections.ownerEmail, ownerEmail),
-      )).returning();
-      return record ?? null;
-    },
-    async archiveActiveDefaultConnection(ownerEmail, platform, updatedAt) {
-      const records = await db.update(platformConnections).set({ state: "archived", updatedAt }).where(and(
-        eq(platformConnections.ownerEmail, ownerEmail), eq(platformConnections.platform, platform), eq(platformConnections.state, "active"),
-      )).returning();
-      return records[0] ?? null;
     },
     async disconnectActiveConnection(ownerEmail, platform, clearedCredentials, updatedAt) {
       return retryBusyTransaction(() => db.transaction(async (tx) => {
@@ -126,7 +115,10 @@ export function createPlatformConnectionsRepository(db = createDbClient()) {
       return record ?? null;
     },
     async purgeExpiredOAuthTransactions(now) {
-      await db.delete(oauthTransactions).where(lte(oauthTransactions.expiresAt, now));
+      const expired = await db.select({ id: oauthTransactions.id }).from(oauthTransactions)
+        .where(lte(oauthTransactions.expiresAt, now)).limit(100);
+      if (expired.length > 0) await db.delete(oauthTransactions).where(inArray(oauthTransactions.id, expired.map(({ id }) => id)));
+      return expired.length;
     },
   };
 }

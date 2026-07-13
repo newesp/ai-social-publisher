@@ -14,26 +14,19 @@ export function createPlatformConnectionStore({ repository, encryptionKey }) {
       const record = await repository.replaceDefaultConnection(toNewRecord(ownerEmail, input, encryptionKey));
       return toConnection(record, encryptionKey);
     },
+    async replaceDefaultFromOAuth(ownerEmail, input, transactionId, now) {
+      const owner = normalizeOwner(ownerEmail);
+      const record = await repository.replaceDefaultConnectionFromOAuth(
+        toNewRecord(owner, input, encryptionKey), requireId(transactionId), owner, "meta", toDate(now),
+      );
+      return record ? toConnection(record, encryptionKey) : null;
+    },
     async getDefault(ownerEmail, platform) {
       const record = await repository.findDefaultByOwnerAndPlatform(normalizeOwner(ownerEmail), requirePlatform(platform));
       return record ? toConnection(record, encryptionKey) : null;
     },
     async getById(ownerEmail, connectionId) {
       const record = await repository.findConnectionByIdAndOwner(requireId(connectionId), normalizeOwner(ownerEmail));
-      return record ? toConnection(record, encryptionKey) : null;
-    },
-    async replaceCredentials(ownerEmail, connectionId, credentials) {
-      const record = await repository.replaceConnectionCredentials(requireId(connectionId), normalizeOwner(ownerEmail), {
-        encryptedCredentials: encryptJson(requireCredentials(credentials), encryptionKey),
-        credentialExpiresAt: toDateOrNull(credentials?.expiresAt ?? credentials?.credentialExpiresAt), updatedAt: new Date(),
-      });
-      return record ? toConnection(record, encryptionKey) : null;
-    },
-    async replaceCredentialsIfUnchanged(ownerEmail, connectionId, previousUpdatedAt, credentials) {
-      const record = await repository.replaceConnectionCredentialsIfUnchanged(requireId(connectionId), normalizeOwner(ownerEmail), toDate(previousUpdatedAt), {
-        encryptedCredentials: encryptJson(requireCredentials(credentials), encryptionKey),
-        credentialExpiresAt: toDateOrNull(credentials?.expiresAt ?? credentials?.credentialExpiresAt), updatedAt: new Date(),
-      });
       return record ? toConnection(record, encryptionKey) : null;
     },
     async acquireRenewalLease(ownerEmail, connectionId, leaseId, leaseExpiresAt, acquiredAt) {
@@ -55,14 +48,6 @@ export function createPlatformConnectionStore({ repository, encryptionKey }) {
     async markNeedsReconnect(ownerEmail, connectionId) {
       const record = await repository.markConnectionNeedsReconnect(requireId(connectionId), normalizeOwner(ownerEmail), new Date());
       return record ? toConnection(record, encryptionKey) : null;
-    },
-    async archive(ownerEmail, connectionId) {
-      const record = await repository.archiveConnection(requireId(connectionId), normalizeOwner(ownerEmail), new Date());
-      return record ? toConnection(record, encryptionKey) : null;
-    },
-    async archiveDefault(ownerEmail, platform) {
-      const record = await repository.archiveActiveDefaultConnection(normalizeOwner(ownerEmail), requirePlatform(platform), new Date());
-      return record ? toAvailability(record) : null;
     },
     async disconnectDefault(ownerEmail, platform) {
       const result = await repository.disconnectActiveConnection(
