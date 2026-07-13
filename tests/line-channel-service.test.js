@@ -102,6 +102,22 @@ test("ensureUsable rotates at 72 hours and concurrent callers reuse the winning 
   assert.equal(connections.replaceAttempts.filter((attempt) => attempt.updated).length, 1);
 });
 
+test("ensureUsable renews an archived bound LINE connection without reactivating it", async () => {
+  const connections = createConnections([connection({ state: "archived", expiresAt: "2026-07-16T00:00:00.000Z" })]);
+  const service = createLineChannelService({
+    connections, now: () => now,
+    fetchImpl: async (url) => url.endsWith("/oauth/accessToken")
+      ? jsonResponse({ access_token: "archived-new-token", expires_in: 2_592_000 })
+      : jsonResponse({ userId: "U123", displayName: "Owner Official Account" }),
+  });
+
+  const usable = await service.ensureUsable("owner@example.com", "connection-1");
+
+  assert.equal(usable.state, "archived");
+  assert.equal(usable.credentials.accessToken, "archived-new-token");
+  assert.equal(connections.replaceAttempts[0].updated, true);
+});
+
 test("ensureUsable keeps a still-valid token with a recoverable warning when renewal fails", async () => {
   const connections = createConnections([connection({ expiresAt: "2026-07-14T00:00:00.000Z" })]);
   const service = createLineChannelService({ connections, now: () => now, fetchImpl: async () => jsonResponse({ provider_detail: "private" }, false) });
@@ -147,7 +163,7 @@ function createConnections(initial = []) {
     async getById(ownerEmail, id) { const record = records.get(id); return record?.ownerEmail === ownerEmail ? structuredClone(record) : null; },
     async replaceCredentialsIfUnchanged(ownerEmail, id, previousUpdatedAt, credentials) {
       const record = records.get(id);
-      const updated = record?.ownerEmail === ownerEmail && record.state === "active" && record.updatedAt.getTime() === previousUpdatedAt.getTime();
+      const updated = record?.ownerEmail === ownerEmail && ["active", "archived"].includes(record.state) && record.updatedAt.getTime() === previousUpdatedAt.getTime();
       replaceAttempts.push({ ownerEmail, id, previousUpdatedAt, credentials, updated });
       if (!updated) return null;
       record.credentials = credentials; record.expiresAt = new Date(credentials.expiresAt); record.updatedAt = new Date(record.updatedAt.getTime() + 1); return structuredClone(record);

@@ -5,7 +5,7 @@ import { publishTargets as publishPlatformTargets } from "../platforms/publish-s
 import { POST_STATUS } from "./post-status.js";
 import { computeScheduledFor } from "./schedule-time.js";
 
-export async function createPost({ ownerEmail, input, mode, repository, now = new Date() }) {
+export async function createPost({ ownerEmail, input, mode, repository, resolveConnection, now = new Date() }) {
   const owner = requireOwner(ownerEmail);
   const scheduled = mode === "scheduled";
   if (!scheduled && mode !== "now") throw routeError("mode must be either now or scheduled.", 400);
@@ -20,6 +20,12 @@ export async function createPost({ ownerEmail, input, mode, repository, now = ne
     : null;
   const targets = activeTargets(input.targets);
   if (targets.length === 0) throw routeError("At least one active platform target is required.", 400);
+  const boundTargets = [];
+  for (const target of targets) {
+    const connection = await resolveConnection?.(owner, target.platform);
+    if (!isConnectionAvailable(connection, owner, target.platform, { activeOnly: true })) throw reconnectError();
+    boundTargets.push({ target, connection });
+  }
 
   return repository.createPostWithTargets({
     post: {
@@ -35,8 +41,9 @@ export async function createPost({ ownerEmail, input, mode, repository, now = ne
       createdAt: now,
       updatedAt: now,
     },
-    targetRows: targets.map((target) => ({
+    targetRows: boundTargets.map(({ target, connection }) => ({
       platform: target.platform,
+      platformConnectionId: connection.id,
       content: String(target.content ?? ""),
       hashtagsJson: JSON.stringify(target.hashtags ?? []),
       status,
@@ -70,7 +77,7 @@ export async function publishPost({
   ownerEmail,
   postId,
   repository,
-  readSettings,
+  getConnection,
   publishTargets = publishPlatformTargets,
   now = new Date(),
 }) {
@@ -85,13 +92,13 @@ export async function publishPost({
     );
   }
 
-  return publishClaimedPost({ post, repository, readSettings, publishTargets, now });
+  return publishClaimedPost({ post, repository, getConnection, publishTargets, now });
 }
 
 export async function publishClaimedPost({
   post,
   repository,
-  readSettings,
+  getConnection,
   publishTargets = publishPlatformTargets,
   now = new Date(),
 }) {
@@ -99,10 +106,34 @@ export async function publishClaimedPost({
 
   let results;
   try {
-    const settings = await readSettings(owner);
+    const connections = [];
+    const publishableTargets = [];
+    const unavailableResults = [];
+    for (const target of post.targets) {
+      if (!target.platformConnectionId) {
+        unavailableResults.push(failedReconnectResult(target.platform));
+        continue;
+      }
+      let connection;
+      try {
+        connection = await getConnection?.(owner, target.platformConnectionId);
+      } catch {
+        unavailableResults.push(failedReconnectResult(target.platform));
+        continue;
+      }
+      if (!isConnectionAvailable(connection, owner, target.platform)) {
+        unavailableResults.push(failedReconnectResult(target.platform));
+        continue;
+      }
+      connections.push(connection);
+      publishableTargets.push(target);
+    }
+    if (publishableTargets.length === 0) {
+      return repository.recordPublishResults(owner, post.id, unavailableResults, now);
+    }
     const previews = buildPlatformPreviews({
       imageUrl: post.imageImgurUrl,
-      targets: post.targets.map((target) => ({
+      targets: publishableTargets.map((target) => ({
         platform: target.platform,
         content: target.content,
         hashtags: parseHashtags(target.hashtagsJson),
@@ -110,9 +141,13 @@ export async function publishClaimedPost({
     });
     const targets = Object.values(previews).map((preview) => ({
       platform: preview.platform,
+      platformConnectionId: publishableTargets.find((target) => target.platform === preview.platform).platformConnectionId,
       publishPayload: preview.publishPayload,
     }));
-    results = terminalResults(post.targets, await publishTargets({ targets, settings }), settings, owner);
+    results = [
+      ...terminalResults(publishableTargets, await publishTargets({ targets, connections }), connections, owner),
+      ...unavailableResults,
+    ];
   } catch {
     results = post.targets.map((target) => ({
       platform: target.platform,
@@ -123,7 +158,7 @@ export async function publishClaimedPost({
   return repository.recordPublishResults(owner, post.id, results, now);
 }
 
-function terminalResults(targets, providerResults, settings, owner) {
+function terminalResults(targets, providerResults, connections, owner) {
   const resultsByPlatform = new Map(
     (Array.isArray(providerResults) ? providerResults : []).map((result) => [result?.platform, result]),
   );
@@ -132,7 +167,7 @@ function terminalResults(targets, providerResults, settings, owner) {
     if (result?.status === POST_STATUS.PUBLISHED || result?.status === POST_STATUS.FAILED) {
       return {
         ...result,
-        error: result.error ? redactProviderError(result.error, settings, owner) : result.error,
+        error: result.error ? redactProviderError(result.error, connections, owner) : result.error,
       };
     }
     return {
@@ -162,15 +197,47 @@ function parseHashtags(value) {
   }
 }
 
-function redactProviderError(error, settings, owner) {
+function redactProviderError(error, connections, owner) {
   let message = String(error);
   if (owner) message = message.split(owner).join("[redacted]");
-  for (const secret of Object.values(settings ?? {}).filter(Boolean).map(String)) {
+  for (const secret of collectSecretValues((connections ?? []).map((connection) => connection?.credentials))) {
     message = message.split(secret).join("[redacted]");
   }
   return message
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
     .replace(/access_token=([^&\s]+)/gi, "access_token=[redacted]");
+}
+
+function collectSecretValues(value, values = [], seen = new WeakSet()) {
+  if (value == null) return values;
+  if (typeof value === "string" || typeof value === "number") {
+    if (String(value)) values.push(String(value));
+    return values;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectSecretValues(item, values, seen);
+    return values;
+  }
+  if (typeof value === "object") {
+    if (seen.has(value)) return values;
+    seen.add(value);
+    for (const item of Object.values(value)) collectSecretValues(item, values, seen);
+  }
+  return values;
+}
+
+function isConnectionAvailable(connection, owner, platform, { activeOnly = false } = {}) {
+  if (!connection || !String(connection.id ?? "").trim()) return false;
+  if (normalizeEmail(connection.ownerEmail) !== owner || connection.platform !== platform) return false;
+  return activeOnly ? connection.state === "active" : connection.state === "active" || connection.state === "archived";
+}
+
+function failedReconnectResult(platform) {
+  return { platform, status: POST_STATUS.FAILED, error: reconnectError().message };
+}
+
+function reconnectError() {
+  return routeError("The selected platform connection needs to be reconnected.", 409);
 }
 
 function requireOwner(ownerEmail) {

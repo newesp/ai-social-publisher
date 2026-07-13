@@ -1,6 +1,6 @@
 import { publishClaimedPost } from "../posts/post-service.js";
 
-export async function runDuePostScheduler({ repository, readSettings, publishTargets, now = new Date() }) {
+export async function runDuePostScheduler({ repository, getConnection, publishTargets, now = new Date() }) {
   const claimedPosts = await repository.claimDueScheduledPosts(now);
   const posts = [];
 
@@ -9,7 +9,7 @@ export async function runDuePostScheduler({ repository, readSettings, publishTar
       const result = await publishClaimedPost({
         post,
         repository,
-        readSettings,
+        getConnection,
         publishTargets,
         now,
       });

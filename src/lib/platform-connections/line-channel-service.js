@@ -23,7 +23,7 @@ export function createLineChannelService({ fetchImpl = fetch, connections, now =
     async ensureUsable(ownerEmail, connectionId) {
       const owner = normalizeOwner(ownerEmail);
       const connection = await connections.getById(owner, requireConnectionId(connectionId));
-      requireActiveLineConnection(connection);
+      requireUsableLineConnection(connection);
       const time = currentTime(now);
       if (hasMoreThanRotationWindow(connection.expiresAt, time)) return connection;
 
@@ -33,7 +33,7 @@ export function createLineChannelService({ fetchImpl = fetch, connections, now =
         if (updated) return updated;
 
         const winner = await connections.getById(owner, connection.id);
-        requireActiveLineConnection(winner);
+        requireUsableLineConnection(winner);
         if (isValidAt(winner.expiresAt, time)) return winner;
       } catch {
         if (isValidAt(connection.expiresAt, time)) return { ...connection, warning: RENEWAL_WARNING };
@@ -87,8 +87,8 @@ function requireStoredCredentials(credentials) {
   if (!channelId || !channelSecret) throw lineError();
   return { channelId, channelSecret };
 }
-function requireActiveLineConnection(connection) {
-  if (!connection || connection.platform !== "line" || connection.state !== "active") throw routeError("The LINE connection is not available.", 404);
+function requireUsableLineConnection(connection) {
+  if (!connection || connection.platform !== "line" || !["active", "archived"].includes(connection.state)) throw routeError("The LINE connection is not available.", 404);
   return connection;
 }
 function normalizeOwner(value) { const owner = String(value ?? "").trim().toLowerCase(); if (!owner) throw routeError("The LINE connection is not available.", 404); return owner; }

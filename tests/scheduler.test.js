@@ -15,7 +15,7 @@ function claimedPost({ id, ownerEmail = "owner@example.com" }) {
     ownerEmail,
     status: "publishing",
     imageImgurUrl: null,
-    targets: [{ platform: "meta", content: `Post ${id}`, hashtagsJson: "[]", status: "publishing" }],
+    targets: [{ platform: "meta", platformConnectionId: `meta-${id}`, content: `Post ${id}`, hashtagsJson: "[]", status: "publishing" }],
   };
 }
 
@@ -38,7 +38,7 @@ test("scheduler publishes only due rows atomically claimed from scheduled status
 
   const result = await runDuePostScheduler({
     repository,
-    readSettings: async () => ({}),
+    getConnection: async (ownerEmail, id) => ({ id, ownerEmail, platform: "meta", state: "active", credentials: {} }),
     publishTargets: async () => [{ platform: "meta", status: "published", externalId: "meta-1" }],
     now: NOW,
   });
@@ -66,7 +66,7 @@ test("scheduler continues after a provider failure and records terminal outcomes
 
   const result = await runDuePostScheduler({
     repository,
-    readSettings: async () => ({}),
+    getConnection: async (ownerEmail, id) => ({ id, ownerEmail, platform: "meta", state: "active", credentials: {} }),
     publishTargets: async ({ targets }) => {
       if (targets[0].publishPayload.message === "Post 1") throw new Error("provider refused");
       return [{ platform: "meta", status: "published", externalId: "meta-2" }];
@@ -82,6 +82,30 @@ test("scheduler continues after a provider failure and records terminal outcomes
     { id: 1, status: "failed" },
     { id: 2, status: "published" },
   ]);
+});
+
+test("scheduler loads the connection id stored on the scheduled target instead of a current default", async () => {
+  const duePost = claimedPost({ id: 7 });
+  const loaded = [];
+  const repository = {
+    async claimDueScheduledPosts() { return [duePost]; },
+    async recordPublishResults(_ownerEmail, postId, results) { return { id: postId, status: results[0].status }; },
+  };
+
+  await runDuePostScheduler({
+    repository,
+    getConnection: async (ownerEmail, connectionId) => {
+      loaded.push([ownerEmail, connectionId]);
+      return { id: connectionId, ownerEmail, platform: "meta", state: "active", credentials: {} };
+    },
+    publishTargets: async ({ connections }) => {
+      assert.equal(connections[0].id, "meta-7");
+      return [{ platform: "meta", status: "published", externalId: "external-7" }];
+    },
+    now: NOW,
+  });
+
+  assert.deepEqual(loaded, [["owner@example.com", "meta-7"]]);
 });
 
 test("cron route fails closed when the secret is absent or Bearer authorization is invalid", async () => {

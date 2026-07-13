@@ -7,15 +7,14 @@ test("publishes only active Meta and LINE targets", async () => {
   const calls = [];
   const result = await publishTargets({
     targets: [
-      { platform: "meta", publishPayload: { message: "Meta text" } },
+      { platform: "meta", platformConnectionId: "meta-1", publishPayload: { message: "Meta text" } },
       { platform: "instagram", publishPayload: { caption: "IG text" } },
-      { platform: "line", publishPayload: { text: "LINE text" } },
+      { platform: "line", platformConnectionId: "line-1", publishPayload: { text: "LINE text" } },
     ],
-    settings: {
-      metaPageId: "page-id",
-      metaPageAccessToken: "meta-token",
-      lineChannelAccessToken: "line-token",
-    },
+    connections: [
+      { id: "meta-1", platform: "meta", credentials: { pageId: "page-id", pageAccessToken: "meta-token" } },
+      { id: "line-1", platform: "line", credentials: { accessToken: "line-token" } },
+    ],
     fetchImpl: async (url, options) => {
       calls.push({ url, options });
       return {
@@ -41,13 +40,14 @@ test("publishes LINE text and image in one broadcast call", async () => {
     targets: [
       {
         platform: "line",
+        platformConnectionId: "line-1",
         publishPayload: {
           text: "LINE AI text",
           imageUrl: "https://blob.vercel-storage.com/generated.jpg",
         },
       },
     ],
-    settings: { lineChannelAccessToken: "line-token" },
+    connections: [{ id: "line-1", platform: "line", credentials: { accessToken: "line-token" } }],
     fetchImpl: async (url, options) => {
       calls.push({ url, options });
       return {
@@ -78,16 +78,14 @@ test("publishes Meta image posts through the Page Photos API", async () => {
     targets: [
       {
         platform: "meta",
+        platformConnectionId: "meta-1",
         publishPayload: {
           message: "Meta AI text",
           imageUrl: "https://blob.vercel-storage.com/generated.jpg",
         },
       },
     ],
-    settings: {
-      metaPageId: "page-id",
-      metaPageAccessToken: "meta-token",
-    },
+    connections: [{ id: "meta-1", platform: "meta", credentials: { pageId: "page-id", pageAccessToken: "meta-token" } }],
     fetchImpl: async (url, options) => {
       calls.push({ url, options });
       return {
@@ -108,8 +106,8 @@ test("publishes Meta image posts through the Page Photos API", async () => {
 
 test("returns failed platform status when required credentials are missing", async () => {
   const result = await publishTargets({
-    targets: [{ platform: "line", publishPayload: { text: "LINE text" } }],
-    settings: {},
+    targets: [{ platform: "line", platformConnectionId: "line-1", publishPayload: { text: "LINE text" } }],
+    connections: [{ id: "line-1", platform: "line", credentials: {} }],
     fetchImpl: async () => {
       throw new Error("fetch should not be called");
     },
@@ -119,7 +117,88 @@ test("returns failed platform status when required credentials are missing", asy
     {
       platform: "line",
       status: "failed",
-      error: "LINE_CHANNEL_ACCESS_TOKEN is required.",
+      error: "The selected platform connection needs to be reconnected.",
     },
   ]);
+});
+
+test("uses the credential set paired with each immutable target", async () => {
+  const calls = [];
+  await publishTargets({
+    targets: [
+      { platform: "meta", platformConnectionId: "meta-b", publishPayload: { message: "Meta B" } },
+      { platform: "line", platformConnectionId: "line-a", publishPayload: { text: "LINE A" } },
+    ],
+    connections: [
+      { id: "line-a", platform: "line", credentials: { accessToken: "line-token-a" } },
+      { id: "meta-b", platform: "meta", credentials: { pageId: "page-b", pageAccessToken: "meta-token-b" } },
+    ],
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return { ok: true, json: async () => ({ id: "external" }), text: async () => "" };
+    },
+  });
+
+  assert.equal(calls[0].url, "https://graph.facebook.com/v25.0/page-b/feed");
+  assert.equal(JSON.parse(calls[0].options.body).access_token, "meta-token-b");
+  assert.equal(calls[1].options.headers.Authorization, "Bearer line-token-a");
+});
+
+test("marks only the rejected LINE connection as needing reconnect", async () => {
+  const marked = [];
+  const results = await publishTargets({
+    targets: [{ platform: "line", platformConnectionId: "line-a", publishPayload: { text: "LINE A" } }],
+    connections: [{
+      id: "line-a", platform: "line", credentials: { accessToken: "rejected-token" },
+      markNeedsReconnect: async () => { marked.push("line-a"); },
+    }],
+    fetchImpl: async () => ({ ok: false, status: 401, json: async () => ({ message: "token rejected: rejected-token" }) }),
+  });
+
+  assert.deepEqual(marked, ["line-a"]);
+  assert.deepEqual(results, [{ platform: "line", status: "failed", error: "The selected platform connection needs to be reconnected." }]);
+});
+
+test("does not mark a connection for reconnect on transient provider failures", async () => {
+  const marked = [];
+  const results = await publishTargets({
+    targets: [{ platform: "line", platformConnectionId: "line-a", publishPayload: { text: "LINE A" } }],
+    connections: [{
+      id: "line-a", platform: "line", credentials: { accessToken: "line-token" },
+      markNeedsReconnect: async () => { marked.push("line-a"); },
+    }],
+    fetchImpl: async () => new Response("temporarily unavailable", { status: 503 }),
+  });
+
+  assert.deepEqual(marked, []);
+  assert.deepEqual(results, [{ platform: "line", status: "failed", error: "line publishing failed." }]);
+});
+
+test("marks a text-body 401 credential rejection without exposing its body", async () => {
+  const marked = [];
+  const results = await publishTargets({
+    targets: [{ platform: "line", platformConnectionId: "line-a", publishPayload: { text: "LINE A" } }],
+    connections: [{
+      id: "line-a", platform: "line", credentials: { accessToken: "line-token" },
+      markNeedsReconnect: async () => { marked.push("line-a"); },
+    }],
+    fetchImpl: async () => new Response("private provider rejection", { status: 401 }),
+  });
+
+  assert.deepEqual(marked, ["line-a"]);
+  assert.equal(JSON.stringify(results).includes("private provider rejection"), false);
+  assert.deepEqual(results, [{ platform: "line", status: "failed", error: "The selected platform connection needs to be reconnected." }]);
+});
+
+test("records the provider outcome even when reconnect state persistence fails", async () => {
+  const results = await publishTargets({
+    targets: [{ platform: "line", platformConnectionId: "line-a", publishPayload: { text: "LINE A" } }],
+    connections: [{
+      id: "line-a", platform: "line", credentials: { accessToken: "line-token" },
+      markNeedsReconnect: async () => { throw new Error("database unavailable"); },
+    }],
+    fetchImpl: async () => new Response("unauthorized", { status: 401 }),
+  });
+
+  assert.deepEqual(results, [{ platform: "line", status: "failed", error: "The selected platform connection needs to be reconnected." }]);
 });

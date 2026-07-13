@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, isNull, lte } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, lte } from "drizzle-orm";
 
 import { createDbClient } from "../db/index.js";
 import { oauthTransactions, platformConnections } from "../db/schema.js";
@@ -38,14 +38,14 @@ export function createPlatformConnectionsRepository(db = createDbClient()) {
     },
     async replaceConnectionCredentialsIfUnchanged(id, ownerEmail, previousUpdatedAt, changes) {
       const [record] = await db.update(platformConnections).set(changes).where(and(
-        eq(platformConnections.id, id), eq(platformConnections.ownerEmail, ownerEmail), eq(platformConnections.state, "active"),
+        eq(platformConnections.id, id), eq(platformConnections.ownerEmail, ownerEmail), inArray(platformConnections.state, ["active", "archived"]),
         eq(platformConnections.updatedAt, previousUpdatedAt),
       )).returning();
       return record ?? null;
     },
     async markConnectionNeedsReconnect(id, ownerEmail, updatedAt) {
       const [record] = await db.update(platformConnections).set({ state: "needs_reconnect", updatedAt }).where(and(
-        eq(platformConnections.id, id), eq(platformConnections.ownerEmail, ownerEmail), eq(platformConnections.state, "active"),
+        eq(platformConnections.id, id), eq(platformConnections.ownerEmail, ownerEmail), inArray(platformConnections.state, ["active", "archived"]),
       )).returning();
       return record ?? null;
     },
