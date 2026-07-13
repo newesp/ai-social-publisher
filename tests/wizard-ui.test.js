@@ -37,6 +37,25 @@ test("wizard exposes OpenAI's one-option model controls", async () => {
   assert.equal(source.includes('getImageModelOptions(form.imageProvider)'), true);
 });
 
+test("wizard fetches connection availability and renders only active platform choices", async () => {
+  const source = await readFile(new URL("../src/components/CreatePostWizard.js", import.meta.url), "utf8");
+
+  assert.equal(source.includes('fetch("/api/platform-connections")'), true);
+  assert.equal(source.includes('connection.state === "active"'), true);
+  assert.equal(source.includes("connectedPlatformOptions.map"), true);
+  assert.equal(source.includes("ACTIVE_PLATFORMS.map"), false);
+  assert.equal(source.includes("reconcileConnectedPlatforms"), true);
+});
+
+test("wizard handles loading, error, and no-connection states without selectable fallbacks", async () => {
+  const source = await readFile(new URL("../src/components/CreatePostWizard.js", import.meta.url), "utf8");
+
+  for (const expected of ["Loading connected platforms", "Could not load publishing connections", "Connect a publishing platform in Settings", 'href="/settings?tab=publishing"']) {
+    assert.equal(source.includes(expected), true, `missing ${expected}`);
+  }
+  assert.equal(source.includes('availabilityStatus !== "success" || connectedPlatforms.length === 0'), true);
+});
+
 test("history loads API rows and exposes cancellation only for scheduled posts", async () => {
   const source = await readFile(new URL("../src/app/history/page.js", import.meta.url), "utf8");
 

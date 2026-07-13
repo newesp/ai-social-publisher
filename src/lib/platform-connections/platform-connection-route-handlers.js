@@ -50,6 +50,16 @@ export function createPlatformConnectionRouteHandlers({ requireOwner, getService
       const transactionId = new URL(request.url).searchParams.get("transactionId");
       return respond({ pages: (await meta.getPendingPages(ownerEmail, transactionId)).map(toSafePage) });
     },
+    async disconnectPlatform(request, platform) {
+      const ownerEmail = await requireOwner();
+      requireSameOrigin(request);
+      const safePlatform = requireManagedPlatform(platform);
+      const { connections } = await getServices();
+      const current = await connections.getDefault(ownerEmail, safePlatform);
+      if (!current) return respond({ connection: null });
+      const archived = await connections.archive(ownerEmail, current.id);
+      return respond({ connection: archived ? toAvailability(archived) : null });
+    },
   };
 }
 
@@ -91,4 +101,5 @@ function toCallbackRedirect(requestUrl, result) {
 function toAvailability(connection) { return { platform: connection.platform, state: connection.state, displayName: connection.displayName, expiresAt: connection.expiresAt ?? null }; }
 function toSafePage(page) { return { id: String(page?.id ?? ""), name: String(page?.name ?? "") }; }
 function toSettingsPath(value) { const path = String(value ?? "").trim(); return path === "/settings" || path.startsWith("/settings?") || path.startsWith("/settings/") ? path : "/settings"; }
+function requireManagedPlatform(value) { const platform = String(value ?? "").trim().toLowerCase(); if (platform !== "meta" && platform !== "line") throw routeError("Publishing platform not found.", 404); return platform; }
 function routeError(message, status) { const error = new Error(message); error.status = status; return error; }

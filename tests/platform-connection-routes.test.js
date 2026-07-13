@@ -140,3 +140,102 @@ test("LINE connect accepts only a Channel ID and Channel Secret JSON object", as
   await assert.rejects(handlers.connectLine(request), (error) => error.status === 400 && /channel id.*channel secret/i.test(error.message));
   assert.equal(calls, 0);
 });
+
+test("disconnect requires an authenticated owner before initializing platform stores", async () => {
+  let storesCreated = 0;
+  const handlers = createPlatformConnectionRouteHandlers({
+    requireOwner: async () => { const error = new Error("Unauthorized"); error.status = 401; throw error; },
+    getServices: async () => { storesCreated += 1; return {}; },
+  });
+
+  await assert.rejects(
+    handlers.disconnectPlatform(new Request("https://publisher.example/api/platform-connections/meta/disconnect", {
+      method: "POST", headers: { origin: "https://publisher.example" },
+    }), "meta"),
+    (error) => error.status === 401,
+  );
+  assert.equal(storesCreated, 0);
+});
+
+test("disconnect rejects cross-origin requests before initializing platform stores", async () => {
+  let storesCreated = 0;
+  const handlers = createPlatformConnectionRouteHandlers({
+    requireOwner: async () => "owner@example.com",
+    getServices: async () => { storesCreated += 1; return {}; },
+  });
+
+  await assert.rejects(
+    handlers.disconnectPlatform(new Request("https://publisher.example/api/platform-connections/line/disconnect", {
+      method: "POST", headers: { origin: "https://attacker.example" },
+    }), "line"),
+    (error) => error.status === 403 && /origin/i.test(error.message),
+  );
+  assert.equal(storesCreated, 0);
+});
+
+test("disconnect strictly rejects unsupported platforms", async () => {
+  let storesCreated = 0;
+  const handlers = createPlatformConnectionRouteHandlers({
+    requireOwner: async () => "owner@example.com",
+    getServices: async () => { storesCreated += 1; return {}; },
+  });
+
+  await assert.rejects(
+    handlers.disconnectPlatform(new Request("https://publisher.example/api/platform-connections/instagram/disconnect", {
+      method: "POST", headers: { origin: "https://publisher.example" },
+    }), "instagram"),
+    (error) => error.status === 404,
+  );
+  assert.equal(storesCreated, 0);
+});
+
+test("disconnect archives only the authenticated owner's active default and returns safe availability", async () => {
+  const calls = [];
+  const handlers = createPlatformConnectionRouteHandlers({
+    requireOwner: async () => "owner@example.com",
+    getServices: async () => ({ connections: {
+      async getDefault(...args) {
+        calls.push(["getDefault", ...args]);
+        return { id: "connection-1", ownerEmail: "owner@example.com", platform: "meta", state: "active", displayName: "Owner Page", credentials: { pageAccessToken: "secret" } };
+      },
+      async archive(...args) {
+        calls.push(["archive", ...args]);
+        return { id: "connection-1", ownerEmail: "owner@example.com", platform: "meta", state: "archived", displayName: "Owner Page", credentials: { pageAccessToken: "secret" } };
+      },
+    } }),
+  });
+
+  const response = await handlers.disconnectPlatform(new Request("https://publisher.example/api/platform-connections/meta/disconnect", {
+    method: "POST", headers: { origin: "https://publisher.example" },
+  }), "meta");
+  const body = await response.json();
+
+  assert.deepEqual(calls, [
+    ["getDefault", "owner@example.com", "meta"],
+    ["archive", "owner@example.com", "connection-1"],
+  ]);
+  assert.deepEqual(body, { connection: { platform: "meta", state: "archived", displayName: "Owner Page", expiresAt: null } });
+  assert.equal(JSON.stringify(body).includes("connection-1"), false);
+  assert.equal(JSON.stringify(body).includes("secret"), false);
+});
+
+test("disconnect is idempotent when the owner has no active default", async () => {
+  let archiveCalls = 0;
+  const handlers = createPlatformConnectionRouteHandlers({
+    requireOwner: async () => "owner@example.com",
+    getServices: async () => ({ connections: {
+      async getDefault(ownerEmail, platform) {
+        assert.deepEqual([ownerEmail, platform], ["owner@example.com", "line"]);
+        return null;
+      },
+      async archive() { archiveCalls += 1; },
+    } }),
+  });
+
+  const response = await handlers.disconnectPlatform(new Request("https://publisher.example/api/platform-connections/line/disconnect", {
+    method: "POST", headers: { origin: "https://publisher.example" },
+  }), "line");
+
+  assert.deepEqual(await response.json(), { connection: null });
+  assert.equal(archiveCalls, 0);
+});
