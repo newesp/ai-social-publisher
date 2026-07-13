@@ -12,7 +12,7 @@ import {
 
 const ENCRYPTION_KEY = "test-only-legacy-cleanup-key";
 
-function createMemoryRepository({ settings = [], targets = [], posts = [] } = {}) {
+function createMemoryRepository({ settings = [], targets = [], posts = [], beforeSave } = {}) {
   const records = settings.map((record) => ({ ...record }));
   const targetRecords = targets.map((target) => ({ ...target }));
   const postRecords = posts.map((post) => ({ ...post }));
@@ -24,13 +24,31 @@ function createMemoryRepository({ settings = [], targets = [], posts = [] } = {}
     postRecords,
     savedOwners,
     async transaction(work) {
-      return work(this);
+      const snapshot = {
+        records: structuredClone(records),
+        targets: structuredClone(targetRecords),
+        posts: structuredClone(postRecords),
+        savedOwners: [...savedOwners],
+      };
+      try {
+        return await work(this);
+      } catch (error) {
+        records.splice(0, records.length, ...snapshot.records);
+        targetRecords.splice(0, targetRecords.length, ...snapshot.targets);
+        postRecords.splice(0, postRecords.length, ...snapshot.posts);
+        savedOwners.splice(0, savedOwners.length, ...snapshot.savedOwners);
+        throw error;
+      }
     },
     async listUserSettings() {
       return records;
     },
-    async saveUserSetting(record) {
+    async saveUserSetting(record, previousEncryptedSettings) {
+      await beforeSave?.({ records, record, previousEncryptedSettings });
       const index = records.findIndex((candidate) => candidate.ownerEmail === record.ownerEmail);
+      if (index < 0 || records[index].encryptedSettings !== previousEncryptedSettings) {
+        throw new Error("A user settings record changed during legacy credential cleanup.");
+      }
       records[index] = { ...record };
       savedOwners.push(record.ownerEmail);
     },
@@ -112,6 +130,28 @@ test("migration decrypts and re-encrypts only legacy settings rows and is idempo
     failedTargets: 0,
   });
   assert.deepEqual(repository.savedOwners, ["owner@example.com"]);
+});
+
+test("changed settings ciphertext aborts and rolls back the cleanup transaction", async () => {
+  const first = encryptedRecord("first@example.com", { metaPageAccessToken: "first-legacy-token" });
+  const conflicted = encryptedRecord("conflicted@example.com", { lineChannelAccessToken: "line-legacy-token" });
+  const repository = createMemoryRepository({
+    settings: [first, conflicted],
+    beforeSave({ records, record }) {
+      if (record.ownerEmail !== conflicted.ownerEmail) return;
+      const stored = records.find((candidate) => candidate.ownerEmail === conflicted.ownerEmail);
+      stored.encryptedSettings = encryptJson({
+        lineChannelAccessToken: "concurrently-changed-token",
+      }, ENCRYPTION_KEY);
+    },
+  });
+
+  await assert.rejects(
+    migrateLegacyPlatformData({ repository, encryptionKey: ENCRYPTION_KEY }),
+    /changed during legacy credential cleanup/i,
+  );
+  assert.deepEqual(repository.records, [first, conflicted]);
+  assert.deepEqual(repository.savedOwners, []);
 });
 
 test("only unbound pending, draft, and scheduled targets become terminal failed", async () => {
