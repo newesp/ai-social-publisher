@@ -15,6 +15,13 @@
       "when": 1783780028198,
       "tag": "0001_typical_warpath",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1783925129028,
+      "tag": "0002_per_user_platform_connections",
+      "breakpoints": true
     }
   ]
 }
