@@ -15,7 +15,8 @@ export function buildPostSubmission({ form, targets, imageUrl = null, now = new 
   };
 
   if (mode === "scheduled") {
-    if (form.scheduledTime !== SCHEDULE_TIME) {
+    const scheduledTime = form.scheduledTime ?? SCHEDULE_TIME;
+    if (scheduledTime !== SCHEDULE_TIME) {
       throw new Error(`Scheduled time must be ${SCHEDULE_TIME}.`);
     }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(form.scheduledDate ?? ""))) {
@@ -25,7 +26,7 @@ export function buildPostSubmission({ form, targets, imageUrl = null, now = new 
       throw new Error("Scheduled date cannot be in the past.");
     }
     payload.scheduledDate = form.scheduledDate;
-    payload.scheduledTime = SCHEDULE_TIME;
+    payload.scheduledTime = scheduledTime;
   }
 
   return payload;

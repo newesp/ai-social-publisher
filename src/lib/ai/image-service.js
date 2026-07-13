@@ -17,7 +17,7 @@ export async function generateGeminiImage({ prompt, imageModel, settings, fetchI
       body: JSON.stringify({
         model: getImageModel("google", imageModel),
         input: [{ type: "text", text: prompt }],
-        response_format: { type: "image", mime_type: "image/jpeg", delivery: "inline" },
+        response_format: { type: "image", mime_type: "image/jpeg" },
       }),
     }),
   );

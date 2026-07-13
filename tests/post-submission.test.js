@@ -41,3 +41,13 @@ test("only permits 09:00 and rejects a past Taipei schedule date", () => {
     now: new Date("2026-07-11T00:00:00.000Z"),
   }).scheduledTime, "09:00");
 });
+
+test("uses the displayed 09:00 default when the schedule time was not changed", () => {
+  const payload = buildPostSubmission({
+    form: { productName: "Demo", productFeatures: "Fast", mode: "scheduled", scheduledDate: "2026-07-11" },
+    targets: [{ platform: "meta", content: "Copy", hashtags: [] }],
+    now: new Date("2026-07-10T00:00:00.000Z"),
+  });
+
+  assert.equal(payload.scheduledTime, "09:00");
+});

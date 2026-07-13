@@ -11,6 +11,7 @@ export async function uploadGeneratedImage({
   imageUrl,
   putImpl = put,
   idFactory = randomUUID,
+  blobStoreId = process.env.BLOB_STORE_ID,
 } = {}) {
   if (!imageUrl) return null;
   if (isPublicHttpsUrl(imageUrl)) return imageUrl;
@@ -22,6 +23,7 @@ export async function uploadGeneratedImage({
   const result = await putImpl(pathname, blob, {
     access: "public",
     contentType: parsed.contentType,
+    ...(blobStoreId ? { storeId: blobStoreId } : {}),
   });
 
   return result.url;

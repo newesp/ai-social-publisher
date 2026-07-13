@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { generateGeminiImage } from "../src/lib/ai/image-service.js";
 
-test("generates Gemini images with the interactions endpoint payload", async () => {
+test("generates Gemini images without requesting an unsupported delivery mode", async () => {
   const calls = [];
   const result = await generateGeminiImage({
     prompt: "Create a picture of a nano banana dish",
@@ -24,7 +24,7 @@ test("generates Gemini images with the interactions endpoint payload", async () 
   assert.deepEqual(JSON.parse(calls[0].options.body), {
     model: "gemini-3.1-flash-lite-image",
     input: [{ type: "text", text: "Create a picture of a nano banana dish" }],
-    response_format: { type: "image", mime_type: "image/jpeg", delivery: "inline" },
+    response_format: { type: "image", mime_type: "image/jpeg" },
   });
 });
 
