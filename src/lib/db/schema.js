@@ -18,12 +18,40 @@ export const posts = sqliteTable("posts", {
   index("posts_status_scheduled_for_idx").on(table.status, table.scheduledFor),
 ]);
 
+export const platformConnections = sqliteTable("platform_connections", {
+  id: text("id").primaryKey(),
+  ownerEmail: text("owner_email").notNull(),
+  platform: text("platform").notNull(),
+  displayName: text("display_name").notNull(),
+  state: text("state").notNull(),
+  encryptedCredentials: text("encrypted_credentials").notNull(),
+  credentialExpiresAt: integer("credential_expires_at", { mode: "timestamp" }),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  index("platform_connections_owner_platform_state_idx").on(table.ownerEmail, table.platform, table.state),
+]);
+
+export const oauthTransactions = sqliteTable("oauth_transactions", {
+  id: text("id").primaryKey(),
+  ownerEmail: text("owner_email").notNull(),
+  provider: text("provider").notNull(),
+  encryptedPayload: text("encrypted_payload").notNull(),
+  returnPath: text("return_path").notNull(),
+  expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
+  consumedAt: integer("consumed_at", { mode: "timestamp" }),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  index("oauth_transactions_expires_at_idx").on(table.expiresAt),
+]);
+
 export const postTargets = sqliteTable("post_targets", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   postId: integer("post_id")
     .notNull()
     .references(() => posts.id),
   platform: text("platform").notNull(),
+  platformConnectionId: text("platform_connection_id").references(() => platformConnections.id),
   content: text("content").notNull(),
   hashtagsJson: text("hashtags_json").notNull().default("[]"),
   status: text("status").notNull().default("draft"),

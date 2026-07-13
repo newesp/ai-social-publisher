@@ -1,25 +1,17 @@
-import crypto from "node:crypto";
-
+import { decryptJson, encryptJson } from "./credential-crypto.js";
 import { maskSecret } from "./secret-bundle.js";
 
-const PUBLIC_SETTING_KEYS = new Set(["metaPageId"]);
+const PUBLIC_SETTING_KEYS = new Set();
 const SETTING_KEYS = new Set([
   "googleAiApiKey",
   "openAiApiKey",
-  "metaPageId",
-  "metaPageAccessToken",
-  "lineChannelAccessToken",
 ]);
-const CIPHER = "aes-256-gcm";
-const IV_BYTES = 12;
 
 export function createUserSettingsStore({ repository, encryptionKey }) {
-  const key = deriveEncryptionKey(encryptionKey);
-
   return {
     async read(ownerEmail) {
       const record = await repository.findByOwnerEmail(assertOwnerEmail(ownerEmail));
-      return record ? decryptSettings(record.encryptedSettings, key) : {};
+      return record ? decryptJson(record.encryptedSettings, encryptionKey) : {};
     },
 
     async getMasked(ownerEmail) {
@@ -30,12 +22,12 @@ export function createUserSettingsStore({ repository, encryptionKey }) {
     async update(ownerEmail, updates) {
       const normalizedOwnerEmail = assertOwnerEmail(ownerEmail);
       const currentRecord = await repository.findByOwnerEmail(normalizedOwnerEmail);
-      const current = currentRecord ? decryptSettings(currentRecord.encryptedSettings, key) : {};
+      const current = currentRecord ? decryptJson(currentRecord.encryptedSettings, encryptionKey) : {};
       const next = applyUpdates(current, updates);
 
       await repository.save({
         ownerEmail: normalizedOwnerEmail,
-        encryptedSettings: encryptSettings(next, key),
+        encryptedSettings: encryptJson(next, encryptionKey),
         updatedAt: new Date(),
       });
 
@@ -71,48 +63,6 @@ function applyUpdates(current, updates) {
 
 function isMaskedPlaceholder(value) {
   return /^\*+$/.test(value) || /^.{3}\.\.\..{3}$/.test(value);
-}
-
-function encryptSettings(settings, key) {
-  const iv = crypto.randomBytes(IV_BYTES);
-  const cipher = crypto.createCipheriv(CIPHER, key, iv);
-  const ciphertext = Buffer.concat([
-    cipher.update(JSON.stringify(settings), "utf8"),
-    cipher.final(),
-  ]);
-
-  return [
-    "v1",
-    iv.toString("base64"),
-    cipher.getAuthTag().toString("base64"),
-    ciphertext.toString("base64"),
-  ].join(".");
-}
-
-function decryptSettings(encryptedSettings, key) {
-  const [version, ivText, tagText, ciphertextText] = String(encryptedSettings).split(".");
-  if (version !== "v1" || !ivText || !tagText || !ciphertextText) {
-    throw new Error("Stored settings could not be decrypted.");
-  }
-
-  try {
-    const decipher = crypto.createDecipheriv(CIPHER, key, Buffer.from(ivText, "base64"));
-    decipher.setAuthTag(Buffer.from(tagText, "base64"));
-    const plaintext = Buffer.concat([
-      decipher.update(Buffer.from(ciphertextText, "base64")),
-      decipher.final(),
-    ]);
-    return JSON.parse(plaintext.toString("utf8"));
-  } catch {
-    throw new Error("Stored settings could not be decrypted.");
-  }
-}
-
-function deriveEncryptionKey(encryptionKey) {
-  if (!String(encryptionKey ?? "").trim()) {
-    throw new Error("SETTINGS_ENCRYPTION_KEY must be configured.");
-  }
-  return crypto.createHash("sha256").update(String(encryptionKey)).digest();
 }
 
 function assertOwnerEmail(ownerEmail) {

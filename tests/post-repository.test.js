@@ -164,6 +164,7 @@ async function createSchema(client) {
       id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
       post_id INTEGER NOT NULL,
       platform TEXT NOT NULL,
+      platform_connection_id TEXT,
       content TEXT NOT NULL,
       hashtags_json TEXT NOT NULL,
       status TEXT NOT NULL,
