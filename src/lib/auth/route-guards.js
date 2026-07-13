@@ -48,8 +48,9 @@ function throwRouteError(message, status) {
 }
 
 export function routeErrorResponse(error, NextResponse) {
+  const status = error.status ?? 500;
   return NextResponse.json(
-    { error: error.message ?? "Request failed." },
-    { status: error.status ?? 500 },
+    { error: status >= 500 ? "Request failed." : error.message ?? "Request failed." },
+    { status },
   );
 }
