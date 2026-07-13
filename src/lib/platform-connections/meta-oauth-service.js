@@ -14,16 +14,15 @@ export function createMetaOAuthService({ env = process.env, fetchImpl = fetch, t
       const url = new URL(AUTHORIZATION_URL);
       url.searchParams.set("client_id", config.appId);
       url.searchParams.set("redirect_uri", config.redirectUri);
-      url.searchParams.set("state", encodeState(owner, transaction.id));
+      url.searchParams.set("state", transaction.id);
       url.searchParams.set("scope", SCOPES.join(","));
       return { authorizeUrl: url.toString() };
     },
 
-    async completeCallback(searchParams, callbackOwnerEmail) {
-      const state = decodeState(readParam(searchParams, "state"));
-      const callbackOwner = callbackOwnerEmail == null ? state.ownerEmail : normalizeOwner(callbackOwnerEmail);
-      if (callbackOwner !== state.ownerEmail) throw transactionError();
-      const pending = await transactions.consume(state.ownerEmail, state.transactionId, currentTime(now));
+    async completeCallback(ownerEmail, searchParams) {
+      const owner = normalizeOwner(ownerEmail);
+      const state = requireValue(readParam(searchParams, "state"), TRANSACTION_ERROR);
+      const pending = await transactions.consume(owner, state, currentTime(now));
       if (pending?.phase !== "authorization") throw transactionError();
       const returnPath = toSettingsPath(pending.returnPath);
       if (readParam(searchParams, "error")) return { status: "reconnect", returnPath };
@@ -36,7 +35,7 @@ export function createMetaOAuthService({ env = process.env, fetchImpl = fetch, t
       const longLivedToken = await exchangeLongLivedToken(fetchImpl, config, shortLivedToken);
       const pages = await listPages(fetchImpl, longLivedToken);
       const expiresAt = expiresAtFrom(longLivedToken.expires_in, currentTime(now));
-      const selection = await transactions.create(state.ownerEmail, "meta", {
+      const selection = await transactions.create(owner, "meta", {
         phase: "page_selection",
         returnPath,
         longLivedUserAccessToken: longLivedToken.access_token,
@@ -47,6 +46,12 @@ export function createMetaOAuthService({ env = process.env, fetchImpl = fetch, t
       return { status: "select_page", transactionId: selection.id, returnPath, pages: pages.map(toSafePage) };
     },
 
+    async getPendingPages(ownerEmail, transactionId) {
+      const pending = await transactions.read(normalizeOwner(ownerEmail), requireValue(transactionId, TRANSACTION_ERROR), currentTime(now));
+      if (pending?.phase !== "page_selection" || !Array.isArray(pending.pages)) throw transactionError();
+      return pending.pages.map(toSafePage);
+    },
+
     async selectPage(ownerEmail, transactionId, pageId) {
       const owner = normalizeOwner(ownerEmail);
       const pending = await transactions.consume(owner, requireValue(transactionId, TRANSACTION_ERROR), currentTime(now));
@@ -54,8 +59,7 @@ export function createMetaOAuthService({ env = process.env, fetchImpl = fetch, t
       const page = pending.pages.find((candidate) => candidate.id === String(pageId ?? "").trim());
       if (!page) throw routeError("The selected Meta Page is not available.", 400);
 
-      const previous = await connections.getDefault(owner, "meta");
-      const connection = await connections.create(owner, {
+      const connection = await connections.replaceDefault(owner, {
         platform: "meta",
         displayName: page.name,
         credentials: {
@@ -67,7 +71,6 @@ export function createMetaOAuthService({ env = process.env, fetchImpl = fetch, t
         },
         expiresAt: parseExpiresAt(pending.expiresAt),
       });
-      if (previous) await connections.archive(owner, previous.id);
       return toAvailability(connection);
     },
   };
@@ -133,19 +136,6 @@ function requireConfig(env) {
   if (!appId || !appSecret || !redirectUri) throw routeError("Meta connection needs to be configured.", 503);
   try { new URL(redirectUri); } catch { throw routeError("Meta connection needs to be configured.", 503); }
   return { appId, appSecret, redirectUri };
-}
-
-function encodeState(ownerEmail, transactionId) {
-  return Buffer.from(JSON.stringify({ ownerEmail, transactionId }), "utf8").toString("base64url");
-}
-
-function decodeState(value) {
-  try {
-    const parsed = JSON.parse(Buffer.from(String(value), "base64url").toString("utf8"));
-    return { ownerEmail: normalizeOwner(parsed.ownerEmail), transactionId: requireValue(parsed.transactionId, TRANSACTION_ERROR) };
-  } catch {
-    throw transactionError();
-  }
 }
 
 function readParam(searchParams, name) { return String(searchParams?.get?.(name) ?? "").trim(); }

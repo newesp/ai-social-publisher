@@ -23,7 +23,7 @@ export function createPlatformConnectionRouteHandlers({ requireOwner, getService
       const ownerEmail = await requireOwner();
       try {
         const { meta } = await getServices();
-        const result = await meta.completeCallback(new URL(request.url).searchParams, ownerEmail);
+        const result = await meta.completeCallback(ownerEmail, new URL(request.url).searchParams);
         return redirect(toCallbackRedirect(request.url, result));
       } catch {
         return redirect(toCallbackRedirect(request.url, { status: "reconnect", returnPath: "/settings" }));
@@ -35,6 +35,12 @@ export function createPlatformConnectionRouteHandlers({ requireOwner, getService
       const { meta } = await getServices();
       const body = await jsonBody(request);
       return respond({ connection: toAvailability(await meta.selectPage(ownerEmail, body.transactionId, body.pageId)) });
+    },
+    async getMetaPending(request) {
+      const ownerEmail = await requireOwner();
+      const { meta } = await getServices();
+      const transactionId = new URL(request.url).searchParams.get("transactionId");
+      return respond({ pages: (await meta.getPendingPages(ownerEmail, transactionId)).map(toSafePage) });
     },
   };
 }
@@ -61,7 +67,6 @@ function toCallbackRedirect(requestUrl, result) {
   target.searchParams.set("meta", result?.status === "select_page" ? "select" : "reconnect");
   if (result?.status === "select_page") {
     target.searchParams.set("transactionId", String(result.transactionId));
-    target.searchParams.set("pages", JSON.stringify(Array.isArray(result.pages) ? result.pages.map(toSafePage) : []));
   }
   return target.toString();
 }

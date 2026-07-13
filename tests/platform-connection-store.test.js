@@ -15,6 +15,15 @@ function createMemoryRepository() {
       connections.set(record.id, { ...record });
       return connections.get(record.id);
     },
+    async replaceDefaultConnection(record) {
+      for (const [id, current] of connections) {
+        if (current.ownerEmail === record.ownerEmail && current.platform === record.platform && current.state === "active") {
+          connections.set(id, { ...current, state: "archived", updatedAt: record.updatedAt });
+        }
+      }
+      connections.set(record.id, { ...record });
+      return connections.get(record.id);
+    },
     async findDefaultByOwnerAndPlatform(ownerEmail, platform) {
       return [...connections.values()].find((record) => record.ownerEmail === ownerEmail
         && record.platform === platform && record.state === "active") ?? null;
@@ -50,6 +59,10 @@ function createMemoryRepository() {
       const next = { ...record, consumedAt: now };
       transactions.set(id, next);
       return next;
+    },
+    async findOAuthTransactionByIdAndOwner(id, ownerEmail, now) {
+      const record = transactions.get(id);
+      return record && record.ownerEmail === ownerEmail && !record.consumedAt && record.expiresAt > now ? record : null;
     },
     async purgeExpiredOAuthTransactions(now) {
       for (const [id, record] of transactions) {
@@ -103,6 +116,24 @@ test("connection credentials are replaced and archived only by their owner", asy
   assert.equal(await store.getDefault("owner@example.com", "meta"), null);
 });
 
+test("replacing a default connection archives prior active records atomically", async () => {
+  const repository = createMemoryRepository();
+  const store = createPlatformConnectionStore({ repository, encryptionKey: "test-key" });
+  const oldConnection = await store.create("owner@example.com", {
+    platform: "meta", displayName: "Old Page", credentials: { pageAccessToken: "old-token" },
+  });
+
+  const replacement = await store.replaceDefault("owner@example.com", {
+    platform: "meta", displayName: "New Page", credentials: { pageAccessToken: "new-token" },
+  });
+
+  assert.equal(repository.connections.get(oldConnection.id).state, "archived");
+  assert.equal(repository.connections.get(replacement.id).state, "active");
+  assert.deepEqual([...repository.connections.values()].filter((record) => record.ownerEmail === "owner@example.com"
+    && record.platform === "meta" && record.state === "active").map((record) => record.id), [replacement.id]);
+  assert.equal(repository.connections.get(replacement.id).encryptedCredentials.includes("new-token"), false);
+});
+
 test("OAuth transactions are single-use, owner-bound, and expire after ten minutes", async () => {
   const repository = createMemoryRepository();
   const store = createOAuthTransactionStore({ repository, encryptionKey: "test-key" });
@@ -128,4 +159,15 @@ test("OAuth transactions reject protocol-relative return paths", async () => {
     store.create("owner@example.com", "meta", { pages: [] }, "//attacker.example", new Date()),
     /local path/i,
   );
+});
+
+test("unconsumed OAuth transactions can be read only by their owner without exposing stored rows", async () => {
+  const repository = createMemoryRepository();
+  const store = createOAuthTransactionStore({ repository, encryptionKey: "test-key" });
+  const now = new Date("2026-07-13T00:00:00.000Z");
+  const transaction = await store.create("owner@example.com", "meta", { pages: [{ accessToken: "page-token" }] }, "/settings", now);
+
+  assert.deepEqual(await store.read("owner@example.com", transaction.id, now), { pages: [{ accessToken: "page-token" }] });
+  await assert.rejects(store.read("other@example.com", transaction.id, now), /expired or already used/i);
+  assert.equal(repository.transactions.get(transaction.id).encryptedPayload.includes("page-token"), false);
 });

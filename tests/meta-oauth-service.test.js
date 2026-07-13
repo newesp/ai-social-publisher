@@ -24,7 +24,7 @@ test("start creates an owner-bound transaction and requests only publishing Page
   assert.equal(url.searchParams.get("scope"), "pages_show_list,pages_read_engagement,pages_manage_posts");
   assert.equal(transactions.created[0].ownerEmail, "owner@example.com");
   assert.equal(transactions.created[0].returnPath, "/settings?tab=publishing");
-  assert.equal(url.searchParams.get("state").includes(transactions.created[0].id), false);
+  assert.equal(url.searchParams.get("state"), transactions.created[0].id);
 });
 
 test("callback exchanges code, stores pending Page credentials, and never returns Tokens", async () => {
@@ -38,7 +38,7 @@ test("callback exchanges code, stores pending Page credentials, and never return
 
   const callbackParams = new URL(started.authorizeUrl).searchParams;
   callbackParams.set("code", "oauth-code");
-  const result = await service.completeCallback(callbackParams, "owner@example.com");
+  const result = await service.completeCallback("owner@example.com", callbackParams);
 
   assert.deepEqual(result.pages, [{ id: "page-1", name: "Owner Page" }]);
   assert.equal(JSON.stringify(result).includes("token"), false);
@@ -47,7 +47,7 @@ test("callback exchanges code, stores pending Page credentials, and never return
   assert.equal(transactions.created[1].payload.longLivedUserAccessToken, "long-user-token");
 });
 
-test("callback rejects a session owner that does not match the owner-bound state before token exchange", async () => {
+test("callback consumes the opaque state only for the authenticated owner before token exchange", async () => {
   const transactions = createTransactions();
   let fetchCalls = 0;
   const service = createMetaOAuthService({ env, fetchImpl: async () => { fetchCalls += 1; return jsonResponse({}); }, transactions, connections: createConnections(), now: () => now });
@@ -56,7 +56,7 @@ test("callback rejects a session owner that does not match the owner-bound state
   const callbackParams = new URL(started.authorizeUrl).searchParams;
   callbackParams.set("code", "oauth-code");
   await assert.rejects(
-    service.completeCallback(callbackParams, "other@example.com"),
+    service.completeCallback("other@example.com", callbackParams),
     /expired or already used/i,
   );
   assert.equal(fetchCalls, 0);
@@ -70,7 +70,7 @@ test("callback handles provider cancellation without echoing provider details", 
   params.set("error", "access_denied");
   params.set("error_description", "provider-private-detail");
 
-  const result = await service.completeCallback(params, "owner@example.com");
+  const result = await service.completeCallback("owner@example.com", params);
 
   assert.deepEqual(result, { status: "reconnect", returnPath: "/settings" });
   assert.equal(JSON.stringify(result).includes("provider-private-detail"), false);
@@ -84,13 +84,12 @@ test("callback rejects expired and consumed state", async () => {
 
   const callbackParams = new URL(started.authorizeUrl).searchParams;
   callbackParams.set("code", "oauth-code");
-  await assert.rejects(service.completeCallback(callbackParams, "owner@example.com"), /expired or already used/i);
+  await assert.rejects(service.completeCallback("owner@example.com", callbackParams), /expired or already used/i);
 });
 
-test("selectPage rejects unavailable Pages and archives the previous default only for its owner", async () => {
+test("selectPage rejects unavailable Pages and atomically replaces only the current owner's default", async () => {
   const transactions = createTransactions();
   const connections = createConnections();
-  connections.current = { id: "old-meta", platform: "meta", state: "active" };
   const service = createMetaOAuthService({ env, fetchImpl: unexpectedFetch, transactions, connections, now: () => now });
   const pending = await transactions.create("owner@example.com", "meta", {
     phase: "page_selection", pages: [{ id: "page-1", name: "Owner Page", accessToken: "page-token" }],
@@ -106,8 +105,20 @@ test("selectPage rejects unavailable Pages and archives the previous default onl
 
   const selected = await service.selectPage("owner@example.com", pending.id, "page-1");
   assert.deepEqual(selected, { platform: "meta", state: "active", displayName: "Owner Page", expiresAt: new Date("2026-09-11T00:00:00.000Z") });
-  assert.deepEqual(connections.archived, [["owner@example.com", "old-meta"]]);
-  assert.equal(connections.created[0].input.credentials.pageAccessToken, "page-token");
+  assert.equal(connections.replaced.length, 1);
+  assert.equal(connections.replaced[0].ownerEmail, "owner@example.com");
+  assert.equal(connections.replaced[0].input.credentials.pageAccessToken, "page-token");
+});
+
+test("pending Page choices stay owner-scoped and omit credentials", async () => {
+  const transactions = createTransactions();
+  const service = createMetaOAuthService({ env, fetchImpl: unexpectedFetch, transactions, connections: createConnections(), now: () => now });
+  const pending = await transactions.create("owner@example.com", "meta", {
+    phase: "page_selection", pages: [{ id: "page-1", name: "Owner Page", accessToken: "page-token" }],
+  }, "/settings", now);
+
+  assert.deepEqual(await service.getPendingPages("owner@example.com", pending.id), [{ id: "page-1", name: "Owner Page" }]);
+  await assert.rejects(service.getPendingPages("other@example.com", pending.id), /expired or already used/i);
 });
 
 function createTransactions() {
@@ -126,20 +137,23 @@ function createTransactions() {
       record.consumed = true;
       return record.payload;
     },
+    async read(ownerEmail, id) {
+      const record = records.get(id);
+      if (!record || record.ownerEmail !== ownerEmail || record.consumed || record.expired) throw new Error("OAuth transaction is expired or already used.");
+      return record.payload;
+    },
     expire(id) { records.get(id).expired = true; },
   };
 }
 
 function createConnections() {
   return {
-    created: [], archived: [], current: null,
-    async getDefault() { return this.current; },
-    async create(ownerEmail, input) {
-      const connection = { id: `connection-${this.created.length + 1}`, ownerEmail, ...input, state: "active", expiresAt: input.expiresAt ?? null };
-      this.created.push({ ownerEmail, input, connection }); this.current = connection;
+    replaced: [],
+    async replaceDefault(ownerEmail, input) {
+      const connection = { id: `connection-${this.replaced.length + 1}`, ownerEmail, ...input, state: "active", expiresAt: input.expiresAt ?? null };
+      this.replaced.push({ ownerEmail, input, connection });
       return connection;
     },
-    async archive(ownerEmail, id) { this.archived.push([ownerEmail, id]); },
   };
 }
 

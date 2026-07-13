@@ -9,6 +9,15 @@ export function createPlatformConnectionsRepository(db = createDbClient()) {
       const [created] = await db.insert(platformConnections).values(record).returning();
       return created;
     },
+    async replaceDefaultConnection(record) {
+      return db.transaction(async (tx) => {
+        await tx.update(platformConnections).set({ state: "archived", updatedAt: record.updatedAt }).where(and(
+          eq(platformConnections.ownerEmail, record.ownerEmail), eq(platformConnections.platform, record.platform), eq(platformConnections.state, "active"),
+        ));
+        const [created] = await tx.insert(platformConnections).values(record).returning();
+        return created;
+      });
+    },
     async findDefaultByOwnerAndPlatform(ownerEmail, platform) {
       const [record] = await db.select().from(platformConnections).where(and(
         eq(platformConnections.ownerEmail, ownerEmail), eq(platformConnections.platform, platform), eq(platformConnections.state, "active"),
@@ -46,6 +55,12 @@ export function createPlatformConnectionsRepository(db = createDbClient()) {
       const [record] = await db.update(oauthTransactions).set({ consumedAt: now }).where(and(
         eq(oauthTransactions.id, id), eq(oauthTransactions.ownerEmail, ownerEmail), isNull(oauthTransactions.consumedAt), gt(oauthTransactions.expiresAt, now),
       )).returning();
+      return record ?? null;
+    },
+    async findOAuthTransactionByIdAndOwner(id, ownerEmail, now) {
+      const [record] = await db.select().from(oauthTransactions).where(and(
+        eq(oauthTransactions.id, id), eq(oauthTransactions.ownerEmail, ownerEmail), isNull(oauthTransactions.consumedAt), gt(oauthTransactions.expiresAt, now),
+      )).limit(1);
       return record ?? null;
     },
     async purgeExpiredOAuthTransactions(now) {

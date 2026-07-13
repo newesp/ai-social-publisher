@@ -59,7 +59,7 @@ test("Meta callback turns a provider cancellation into a generic settings redire
   assert.equal(response.headers.get("location").includes("do-not-leak"), false);
 });
 
-test("Meta callback redirects Page choices to settings without including credentials", async () => {
+test("Meta callback redirects only an opaque picker transaction to settings", async () => {
   const handlers = createPlatformConnectionRouteHandlers({
     requireOwner: async () => "owner@example.com",
     getServices: async () => ({ meta: { async completeCallback() { return {
@@ -73,6 +73,20 @@ test("Meta callback redirects Page choices to settings without including credent
   assert.equal(location.pathname, "/settings");
   assert.equal(location.searchParams.get("meta"), "select");
   assert.equal(location.searchParams.get("transactionId"), "transaction-1");
-  assert.deepEqual(JSON.parse(location.searchParams.get("pages")), [{ id: "page-1", name: "Owner Page" }]);
+  assert.equal(location.searchParams.get("pages"), null);
   assert.equal(location.toString().includes("secret"), false);
+});
+
+test("Meta pending Page route obtains choices only for the authenticated owner and redacts credentials", async () => {
+  const calls = [];
+  const handlers = createPlatformConnectionRouteHandlers({
+    requireOwner: async () => "owner@example.com",
+    getServices: async () => ({ meta: { async getPendingPages(...args) { calls.push(args); return [{ id: "page-1", name: "Owner Page", accessToken: "secret" }]; } } }),
+  });
+
+  const response = await handlers.getMetaPending(new Request("https://publisher.example/api/platform-connections/meta/pending?transactionId=transaction-1"));
+  const body = await response.json();
+  assert.deepEqual(calls, [["owner@example.com", "transaction-1"]]);
+  assert.deepEqual(body, { pages: [{ id: "page-1", name: "Owner Page" }] });
+  assert.equal(JSON.stringify(body).includes("secret"), false);
 });

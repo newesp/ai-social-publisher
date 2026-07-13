@@ -21,6 +21,11 @@ export function createOAuthTransactionStore({ repository, encryptionKey }) {
       if (!record) throw new Error(EXPIRED_ERROR);
       return decryptJson(record.encryptedPayload, encryptionKey);
     },
+    async read(ownerEmail, id, now) {
+      const record = await repository.findOAuthTransactionByIdAndOwner(requireId(id), normalizeOwner(ownerEmail), requireDate(now));
+      if (!record) throw new Error(EXPIRED_ERROR);
+      return decryptJson(record.encryptedPayload, encryptionKey);
+    },
     async purgeExpired(now) { await repository.purgeExpiredOAuthTransactions(requireDate(now)); },
   };
 }

@@ -7,13 +7,11 @@ const PLATFORMS = new Set(["meta", "line"]);
 export function createPlatformConnectionStore({ repository, encryptionKey }) {
   return {
     async create(ownerEmail, input) {
-      const now = new Date();
-      const record = await repository.createConnection({
-        id: crypto.randomUUID(), ownerEmail: normalizeOwner(ownerEmail), platform: requirePlatform(input?.platform),
-        displayName: requireDisplayName(input?.displayName), state: "active",
-        encryptedCredentials: encryptJson(requireCredentials(input?.credentials), encryptionKey),
-        credentialExpiresAt: toDateOrNull(input?.expiresAt ?? input?.credentialExpiresAt), createdAt: now, updatedAt: now,
-      });
+      const record = await repository.createConnection(toNewRecord(ownerEmail, input, encryptionKey));
+      return toConnection(record, encryptionKey);
+    },
+    async replaceDefault(ownerEmail, input) {
+      const record = await repository.replaceDefaultConnection(toNewRecord(ownerEmail, input, encryptionKey));
       return toConnection(record, encryptionKey);
     },
     async getDefault(ownerEmail, platform) {
@@ -38,6 +36,16 @@ export function createPlatformConnectionStore({ repository, encryptionKey }) {
     async listAvailability(ownerEmail) {
       return (await repository.listConnectionAvailability(normalizeOwner(ownerEmail))).map(toAvailability);
     },
+  };
+}
+
+function toNewRecord(ownerEmail, input, encryptionKey) {
+  const now = new Date();
+  return {
+    id: crypto.randomUUID(), ownerEmail: normalizeOwner(ownerEmail), platform: requirePlatform(input?.platform),
+    displayName: requireDisplayName(input?.displayName), state: "active",
+    encryptedCredentials: encryptJson(requireCredentials(input?.credentials), encryptionKey),
+    credentialExpiresAt: toDateOrNull(input?.expiresAt ?? input?.credentialExpiresAt), createdAt: now, updatedAt: now,
   };
 }
 
