@@ -28,6 +28,18 @@ test("settings uses safe per-user connection APIs instead of stored publishing c
   }
 });
 
+test("Meta connection starts with a native POST form and consumes only a safe error flag", async () => {
+  const source = await readFile(new URL("../src/components/SettingsPanel.js", import.meta.url), "utf8");
+
+  assert.equal(source.includes('action="/api/platform-connections/meta/start"'), true);
+  assert.equal(source.includes('method="post"'), true);
+  assert.equal(source.includes('name="returnPath"'), true);
+  assert.equal(source.includes('type="submit"'), true);
+  assert.equal(source.includes('fetch("/api/platform-connections/meta/start"'), false);
+  assert.equal(source.includes('params.get("meta") === "start_error"'), true);
+  assert.equal(source.includes('params.delete("meta")'), true);
+});
+
 test("settings renders actionable loading, disconnected, active, reconnect, and error states", async () => {
   const source = await readFile(new URL("../src/components/SettingsPanel.js", import.meta.url), "utf8");
   const lifecycleSource = await readFile(new URL("../src/lib/platform-connections/settings-platform-lifecycle.js", import.meta.url), "utf8");

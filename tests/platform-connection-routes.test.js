@@ -28,6 +28,11 @@ test("POST handlers reject cross-origin requests before initializing platform st
   });
 
   await assert.rejects(handlers.startMeta(request), (error) => error.status === 403 && /origin/i.test(error.message));
+  await assert.rejects(handlers.startMetaRedirect(new Request(request.url, {
+    method: "POST",
+    headers: { origin: "https://attacker.example", "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ returnPath: "/settings?tab=publishing" }),
+  })), (error) => error.status === 403 && /origin/i.test(error.message));
   assert.equal(storesCreated, 0);
 });
 
@@ -43,6 +48,50 @@ test("POST handlers reject requests without an Origin before initializing platfo
 
   await assert.rejects(handlers.startMeta(request), (error) => error.status === 403 && /origin/i.test(error.message));
   assert.equal(storesCreated, 0);
+});
+
+test("Meta form start redirects the browser with 303 after owner and origin validation", async () => {
+  const calls = [];
+  const handlers = createPlatformConnectionRouteHandlers({
+    requireOwner: async () => "owner@example.com",
+    getServices: async () => ({
+      meta: { async start(ownerEmail, returnPath) {
+        calls.push([ownerEmail, returnPath]);
+        return { authorizeUrl: "https://www.facebook.com/v25.0/dialog/oauth?state=opaque" };
+      } },
+    }),
+    redirect: (url, status) => new Response(null, { status, headers: { location: url } }),
+  });
+  const request = new Request("https://publisher.example/api/platform-connections/meta/start", {
+    method: "POST",
+    headers: { origin: "https://publisher.example", "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ returnPath: "/settings?tab=publishing" }),
+  });
+
+  const response = await handlers.startMetaRedirect(request);
+
+  assert.equal(response.status, 303);
+  assert.match(response.headers.get("location"), /^https:\/\/www\.facebook\.com\//);
+  assert.deepEqual(calls, [["owner@example.com", "/settings?tab=publishing"]]);
+});
+
+test("Meta form start redirects service failures to a fixed safe Settings URL", async () => {
+  const handlers = createPlatformConnectionRouteHandlers({
+    requireOwner: async () => "owner@example.com",
+    getServices: async () => ({ meta: { async start() { throw new Error("private Meta configuration detail"); } } }),
+    redirect: (url, status) => new Response(null, { status, headers: { location: url } }),
+  });
+  const request = new Request("https://publisher.example/api/platform-connections/meta/start", {
+    method: "POST",
+    headers: { origin: "https://publisher.example", "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ returnPath: "https://attacker.example/private" }),
+  });
+
+  const response = await handlers.startMetaRedirect(request);
+
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get("location"), "https://publisher.example/settings?tab=publishing&meta=start_error");
+  assert.equal(response.headers.get("location").includes("private"), false);
 });
 
 test("Meta selection passes only the authenticated owner and returns a safe connection", async () => {

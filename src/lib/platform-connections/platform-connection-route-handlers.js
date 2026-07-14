@@ -7,7 +7,7 @@ import { createPlatformConnectionStore } from "./platform-connection-store.js";
 import { createPlatformConnectionsRepository } from "./platform-connections-repository.js";
 import { fetchWithDeadline } from "./connection-lifecycle.js";
 
-export function createPlatformConnectionRouteHandlers({ requireOwner, getServices = () => getPlatformConnectionServices(), fetchImpl = fetch, requestTimeoutMs = 10_000, respond = (body, init) => Response.json(body, init), redirect = (url) => Response.redirect(url, 302) }) {
+export function createPlatformConnectionRouteHandlers({ requireOwner, getServices = () => getPlatformConnectionServices(), fetchImpl = fetch, requestTimeoutMs = 10_000, respond = (body, init) => Response.json(body, init), redirect = (url, status = 302) => Response.redirect(url, status) }) {
   return {
     async GET() {
       const ownerEmail = await requireOwner();
@@ -20,6 +20,18 @@ export function createPlatformConnectionRouteHandlers({ requireOwner, getService
       const { meta } = await getServices();
       const body = await jsonBody(request);
       return respond(await meta.start(ownerEmail, body.returnPath));
+    },
+    async startMetaRedirect(request) {
+      const ownerEmail = await requireOwner();
+      requireSameOrigin(request);
+      try {
+        const { meta } = await getServices();
+        const form = await request.formData();
+        const result = await meta.start(ownerEmail, form.get("returnPath"));
+        return redirect(requireMetaAuthorizationUrl(result?.authorizeUrl), 303);
+      } catch {
+        return redirect(new URL("/settings?tab=publishing&meta=start_error", request.url).toString(), 303);
+      }
     },
     async completeMeta(request) {
       const ownerEmail = await requireOwner();
@@ -110,6 +122,14 @@ function requireLineConnectBody(request, body) {
     throw routeError("A JSON LINE Channel ID and Channel Secret are required.", 400);
   }
   return body;
+}
+
+function requireMetaAuthorizationUrl(value) {
+  const url = new URL(String(value ?? ""));
+  if (url.protocol !== "https:" || url.hostname !== "www.facebook.com" || !url.pathname.endsWith("/dialog/oauth")) {
+    throw routeError("Meta connection could not be started.", 502);
+  }
+  return url.toString();
 }
 
 function toCallbackRedirect(requestUrl, result) {
