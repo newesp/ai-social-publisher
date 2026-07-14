@@ -54,6 +54,18 @@ test("wizard fetches connection availability and renders only active platform ch
   assert.equal(source.includes("reconcileConnectedPlatforms"), true);
 });
 
+test("wizard passes active connection names to previews with generic fallbacks", async () => {
+  const wizard = await readFile(new URL("../src/components/CreatePostWizard.js", import.meta.url), "utf8");
+  const preview = await readFile(new URL("../src/components/PlatformPreview.js", import.meta.url), "utf8");
+
+  assert.equal(wizard.includes("platformDisplayNames"), true);
+  assert.equal(wizard.includes("displayName={platformDisplayNames[preview.platform]}"), true);
+  assert.equal(preview.includes('{displayName || "Meta"}'), true);
+  assert.equal(preview.includes('{displayName || "LINE"}'), true);
+  assert.equal(preview.includes("New ESP 官方帳號"), false);
+  assert.equal(preview.includes(">New ESP<"), false);
+});
+
 test("wizard handles loading, error, and no-connection states without selectable fallbacks", async () => {
   const source = await readFile(new URL("../src/components/CreatePostWizard.js", import.meta.url), "utf8");
 

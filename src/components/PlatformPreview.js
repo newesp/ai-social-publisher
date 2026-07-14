@@ -2,22 +2,22 @@
 
 import { Avatar, Group, Image, Paper, Stack, Text, Textarea } from "@mantine/core";
 
-export function PlatformPreview({ data, content, onContentChange }) {
+export function PlatformPreview({ data, content, onContentChange, displayName }) {
   if (data.platform === "meta") {
-    return <MetaPreview data={data} content={content} onContentChange={onContentChange} />;
+    return <MetaPreview data={data} content={content} onContentChange={onContentChange} displayName={displayName} />;
   }
   if (data.platform === "instagram") return <InstagramPreview data={data} />;
-  return <LinePreview data={data} content={content} onContentChange={onContentChange} />;
+  return <LinePreview data={data} content={content} onContentChange={onContentChange} displayName={displayName} />;
 }
 
-function MetaPreview({ data, content, onContentChange }) {
+function MetaPreview({ data, content, onContentChange, displayName }) {
   return (
     <Paper withBorder radius={8} p="md">
       <Stack gap="sm">
         <Group gap="sm">
           <Avatar color="blue">f</Avatar>
           <div>
-            <Text fw={700}>New ESP</Text>
+            <Text fw={700}>{displayName || "Meta"}</Text>
             <Text size="xs" c="dimmed">
               Facebook 動態消息預覽
             </Text>
@@ -54,14 +54,14 @@ function InstagramPreview({ data }) {
   );
 }
 
-function LinePreview({ data, content, onContentChange }) {
+function LinePreview({ data, content, onContentChange, displayName }) {
   return (
     <Paper withBorder radius={8} p="md">
       <Stack gap="sm">
         <Group gap="sm">
           <Avatar color="green">L</Avatar>
           <div>
-            <Text fw={700}>New ESP 官方帳號</Text>
+            <Text fw={700}>{displayName || "LINE"}</Text>
             <Text size="xs" c="dimmed">
               LINE 廣播預覽
             </Text>

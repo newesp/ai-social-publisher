@@ -56,6 +56,7 @@ export function CreatePostWizard() {
   const [publishResult, setPublishResult] = useState(null);
   const [proofreadIssues, setProofreadIssues] = useState([]);
   const [connectedPlatforms, setConnectedPlatforms] = useState([]);
+  const [platformDisplayNames, setPlatformDisplayNames] = useState({});
   const [availabilityStatus, setAvailabilityStatus] = useState("loading");
   const [hydrated, setHydrated] = useState(false);
   const [draftOwner, setDraftOwner] = useState(null);
@@ -133,14 +134,19 @@ export function CreatePostWizard() {
 
   async function loadConnectedPlatforms() {
     setAvailabilityStatus("loading");
+    setPlatformDisplayNames({});
     try {
       const response = await fetch("/api/platform-connections");
       const data = await response.json();
       if (!response.ok || !Array.isArray(data.connections)) throw new Error();
-      const activePlatforms = [...new Set(data.connections
-        .filter((connection) => connection.state === "active")
-        .map((connection) => connection.platform)
-        .filter((platform) => ACTIVE_PLATFORMS.some((option) => option.value === platform)))];
+      const activeConnections = data.connections.filter((connection) => (
+        connection.state === "active"
+        && ACTIVE_PLATFORMS.some((option) => option.value === connection.platform)
+      ));
+      const activePlatforms = [...new Set(activeConnections.map((connection) => connection.platform))];
+      setPlatformDisplayNames(Object.fromEntries(activeConnections
+        .filter((connection) => typeof connection.displayName === "string" && connection.displayName.trim())
+        .map((connection) => [connection.platform, connection.displayName.trim()])));
       setConnectedPlatforms(activePlatforms);
       setForm((currentForm) => ({
         ...currentForm,
@@ -149,6 +155,7 @@ export function CreatePostWizard() {
       setAvailabilityStatus("success");
     } catch {
       setConnectedPlatforms([]);
+      setPlatformDisplayNames({});
       setForm((currentForm) => ({ ...currentForm, platforms: [] }));
       setAvailabilityStatus("error");
     }
@@ -288,7 +295,7 @@ export function CreatePostWizard() {
             {generationError ? <Text c="red.7" size="sm" mb="sm">{generationError}</Text> : null}
             {proofreadIssues.length > 0 ? <ProofreadIssues issues={proofreadIssues} /> : null}
             <SimpleGrid cols={{ base: 1, lg: 2 }} spacing="md">
-              {Object.values(previews).map((preview) => <PlatformPreview key={preview.platform} data={preview} content={targets.find((target) => target.platform === preview.platform)?.content ?? ""} onContentChange={(content) => editTarget(preview.platform, content)} />)}
+              {Object.values(previews).map((preview) => <PlatformPreview key={preview.platform} data={preview} displayName={platformDisplayNames[preview.platform]} content={targets.find((target) => target.platform === preview.platform)?.content ?? ""} onContentChange={(content) => editTarget(preview.platform, content)} />)}
             </SimpleGrid>
             <Paper withBorder mt="md" p="md">
               <Text fw={600} mb="sm">發布方式</Text>
