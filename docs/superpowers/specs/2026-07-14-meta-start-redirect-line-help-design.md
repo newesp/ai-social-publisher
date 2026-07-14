@@ -81,6 +81,10 @@ References:
 - Focused tests, full test suite, production build, conflict-marker scan, and diff check must pass.
 - Browser visual QA checks the disclosure at desktop and narrow viewport widths when a usable local authenticated backend is available. If authentication prevents browser QA, record that limitation and rely on structural/source assertions plus build verification.
 
+## Scope and Atomic Release
+
+Meta navigation reliability and LINE credential guidance are one **Settings > Publishing platforms** onboarding improvement drawn from the same production feedback. They share the same user-facing Settings surface, release, and QA pass, and neither requires a separate schema or configuration rollout. This is the product-level reason to ship them atomically in one PR; it does not imply that the Meta and LINE implementations are technically coupled.
+
 ## Rollout
 
-Ship through a new branch and pull request. The change requires a Vercel deployment but no additional database migration. Production smoke testing must not complete a real Meta authorization or send a LINE message without separate explicit approval.
+Ship through a new branch and pull request as one Settings > Publishing platforms onboarding improvement. The change requires a Vercel deployment but no database migration, schema change, or additional configuration rollout. Production smoke testing must not complete a real Meta authorization or send a LINE message without separate explicit approval.
