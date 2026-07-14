@@ -21,6 +21,20 @@ test("uploads generated data URLs to public Vercel Blob URLs", async () => {
   assert.equal(await calls[0].body.text(), "hello");
 });
 
+test("uses the configured store ID for Vercel OIDC uploads", async () => {
+  const calls = [];
+  await uploadGeneratedImage({
+    imageUrl: "data:image/png;base64,aGVsbG8=",
+    blobStoreId: "store_example",
+    putImpl: async (_pathname, _body, options) => {
+      calls.push(options);
+      return { url: "https://blob.vercel-storage.com/generated.png" };
+    },
+  });
+
+  assert.equal(calls[0].storeId, "store_example");
+});
+
 test("keeps existing HTTPS image URLs without uploading", async () => {
   const result = await uploadGeneratedImage({
     imageUrl: "https://example.com/image.png",

@@ -4,7 +4,6 @@ export const REQUIRED_RUNTIME_CONFIG_KEYS = Object.freeze([
   "SETTINGS_ENCRYPTION_KEY",
   "TURSO_DATABASE_URL",
   "TURSO_AUTH_TOKEN",
-  "BLOB_READ_WRITE_TOKEN",
 ]);
 
 export function validateRuntimeConfig(env) {
@@ -19,10 +18,24 @@ export function validateRuntimeConfig(env) {
     }
   }
 
+  validateBlobCredentials(env);
+
   validateTursoUrl(env.TURSO_DATABASE_URL);
 
   if (mode === "production" && !hasAllowedGoogleEmail(env.ALLOWED_GOOGLE_EMAILS)) {
     throw new Error("ALLOWED_GOOGLE_EMAILS must be configured when AUTH_MODE=production.");
+  }
+}
+
+function validateBlobCredentials(env) {
+  if (String(env.BLOB_READ_WRITE_TOKEN ?? "").trim()) return;
+
+  if (!String(env.VERCEL_OIDC_TOKEN ?? "").trim()) {
+    throw new Error("BLOB_READ_WRITE_TOKEN must be configured, or configure VERCEL_OIDC_TOKEN with BLOB_STORE_ID.");
+  }
+
+  if (!String(env.BLOB_STORE_ID ?? "").trim()) {
+    throw new Error("BLOB_STORE_ID must be configured when using VERCEL_OIDC_TOKEN.");
   }
 }
 

@@ -2,12 +2,12 @@ export const DEFAULT_LLM_PROVIDER = "google";
 export const DEFAULT_IMAGE_PROVIDER = "google";
 
 export const LLM_MODEL_OPTIONS = Object.freeze({
-  google: Object.freeze(["gemini-3.1-flash-lite-image", "gemini-3.1-flash-image"]),
+  google: Object.freeze(["gemini-2.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.5-flash"]),
   openai: Object.freeze(["gpt-4o"]),
 });
 
 export const IMAGE_MODEL_OPTIONS = Object.freeze({
-  google: Object.freeze(["gemini-2.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.5-flash"]),
+  google: Object.freeze(["gemini-3.1-flash-lite-image", "gemini-3.1-flash-image"]),
   openai: Object.freeze(["gpt-image-2"]),
 });
 

@@ -55,6 +55,28 @@ test("generate route reads settings only for the session-derived owner", async (
   assert.deepEqual(calls, ["owner@example.com"]);
 });
 
+test("generate route rethrows unexpected failures for the outer generic error handler", async () => {
+  const handler = createGenerateRouteHandler({
+    requireOwner: async () => "owner@example.com",
+    store: {
+      async read() {
+        return { googleAiApiKey: "owner-google-secret" };
+      },
+    },
+    buildResponse: async () => {
+      throw new Error("provider failed with owner-token");
+    },
+  });
+
+  await assert.rejects(
+    handler(new Request("http://localhost/api/generate", {
+      method: "POST",
+      body: JSON.stringify({ productName: "Test" }),
+    })),
+    /provider failed with owner-token/,
+  );
+});
+
 test("settings handlers create the database-backed store only after the owner is authenticated", async () => {
   const calls = [];
   const handlers = createSettingsRouteHandlers({

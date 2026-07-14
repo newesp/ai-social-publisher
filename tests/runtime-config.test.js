@@ -25,7 +25,6 @@ test("runtime configuration does not require shared platform tokens or Meta OAut
     "SETTINGS_ENCRYPTION_KEY",
     "TURSO_DATABASE_URL",
     "TURSO_AUTH_TOKEN",
-    "BLOB_READ_WRITE_TOKEN",
   ]);
 });
 
@@ -39,6 +38,30 @@ test("environment example contains server-only Meta OAuth settings and no shared
   for (const key of ["META_PAGE_ID", "META_PAGE_ACCESS_TOKEN", "LINE_CHANNEL_ACCESS_TOKEN"]) {
     assert.doesNotMatch(example, new RegExp(`^${key}=`, "m"));
   }
+});
+
+test("accepts Vercel OIDC Blob credentials with a store ID", () => {
+  assert.doesNotThrow(() => validateRuntimeConfig({
+    AUTH_MODE: "demo",
+    SETTINGS_ENCRYPTION_KEY: "test-settings-key",
+    TURSO_DATABASE_URL: "libsql://example.turso.io",
+    TURSO_AUTH_TOKEN: "test-token",
+    VERCEL_OIDC_TOKEN: "test-oidc-token",
+    BLOB_STORE_ID: "store_example",
+  }));
+});
+
+test("rejects Vercel OIDC Blob credentials without a store ID", () => {
+  assert.throws(
+    () => validateRuntimeConfig({
+      AUTH_MODE: "demo",
+      SETTINGS_ENCRYPTION_KEY: "test-settings-key",
+      TURSO_DATABASE_URL: "libsql://example.turso.io",
+      TURSO_AUTH_TOKEN: "test-token",
+      VERCEL_OIDC_TOKEN: "test-oidc-token",
+    }),
+    /BLOB_STORE_ID/,
+  );
 });
 
 test("rejects a configuration missing the Blob upload token", () => {

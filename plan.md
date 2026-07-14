@@ -6,7 +6,16 @@
 
 建置一個 Web-based 自動化流程：登入後輸入產品核心特點 → AI 產生各平台專屬文宣 → 預覽並編輯 → 立即發文到 Meta / LINE。所有操作記錄均存入資料庫。
 
-MVP 暫緩 Instagram、Imgur 圖片上傳與排程功能；等有 Instagram 粉專與圖片發布需求後再進入下一階段。
+MVP 暫緩 Instagram；圖片上傳改以 Vercel Blob 支援 demo core flow。排程發布在 demo core flow 中只允許台北時間 09:00，避免任意時間造成意外發布。
+
+## Current Implementation Status (2026-07-13)
+
+- Demo core flow 已支援模型選擇記憶：使用者在 Step 2 選擇的 LLM / image provider model 會在下一次載入。
+- Gemini 圖片模型角色已校正：LLM Gemini 模型使用文字模型清單，圖片 Gemini 模型使用 image 模型清單。
+- Gemini 圖片生成 payload 已移除不支援的 `delivery: "inline"`，避免 `Image delivery mode is not supported`。
+- Vercel Blob 支援 OIDC + `BLOB_STORE_ID`，同時保留 `BLOB_READ_WRITE_TOKEN` 相容路徑。
+- 排程送出會使用 UI 顯示的 `09:00` 預設值；即使使用者未手動切換時間，也不會因 form state 缺值而被誤判。
+- Instagram 維持 hidden / inactive，但保留未來擴充空間。
 
 ## 系統架構
 
@@ -33,9 +42,9 @@ graph TD
 | 認證 | **NextAuth.js (Auth.js) + Google OAuth** | 限定特定 Google 帳號 |
 | LLM 文案 | Google Gemini / OpenAI GPT | 可切換 Provider |
 | 圖片生成 | Google Gemini Image / OpenAI GPT Image | 下一階段；Google 預設 `gemini-3.1-flash-image`，OpenAI 預設 `gpt-image-2` |
-| 圖片託管 | **Imgur API** | 下一階段；目前不接 Imgur |
+| 圖片託管 | **Vercel Blob** | Demo core flow 使用；不可回到 Imgur 指令 |
 | 資料庫 | **Turso (Serverless SQLite)** | `libsql://auto-posting-newesp.aws-ap-northeast-1.turso.io` |
-| 排程 | **Vercel Cron Jobs** | 定期觸發 `/api/cron` |
+| 排程 | **Vercel Cron Jobs** | 定期觸發 `/api/cron`；demo 只允許台北時間 09:00 |
 | 部署 | **Vercel** | Serverless |
 
 ---
@@ -264,7 +273,7 @@ audit_logs 表:
 - 「確認發文」前必須顯示各平台最終預覽；使用者看到的內容需與即將送出的 payload 一致
 
 **Step 4: 發文設定與確認**
-- MVP 僅支援立即發文；預約排程為 Phase 2
+- Demo core flow 支援立即發文與排程發文；排程時間固定為台北時間 09:00
 - 平台發文最終確認 Checklist
 - 「確認發文」按鈕 + 發文進度 (Progress bar + 各平台狀態 Badge)
 
@@ -386,4 +395,4 @@ npx drizzle-kit push          # 推送 schema 到 Turso DB
 3. **AI 生成測試**：完整走過步驟精靈
 4. **立即發文測試**：選擇立即發文，確認各平台成功發文
 5. **排程發文測試**：設定排程，手動呼叫 `/api/cron`，確認自動發文
-6. **Imgur 上傳測試**：驗證圖片成功上傳並取得公開 URL
+6. **Blob 上傳測試**：驗證圖片成功上傳並取得公開 URL
