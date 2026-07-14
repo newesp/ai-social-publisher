@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { requireSettingsAccess, routeErrorResponse } from "../../../../../lib/auth/route-guards.js";
 import { createPlatformConnectionRouteHandlers, getPlatformConnectionServices } from "../../../../../lib/platform-connections/platform-connection-route-handlers.js";
+import { dispatchMetaStartRequest } from "./meta-start-dispatch.js";
 
 const handlers = createPlatformConnectionRouteHandlers({
   requireOwner: requireSettingsAccess,
@@ -12,9 +13,7 @@ const handlers = createPlatformConnectionRouteHandlers({
 
 export async function POST(request) {
   try {
-    const contentType = String(request.headers.get("content-type") ?? "").split(";", 1)[0].trim().toLowerCase();
-    if (contentType === "application/x-www-form-urlencoded") return await handlers.startMetaRedirect(request);
-    return await handlers.startMeta(request);
+    return await dispatchMetaStartRequest(request, handlers);
   } catch (error) {
     return routeErrorResponse(error, NextResponse);
   }

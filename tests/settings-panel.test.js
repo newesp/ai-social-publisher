@@ -56,6 +56,14 @@ test("LINE credential form explains where to find Channel ID and Channel secret"
   }
   assert.equal(source.includes("<details"), true);
   assert.equal(source.includes("<summary"), true);
+
+  const disclosureStart = source.indexOf("<details>");
+  const disclosureEnd = source.indexOf("</details>", disclosureStart);
+  const disclosure = source.slice(disclosureStart, disclosureEnd + "</details>".length);
+  assert.equal((disclosure.match(/<ol\b/g) ?? []).length, 1);
+  assert.equal((disclosure.match(/<li\b/g) ?? []).length, 4);
+  assert.equal(disclosureStart < source.indexOf('label="Channel ID"'), true);
+  assert.equal(disclosureEnd < source.indexOf('label="Channel Secret"'), true);
 });
 
 test("settings renders actionable loading, disconnected, active, reconnect, and error states", async () => {
