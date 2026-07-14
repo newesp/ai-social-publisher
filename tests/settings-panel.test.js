@@ -40,6 +40,24 @@ test("Meta connection starts with a native POST form and consumes only a safe er
   assert.equal(source.includes('params.delete("meta")'), true);
 });
 
+test("LINE credential form explains where to find Channel ID and Channel secret", async () => {
+  const source = await readFile(new URL("../src/components/SettingsPanel.js", import.meta.url), "utf8");
+
+  for (const expected of [
+    "How to get Channel ID / Channel secret",
+    "https://developers.line.biz/",
+    "Messaging API",
+    "Basic settings",
+    "LINE Official Account",
+    "Do not paste a Channel access token",
+    'rel="noreferrer noopener"',
+  ]) {
+    assert.equal(source.includes(expected), true, `missing ${expected}`);
+  }
+  assert.equal(source.includes("<details"), true);
+  assert.equal(source.includes("<summary"), true);
+});
+
 test("settings renders actionable loading, disconnected, active, reconnect, and error states", async () => {
   const source = await readFile(new URL("../src/components/SettingsPanel.js", import.meta.url), "utf8");
   const lifecycleSource = await readFile(new URL("../src/lib/platform-connections/settings-platform-lifecycle.js", import.meta.url), "utf8");

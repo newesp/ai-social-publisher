@@ -229,6 +229,15 @@ export function SettingsPanel() {
                   <ConnectionCard title="LINE" connection={lineConnection}>
                     {lineEditing ? (
                       <Stack gap="sm">
+                        <details>
+                          <summary style={{ cursor: "pointer", fontWeight: 600 }}>How to get Channel ID / Channel secret</summary>
+                          <ol style={{ marginBlock: "0.75rem 0", paddingInlineStart: "1.25rem" }}>
+                            <li><Text size="sm">Sign in to <Text component="a" href="https://developers.line.biz/" target="_blank" rel="noreferrer noopener" inherit td="underline">LINE Developers Console</Text>.</Text></li>
+                            <li><Text size="sm">Select your Provider and its <strong>Messaging API</strong> Channel. If none exists, create a LINE Official Account and enable Messaging API first.</Text></li>
+                            <li><Text size="sm">Open <strong>Basic settings</strong>, then copy the <strong>Channel ID</strong> and <strong>Channel secret</strong>.</Text></li>
+                            <li><Text size="sm">Paste those two values below. Do not paste a Channel access token; this application obtains and renews it automatically.</Text></li>
+                          </ol>
+                        </details>
                         <TextInput label="Channel ID" value={lineCredentials.channelId} onChange={(event) => setLineCredentials((current) => ({ ...current, channelId: event.currentTarget.value }))} autoComplete="off" />
                         <PasswordInput label="Channel Secret" value={lineCredentials.channelSecret} onChange={(event) => setLineCredentials((current) => ({ ...current, channelSecret: event.currentTarget.value }))} autoComplete="new-password" />
                         <Group wrap="wrap">
