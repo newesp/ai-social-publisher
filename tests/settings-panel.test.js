@@ -62,8 +62,22 @@ test("LINE credential form explains where to find Channel ID and Channel secret"
   const disclosure = source.slice(disclosureStart, disclosureEnd + "</details>".length);
   assert.equal((disclosure.match(/<ol\b/g) ?? []).length, 1);
   assert.equal((disclosure.match(/<li\b/g) ?? []).length, 4);
-  assert.equal(disclosureStart < source.indexOf('label="Channel ID"'), true);
-  assert.equal(disclosureEnd < source.indexOf('label="Channel Secret"'), true);
+  let previousStep = -1;
+  for (const step of [
+    "Sign in to",
+    "Select your Provider",
+    "Open <strong>Basic settings</strong>",
+    "Paste those two values below",
+  ]) {
+    const stepIndex = disclosure.indexOf(step);
+    assert.equal(stepIndex > previousStep, true, `LINE disclosure step is missing or out of order: ${step}`);
+    previousStep = stepIndex;
+  }
+
+  const channelIdInput = source.indexOf('label="Channel ID"');
+  const channelSecretInput = source.indexOf('label="Channel Secret"');
+  assert.equal(disclosureEnd < channelIdInput, true);
+  assert.equal(channelIdInput < channelSecretInput, true);
 });
 
 test("settings renders actionable loading, disconnected, active, reconnect, and error states", async () => {
