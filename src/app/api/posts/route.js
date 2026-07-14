@@ -6,16 +6,19 @@ import { createPostRouteHandlers, createPublishingConnectionResolver } from "../
 import { publishTargets } from "../../../lib/platforms/publish-service.js";
 import { getPlatformConnectionServices } from "../../../lib/platform-connections/platform-connection-route-handlers.js";
 
-async function resolveConnection(ownerEmail, platform) {
-  return getPlatformConnectionServices().connections.getDefault(ownerEmail, platform);
+function createConnectionContext() {
+  const services = getPlatformConnectionServices();
+  return {
+    resolveConnection: (ownerEmail, platform) => services.connections.getDefault(ownerEmail, platform),
+    getConnection: createPublishingConnectionResolver(services),
+  };
 }
 
 const handlers = createPostRouteHandlers({
   requireAppUser,
   requirePublisher,
   getRepository: () => createPostRepository(),
-  resolveConnection,
-  createGetConnection: () => createPublishingConnectionResolver(getPlatformConnectionServices()),
+  createConnectionContext,
   publishTargets,
   respond: (body, init) => NextResponse.json(body, init),
 });

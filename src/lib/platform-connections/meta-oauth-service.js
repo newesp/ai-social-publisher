@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-import { authorizationLifecycleError, fetchWithDeadline, retryableLifecycleError } from "./connection-lifecycle.js";
+import { authorizationLifecycleError, fetchWithDeadline, permanentConnectionFailureError, retryableLifecycleError } from "./connection-lifecycle.js";
 
 const GRAPH_API_URL = "https://graph.facebook.com/v25.0";
 const AUTHORIZATION_URL = "https://www.facebook.com/v25.0/dialog/oauth";
@@ -131,7 +131,9 @@ async function ensureMetaUsable({ owner, id, env, fetchImpl, connections, now, r
   let ownsLease = true;
   try {
     const config = requireConfig(env);
-    const retainedToken = requireToken({ access_token: connection.credentials?.longLivedUserAccessToken }, "access_token");
+    const retainedAccessToken = String(connection.credentials?.longLivedUserAccessToken ?? "").trim();
+    if (!retainedAccessToken) throw permanentConnectionFailureError();
+    const retainedToken = { access_token: retainedAccessToken };
     const renewedUser = await exchangeLongLivedToken(fetchImpl, config, retainedToken, { lifecycle: true, requestTimeoutMs });
     const pages = await listPages(fetchImpl, renewedUser, { lifecycle: true, requestTimeoutMs });
     const page = pages.find((candidate) => candidate.id === String(connection.credentials?.pageId ?? ""));
@@ -148,6 +150,7 @@ async function ensureMetaUsable({ owner, id, env, fetchImpl, connections, now, r
     return observeMetaWinner({ connections, owner, id, original: connection, pollAttempts, pollDelay });
   } catch (error) {
     if (pageValid) return { ...connection, warning: META_RENEWAL_WARNING };
+    if (error?.permanentConnectionFailure) throw error;
     if (error?.authorizationRejected) {
       await connections.markNeedsReconnect(owner, id);
       throw routeError(META_RECONNECT_ERROR, 409);
@@ -175,16 +178,21 @@ async function validatePage(fetchImpl, credentials, requestTimeoutMs) {
   const pageId = String(credentials?.pageId ?? "").trim();
   const pageAccessToken = String(credentials?.pageAccessToken ?? "").trim();
   if (!pageId || !pageAccessToken) return "rejected";
-  let response;
+  let response; let body;
   try {
     const url = new URL(`${GRAPH_API_URL}/${encodeURIComponent(pageId)}`);
     url.searchParams.set("fields", "id");
-    response = await fetchWithDeadline(fetchImpl, url.toString(), { headers: { Authorization: `Bearer ${pageAccessToken}` } }, requestTimeoutMs);
+    ({ response, body } = await fetchWithDeadline(fetchImpl, url.toString(), { headers: { Authorization: `Bearer ${pageAccessToken}` } }, requestTimeoutMs,
+      async (providerResponse, signal) => {
+        let providerBody = {};
+        try { providerBody = await providerResponse.json(); } catch (error) {
+          if (signal.aborted || providerResponse?.ok) throw error;
+        }
+        return { response: providerResponse, body: providerBody };
+      }));
   } catch {
     return "transient";
   }
-  let body = {};
-  try { body = await response.json(); } catch { /* Provider bodies are never surfaced. */ }
   if (response?.ok) return String(body?.id ?? "") === pageId ? "valid" : "rejected";
   if (response?.status === 401 || Number(body?.error?.code) === 190) return "rejected";
   return "transient";
@@ -229,27 +237,28 @@ async function listPages(fetchImpl, longLivedToken, options) {
 }
 
 async function readProviderJson(fetchImpl, url, requestOptions = {}, { lifecycle = false, requestTimeoutMs = 10_000 } = {}) {
-  let response;
+  let response; let body;
   try {
-    response = await fetchWithDeadline(fetchImpl, url.toString(), requestOptions, requestTimeoutMs);
+    ({ response, body } = await fetchWithDeadline(fetchImpl, url.toString(), requestOptions, requestTimeoutMs,
+      async (providerResponse, signal) => {
+        let providerBody = {};
+        try { providerBody = await providerResponse.json(); } catch (error) {
+          if (signal.aborted || providerResponse?.ok) throw error;
+        }
+        return { response: providerResponse, body: providerBody };
+      }));
   } catch (error) {
     if (lifecycle) throw error;
     throw metaError();
   }
   if (!response?.ok) {
-    let body = {};
-    try { body = await response.json(); } catch { /* Provider bodies are discarded. */ }
     if (lifecycle && (response.status === 400 || response.status === 401 || Number(body?.error?.code) === 190)) {
       throw authorizationLifecycleError(META_RECONNECT_ERROR);
     }
     if (lifecycle) throw retryableLifecycleError();
     throw metaError();
   }
-  try {
-    return await response.json();
-  } catch {
-    throw metaError();
-  }
+  return body;
 }
 
 function requireToken(body, name) {

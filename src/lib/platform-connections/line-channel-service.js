@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-import { authorizationLifecycleError, fetchWithDeadline, retryableLifecycleError } from "./connection-lifecycle.js";
+import { authorizationLifecycleError, fetchWithDeadline, permanentConnectionFailureError, retryableLifecycleError } from "./connection-lifecycle.js";
 
 const TOKEN_URL = "https://api.line.me/v2/oauth/accessToken";
 const BOT_INFO_URL = "https://api.line.me/v2/bot/info";
@@ -68,6 +68,7 @@ async function ensureUsableWithLease({ owner, id, connections, fetchImpl, now, r
       await connections.markNeedsReconnect(owner, connection.id);
       throw routeError(RECONNECT_ERROR, 409);
     }
+    if (error?.permanentConnectionFailure) throw error;
     if (isValidAt(connection.expiresAt, time)) return { ...connection, warning: RENEWAL_WARNING };
     throw error?.retryable ? error : retryableLifecycleError(RENEWAL_IN_PROGRESS_ERROR);
   } finally {
@@ -111,14 +112,22 @@ async function issueAndVerify(fetchImpl, { channelId, channelSecret }, now, { li
 }
 
 async function providerJson(fetchImpl, url, options, { lifecycle, requestTimeoutMs }) {
-  let response;
-  try { response = await fetchWithDeadline(fetchImpl, url, options, requestTimeoutMs); } catch (error) { if (lifecycle) throw error; throw lineError(); }
+  let response; let body;
+  try {
+    ({ response, body } = await fetchWithDeadline(fetchImpl, url, options, requestTimeoutMs, async (providerResponse, signal) => {
+      let providerBody = {};
+      try { providerBody = await providerResponse.json(); } catch (error) {
+        if (signal.aborted || providerResponse?.ok) throw error;
+      }
+      return { response: providerResponse, body: providerBody };
+    }));
+  } catch (error) { if (lifecycle) throw error; throw lineError(); }
   if (!response?.ok) {
     if (lifecycle && (response?.status === 400 || response?.status === 401)) throw authorizationLifecycleError(RECONNECT_ERROR);
     if (lifecycle) throw retryableLifecycleError();
     throw lineError();
   }
-  try { return await response.json(); } catch { if (lifecycle) throw retryableLifecycleError(); throw lineError(); }
+  return body;
 }
 
 function requireChannelCredentials(input) {
@@ -130,7 +139,7 @@ function requireChannelCredentials(input) {
 function requireStoredCredentials(credentials) {
   const channelId = String(credentials?.channelId ?? "").trim();
   const channelSecret = String(credentials?.channelSecret ?? "").trim();
-  if (!channelId || !channelSecret) throw lineError();
+  if (!channelId || !channelSecret) throw permanentConnectionFailureError();
   return { channelId, channelSecret };
 }
 function requireUsableLineConnection(connection) {

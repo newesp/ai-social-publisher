@@ -214,6 +214,21 @@ test("ensureUsable keeps a valid Page token on transient validation failure with
   assert.equal(JSON.stringify(usable).includes("private outage"), false);
 });
 
+test("Meta validation deadline covers a stalled response body", { timeout: 250 }, async () => {
+  const connections = createLifecycleConnections([metaConnection()]);
+  const service = createMetaOAuthService({
+    env, transactions: createTransactions(), connections, now: () => now, requestTimeoutMs: 10,
+    fetchImpl: async (_url, options) => ({
+      ok: true, status: 200,
+      json: async () => new Promise((_resolve, reject) => options.signal.addEventListener("abort", () => reject(new Error("private stalled body")))),
+    }),
+  });
+
+  const usable = await service.ensureUsable("owner@example.com", "meta-1");
+  assert.match(usable.warning, /validation/i);
+  assert.deepEqual(connections.marked, []);
+});
+
 test("ensureUsable treats a mismatched Page ID as credential rejection", async () => {
   const base = metaConnection();
   const connections = createLifecycleConnections([{ ...base, expiresAt: new Date("2026-07-12T00:00:00.000Z"), credentials: { ...base.credentials, userTokenExpiresAt: "2026-07-12T00:00:00.000Z" } }]);

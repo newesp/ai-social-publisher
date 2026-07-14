@@ -93,15 +93,18 @@ export function createPostRepository(db = createDbClient()) {
           eq(posts.ownerEmail, ownerEmail), eq(posts.id, postId), eq(posts.status, POST_STATUS.PUBLISHING),
         )).limit(1);
         if (!current) return null;
-        for (const result of results.filter((item) => item.status === POST_STATUS.PUBLISHED)) {
+        for (const result of results.filter((item) => !item.retryable)) {
           await tx.update(postTargets).set({
-            status: POST_STATUS.PUBLISHED, externalPostId: result.externalId ?? null, errorMessage: null,
-            publishedAt: now, updatedAt: now,
+            status: result.status, externalPostId: result.externalId ?? null, errorMessage: result.error ?? null,
+            publishedAt: result.status === POST_STATUS.PUBLISHED ? now : null, updatedAt: now,
           }).where(and(eq(postTargets.postId, postId), eq(postTargets.platform, result.platform), eq(postTargets.status, POST_STATUS.PUBLISHING)));
         }
-        await tx.update(postTargets).set({ status, updatedAt: now }).where(and(
-          eq(postTargets.postId, postId), eq(postTargets.status, POST_STATUS.PUBLISHING),
-        ));
+        const retryablePlatforms = results.filter((item) => item.retryable).map((item) => item.platform);
+        if (retryablePlatforms.length) {
+          await tx.update(postTargets).set({ status, errorMessage: null, updatedAt: now }).where(and(
+            eq(postTargets.postId, postId), eq(postTargets.status, POST_STATUS.PUBLISHING), inArray(postTargets.platform, retryablePlatforms),
+          ));
+        }
         await tx.update(posts).set({ status, scheduledFor: status === POST_STATUS.SCHEDULED ? retryAt : null,
           publishingStartedAt: null, updatedAt: now }).where(and(eq(posts.ownerEmail, ownerEmail), eq(posts.id, postId)));
         return findPostByOwner(tx, ownerEmail, postId);
@@ -118,7 +121,9 @@ export function createPostRepository(db = createDbClient()) {
             errorMessage: result.error ?? null,
             publishedAt: result.status === POST_STATUS.PUBLISHED ? now : null,
             updatedAt: now,
-          }).where(and(eq(postTargets.postId, postId), eq(postTargets.platform, result.platform)));
+          }).where(and(
+            eq(postTargets.postId, postId), eq(postTargets.platform, result.platform), eq(postTargets.status, POST_STATUS.PUBLISHING),
+          ));
         }
         const targets = await targetsForPosts(tx, [postId]);
         const status = resolvePostStatus(targets);

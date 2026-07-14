@@ -230,6 +230,21 @@ test("LINE provider deadline abort is retryable and releases the lease", async (
   assert.deepEqual(connections.marked, []);
 });
 
+test("LINE deadline remains active while the provider response body stalls", { timeout: 250 }, async () => {
+  const connections = createConnections([connection({ expiresAt: "2026-07-12T00:00:00.000Z" })]);
+  const service = createLineChannelService({
+    connections, now: () => now, requestTimeoutMs: 10,
+    fetchImpl: async (_url, options) => ({
+      ok: true, status: 200,
+      json: async () => new Promise((_resolve, reject) => options.signal.addEventListener("abort", () => reject(new Error("private stalled body")))),
+    }),
+  });
+
+  await assert.rejects(service.ensureUsable("owner@example.com", "connection-1"), (error) => error.status === 503 && error.retryable === true);
+  assert.equal(connections.released.length, 1);
+  assert.deepEqual(connections.marked, []);
+});
+
 function connection(overrides = {}) {
   return {
     id: "connection-1", ownerEmail: "owner@example.com", platform: "line", state: "active", displayName: "Owner Official Account",

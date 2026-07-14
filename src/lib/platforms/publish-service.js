@@ -1,8 +1,9 @@
 import { filterActivePlatforms } from "./platform-config.js";
+import { fetchWithDeadline } from "../platform-connections/connection-lifecycle.js";
 
 const RECONNECT_ERROR = "The selected platform connection needs to be reconnected.";
 
-export async function publishTargets({ targets, connections, fetchImpl = fetch }) {
+export async function publishTargets({ targets, connections, fetchImpl = fetch, requestTimeoutMs = 10_000 }) {
   const activePlatforms = new Set(filterActivePlatforms(targets.map((target) => target.platform)));
   const activeTargets = targets.filter((target) => activePlatforms.has(target.platform));
   const results = [];
@@ -14,10 +15,10 @@ export async function publishTargets({ targets, connections, fetchImpl = fetch }
     try {
       if (!connection) throw new Error(RECONNECT_ERROR);
       if (target.platform === "meta") {
-        results.push(await publishMeta(target, connection.credentials, fetchImpl));
+        results.push(await publishMeta(target, connection.credentials, fetchImpl, requestTimeoutMs));
       }
       if (target.platform === "line") {
-        results.push(await publishLine(target, connection.credentials, fetchImpl));
+        results.push(await publishLine(target, connection.credentials, fetchImpl, requestTimeoutMs));
       }
     } catch (error) {
       if (error?.providerRejected) {
@@ -28,7 +29,7 @@ export async function publishTargets({ targets, connections, fetchImpl = fetch }
         platform: target.platform,
         status: "failed",
         error: reconnectRequired ? RECONNECT_ERROR : `${target.platform} publishing failed.`,
-        ...(reconnectRequired ? {} : { retryable: true }),
+        ...(error?.retryable ? { retryable: true } : {}),
       });
     }
   }
@@ -36,7 +37,7 @@ export async function publishTargets({ targets, connections, fetchImpl = fetch }
   return results;
 }
 
-async function publishMeta(target, credentials, fetchImpl) {
+async function publishMeta(target, credentials, fetchImpl, requestTimeoutMs) {
   const pageId = requireCredential(credentials?.pageId);
   const pageAccessToken = requireCredential(credentials?.pageAccessToken);
 
@@ -55,19 +56,19 @@ async function publishMeta(target, credentials, fetchImpl) {
         access_token: pageAccessToken,
       };
 
-  const response = await fetchImpl(url, {
+  const { response, body } = await providerResponse(fetchImpl, url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
-  });
+  }, requestTimeoutMs);
 
-  return readPlatformResponse("meta", response);
+  return readPlatformResponse("meta", response, body);
 }
 
-async function publishLine(target, credentials, fetchImpl) {
+async function publishLine(target, credentials, fetchImpl, requestTimeoutMs) {
   const accessToken = requireCredential(credentials?.accessToken);
 
-  const response = await fetchImpl("https://api.line.me/v2/bot/message/broadcast", {
+  const { response, body } = await providerResponse(fetchImpl, "https://api.line.me/v2/bot/message/broadcast", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -76,9 +77,9 @@ async function publishLine(target, credentials, fetchImpl) {
     body: JSON.stringify({
       messages: buildLineMessages(target.publishPayload),
     }),
-  });
+  }, requestTimeoutMs);
 
-  return readPlatformResponse("line", response);
+  return readPlatformResponse("line", response, body);
 }
 
 function buildLineMessages(publishPayload) {
@@ -95,9 +96,7 @@ function buildLineMessages(publishPayload) {
   return messages;
 }
 
-async function readPlatformResponse(platform, response) {
-  let body = {};
-  try { body = await response.json(); } catch { /* Provider response bodies are intentionally discarded. */ }
+function readPlatformResponse(platform, response, body) {
   if (!response.ok) {
     const error = new Error(`${platform} publish failed.`);
     error.providerRejected = response.status === 401
@@ -117,4 +116,14 @@ function requireCredential(value) {
   const credential = String(value ?? "").trim();
   if (!credential) throw new Error(RECONNECT_ERROR);
   return credential;
+}
+
+async function providerResponse(fetchImpl, url, options, requestTimeoutMs) {
+  return fetchWithDeadline(fetchImpl, url, options, requestTimeoutMs, async (response, signal) => {
+    let body = {};
+    try { body = await response.json(); } catch (error) {
+      if (signal.aborted || response?.ok) throw error;
+    }
+    return { response, body };
+  });
 }

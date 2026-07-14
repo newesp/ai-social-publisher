@@ -16,11 +16,18 @@ export function authorizationLifecycleError(message) {
   return new ConnectionLifecycleError(message, { authorizationRejected: true, status: 409 });
 }
 
-export async function fetchWithDeadline(fetchImpl, url, options = {}, timeoutMs = 10_000) {
+export function permanentConnectionFailureError(message = "The selected platform connection needs to be reconnected.") {
+  const error = new ConnectionLifecycleError(message, { status: 409 });
+  error.permanentConnectionFailure = true;
+  return error;
+}
+
+export async function fetchWithDeadline(fetchImpl, url, options = {}, timeoutMs = 10_000, consumeResponse = async (response) => response) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetchImpl(url, { ...options, signal: controller.signal });
+    const response = await fetchImpl(url, { ...options, signal: controller.signal });
+    return await consumeResponse(response, controller.signal);
   } catch {
     throw retryableLifecycleError();
   } finally {

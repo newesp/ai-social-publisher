@@ -3,6 +3,7 @@ import { buildPlatformPreviews } from "../platform-preview/build-platform-previe
 import { filterActivePlatforms } from "../platforms/platform-config.js";
 import { publishTargets as publishPlatformTargets } from "../platforms/publish-service.js";
 import { retryableLifecycleError } from "../platform-connections/connection-lifecycle.js";
+import { nextScheduledRetryAt } from "../scheduler/retry-schedule.js";
 import { POST_STATUS } from "./post-status.js";
 import { computeScheduledFor } from "./schedule-time.js";
 
@@ -111,7 +112,7 @@ export async function publishClaimedPost({
     const publishableTargets = [];
     const unavailableResults = [];
     for (const target of post.targets) {
-      if (target.status === POST_STATUS.PUBLISHED) continue;
+      if (target.status !== POST_STATUS.PUBLISHING) continue;
       if (!target.platformConnectionId) {
         unavailableResults.push(failedReconnectResult(target.platform));
         continue;
@@ -120,9 +121,11 @@ export async function publishClaimedPost({
       try {
         connection = await getConnection?.(owner, target.platformConnectionId);
       } catch (error) {
-        if (error?.retryable || Number(error?.status) >= 500) throw retryableLifecycleError();
-        unavailableResults.push(failedReconnectResult(target.platform));
-        continue;
+        if (isPermanentConnectionFailure(error)) {
+          unavailableResults.push(failedReconnectResult(target.platform));
+          continue;
+        }
+        throw retryableLifecycleError();
       }
       if (!isConnectionAvailable(connection, owner, target.platform)) {
         unavailableResults.push(failedReconnectResult(target.platform));
@@ -152,23 +155,19 @@ export async function publishClaimedPost({
       ...unavailableResults,
     ];
     if (results.some((result) => result.retryable)) {
-      const retryStatus = post.scheduledFor ? POST_STATUS.SCHEDULED : POST_STATUS.DRAFT;
-      const retryAt = retryStatus === POST_STATUS.SCHEDULED ? new Date(now.getTime() + 60_000) : null;
-      await repository.recordPublishProgressAndRequeue(owner, post.id, results, retryStatus, retryAt, now);
-      const error = retryableLifecycleError();
-      error.alreadyRequeued = true;
-      throw error;
+      const retryAt = nextScheduledRetryAt(now);
+      return repository.recordPublishProgressAndRequeue(owner, post.id, results, POST_STATUS.SCHEDULED, retryAt, now);
     }
   } catch (error) {
     if (error?.retryable) {
-      const retryStatus = post.scheduledFor ? POST_STATUS.SCHEDULED : POST_STATUS.DRAFT;
-      const retryAt = retryStatus === POST_STATUS.SCHEDULED ? new Date(now.getTime() + 60_000) : null;
-      if (!error.alreadyRequeued) {
-        try { await repository.requeueClaimedPost(owner, post.id, retryStatus, retryAt, now); } catch { /* Keep the outward failure generic and retryable. */ }
-      }
+      const retryAt = nextScheduledRetryAt(now);
+      try {
+        const queued = await repository.requeueClaimedPost(owner, post.id, POST_STATUS.SCHEDULED, retryAt, now);
+        if (queued) return queued;
+      } catch { /* The caller receives a safe retryable failure if the atomic requeue itself is unavailable. */ }
       throw retryableLifecycleError("Publishing credentials are temporarily unavailable. Please retry shortly.");
     }
-    results = post.targets.map((target) => ({
+    results = post.targets.filter((target) => target.status === POST_STATUS.PUBLISHING).map((target) => ({
       platform: target.platform,
       status: POST_STATUS.FAILED,
       error: "Publishing failed before a provider response was recorded.",
@@ -225,6 +224,13 @@ function redactProviderError(error, connections, owner) {
   return message
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
     .replace(/access_token=([^&\s]+)/gi, "access_token=[redacted]");
+}
+
+function isPermanentConnectionFailure(error) {
+  return error?.permanentConnectionFailure === true
+    || error?.authorizationRejected === true
+    || error?.status === 404
+    || error?.status === 409;
 }
 
 function collectSecretValues(value, values = [], seen = new WeakSet()) {

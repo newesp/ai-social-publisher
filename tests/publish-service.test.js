@@ -184,6 +184,33 @@ test("treats a provider network failure as retryable without exposing the transp
   assert.deepEqual(results, [{ platform: "line", status: "failed", error: "line publishing failed.", retryable: true }]);
 });
 
+test("publish deadline covers a stalled provider response body", { timeout: 250 }, async () => {
+  const results = await publishTargets({
+    targets: [{ platform: "line", platformConnectionId: "line-a", publishPayload: { text: "LINE A" } }],
+    connections: [{ id: "line-a", platform: "line", credentials: { accessToken: "line-token" } }],
+    requestTimeoutMs: 10,
+    fetchImpl: async (_url, options) => ({
+      ok: true, status: 200,
+      json: async () => new Promise((_resolve, reject) => options.signal.addEventListener("abort", () => reject(new Error("private stalled body")))),
+    }),
+  });
+
+  assert.deepEqual(results, [{ platform: "line", status: "failed", error: "line publishing failed.", retryable: true }]);
+});
+
+test("sanitized permanent provider 4xx failures are terminal without reconnect mutation", async () => {
+  const marked = [];
+  for (const status of [400, 404, 422]) {
+    const results = await publishTargets({
+      targets: [{ platform: "line", platformConnectionId: "line-a", publishPayload: { text: "LINE A" } }],
+      connections: [{ id: "line-a", platform: "line", credentials: { accessToken: "line-token" }, markNeedsReconnect: async () => marked.push(status) }],
+      fetchImpl: async () => new Response("private validation payload", { status }),
+    });
+    assert.deepEqual(results, [{ platform: "line", status: "failed", error: "line publishing failed." }]);
+  }
+  assert.deepEqual(marked, []);
+});
+
 test("does not mark Meta or LINE reconnect for ambiguous 403 policy responses", async () => {
   for (const platform of ["meta", "line"]) {
     const marked = [];

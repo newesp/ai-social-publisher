@@ -104,6 +104,27 @@ test("connection credentials are encrypted and isolated by owner", async () => {
   }]);
 });
 
+test("corrupted encrypted credentials become a safe explicit permanent reconnect error", async () => {
+  const repository = {
+    async findConnectionByIdAndOwner() {
+      return {
+        id: "line-corrupt", ownerEmail: "owner@example.com", platform: "line", displayName: "Owner account",
+        state: "active", encryptedCredentials: "private-corrupt-ciphertext", credentialExpiresAt: null,
+        createdAt: new Date(), updatedAt: new Date(),
+      };
+    },
+  };
+  const store = createPlatformConnectionStore({ repository, encryptionKey: "test-key" });
+
+  await assert.rejects(store.getById("owner@example.com", "line-corrupt"), (error) => {
+    assert.equal(error.permanentConnectionFailure, true);
+    assert.equal(error.status, 409);
+    assert.equal(error.message, "The selected platform connection needs to be reconnected.");
+    assert.equal(error.message.includes("ciphertext"), false);
+    return true;
+  });
+});
+
 test("replacing a default connection archives prior active records atomically", async () => {
   const repository = createMemoryRepository();
   const store = createPlatformConnectionStore({ repository, encryptionKey: "test-key" });

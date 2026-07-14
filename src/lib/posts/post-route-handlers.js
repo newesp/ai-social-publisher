@@ -16,7 +16,7 @@ export function createPublishingConnectionResolver({ connections, line, meta }) 
   };
 }
 
-export function createPostRouteHandlers({ requireAppUser, requirePublisher, getRepository, resolveConnection, getConnection, createGetConnection = () => getConnection, publishTargets, now = () => new Date(), respond = (body, init) => Response.json(body, init) }) {
+export function createPostRouteHandlers({ requireAppUser, requirePublisher, getRepository, resolveConnection, getConnection, createGetConnection = () => getConnection, createConnectionContext, publishTargets, now = () => new Date(), respond = (body, init) => Response.json(body, init) }) {
   return {
     async GET() {
       const ownerEmail = await requireAppUser();
@@ -28,17 +28,20 @@ export function createPostRouteHandlers({ requireAppUser, requirePublisher, getR
       const ownerEmail = await requirePublisher();
       const repository = await getRepository();
       const input = await request.json();
-      const post = await createPost({ ownerEmail, input, mode: input.mode, repository, resolveConnection, now: now() });
+      const connectionContext = createConnectionContext?.() ?? null;
+      const post = await createPost({ ownerEmail, input, mode: input.mode, repository,
+        resolveConnection: connectionContext?.resolveConnection ?? resolveConnection, now: now() });
       let published = post;
       if (input.mode === "now") {
         try {
-          published = await publishPost({ ownerEmail, postId: post.id, repository, getConnection: createGetConnection(), publishTargets, now: now() });
+          published = await publishPost({ ownerEmail, postId: post.id, repository,
+            getConnection: connectionContext?.getConnection ?? createGetConnection(), publishTargets, now: now() });
         } catch (error) {
           if (error?.retryable) throw routeError("Publishing is temporarily unavailable. Please retry shortly.", 503);
           throw routeError("Publishing failed and the outcome could not be recorded.", 500);
         }
       }
-      return respond({ post: toPostResponse(published) }, { status: 201 });
+      return respond({ post: toPostResponse(published) }, { status: input.mode === "now" && published.status === "scheduled" ? 202 : 201 });
     },
   };
 }

@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { createClient } from "@libsql/client";
+import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/libsql";
 
 import { platformConnections, postTargets, posts } from "../src/lib/db/schema.js";
@@ -147,6 +148,48 @@ test("partial publish progress requeues only unfinished targets", async () => {
 
     const claimed = await repository.claimPostForPublish("owner@example.com", post.id, NOW);
     assert.deepEqual(claimed.targets.map((target) => [target.platform, target.status]), [["meta", "published"], ["line", "publishing"]]);
+  });
+});
+
+test("mixed permanent and retryable results persist the permanent failure and schedule only the retryable target", async () => {
+  await withDatabase(async ({ db }) => {
+    const post = await insertPost(db, { productName: "mixed", status: "draft", scheduledFor: null });
+    await db.insert(postTargets).values(targetValues("line", null, post.id));
+    const repository = createPostRepository(db);
+    await repository.claimPostForPublish("owner@example.com", post.id, NOW);
+    const retryAt = new Date("2026-07-12T01:00:00.000Z");
+    const requeued = await repository.recordPublishProgressAndRequeue("owner@example.com", post.id, [
+      { platform: "meta", status: "failed", error: "meta publishing failed." },
+      { platform: "line", status: "failed", error: "line publishing failed.", retryable: true },
+    ], "scheduled", retryAt, NOW);
+    assert.equal(requeued.status, "scheduled");
+    assert.deepEqual(requeued.targets.map((target) => [target.platform, target.status]), [["meta", "failed"], ["line", "scheduled"]]);
+
+    const [claimed] = await repository.claimDueScheduledPosts(retryAt);
+    assert.deepEqual(claimed.targets.map((target) => [target.platform, target.status]), [["meta", "failed"], ["line", "publishing"]]);
+  });
+});
+
+test("final result persistence cannot downgrade an already published target from a stale fallback result", async () => {
+  await withDatabase(async ({ db }) => {
+    const post = await insertPost(db, { productName: "terminal-guard", status: "publishing", scheduledFor: null });
+    const publishedAt = new Date("2026-07-12T01:00:00.000Z");
+    await db.update(postTargets).set({ status: "published", externalPostId: "meta-external", publishedAt })
+      .where(and(eq(postTargets.postId, post.id), eq(postTargets.platform, "meta")));
+    await db.insert(postTargets).values({ ...targetValues("line", null, post.id), status: "publishing" });
+    const repository = createPostRepository(db);
+
+    const result = await repository.recordPublishResults("owner@example.com", post.id, [
+      { platform: "meta", status: "failed", error: "stale fallback" },
+      { platform: "line", status: "failed", error: "current fallback" },
+    ], NOW);
+
+    const meta = result.targets.find((target) => target.platform === "meta");
+    assert.equal(meta.status, "published");
+    assert.equal(meta.externalPostId, "meta-external");
+    assert.equal(meta.publishedAt.toISOString(), publishedAt.toISOString());
+    assert.equal(result.targets.find((target) => target.platform === "line").status, "failed");
+    assert.equal(result.status, "partial_failed");
   });
 });
 

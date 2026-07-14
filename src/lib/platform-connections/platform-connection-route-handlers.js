@@ -5,8 +5,9 @@ import { createLineChannelService } from "./line-channel-service.js";
 import { createOAuthTransactionStore } from "./oauth-transaction-store.js";
 import { createPlatformConnectionStore } from "./platform-connection-store.js";
 import { createPlatformConnectionsRepository } from "./platform-connections-repository.js";
+import { fetchWithDeadline } from "./connection-lifecycle.js";
 
-export function createPlatformConnectionRouteHandlers({ requireOwner, getServices = () => getPlatformConnectionServices(), fetchImpl = fetch, respond = (body, init) => Response.json(body, init), redirect = (url) => Response.redirect(url, 302) }) {
+export function createPlatformConnectionRouteHandlers({ requireOwner, getServices = () => getPlatformConnectionServices(), fetchImpl = fetch, requestTimeoutMs = 10_000, respond = (body, init) => Response.json(body, init), redirect = (url) => Response.redirect(url, 302) }) {
   return {
     async GET() {
       const ownerEmail = await requireOwner();
@@ -66,9 +67,15 @@ export function createPlatformConnectionRouteHandlers({ requireOwner, getService
       const accessToken = String(result.credentials?.accessToken ?? "").trim();
       if (!accessToken) return respond({ connection: null });
       try {
-        const response = await fetchImpl("https://api.line.me/v2/oauth/revoke", {
+        const response = await fetchWithDeadline(fetchImpl, "https://api.line.me/v2/oauth/revoke", {
           method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({ access_token: accessToken }),
+        }, requestTimeoutMs, async (providerResponse, signal) => {
+          try {
+            if (typeof providerResponse.arrayBuffer === "function") await providerResponse.arrayBuffer();
+            else if (typeof providerResponse.json === "function") await providerResponse.json();
+          } catch (error) { if (signal.aborted) throw error; }
+          return providerResponse;
         });
         if (!response?.ok) throw new Error("revoke failed");
         return respond({ connection: null });

@@ -246,6 +246,24 @@ test("LINE disconnect revokes the removed token with the documented request shap
   assert.equal(JSON.stringify(body).includes("private provider body"), false);
 });
 
+test("LINE revoke deadline covers stalled response consumption and returns only a safe warning", { timeout: 250 }, async () => {
+  const handlers = createPlatformConnectionRouteHandlers({
+    requireOwner: async () => "owner@example.com",
+    requestTimeoutMs: 10,
+    fetchImpl: async (_url, options) => ({
+      ok: true, status: 200,
+      arrayBuffer: async () => new Promise((_resolve, reject) => options.signal.addEventListener("abort", () => reject(new Error("private stalled revoke body")))),
+    }),
+    getServices: async () => ({ connections: { async disconnectDefault() { return { status: "disconnected", credentials: { accessToken: "line-secret" } }; } } }),
+  });
+
+  const response = await handlers.disconnectPlatform(new Request("https://publisher.example/api/platform-connections/line/disconnect", {
+    method: "POST", headers: { origin: "https://publisher.example" },
+  }), "line");
+
+  assert.deepEqual(await response.json(), { connection: null, warning: "LINE was disconnected locally, but token revocation could not be confirmed." });
+});
+
 test("Meta disconnect removes local credentials without a provider call", async () => {
   let providerCalls = 0;
   const handlers = createPlatformConnectionRouteHandlers({

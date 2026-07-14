@@ -5,6 +5,7 @@ import {
   cancelScheduledPost,
   createPost,
   listPosts,
+  publishClaimedPost,
   publishPost,
 } from "../src/lib/posts/post-service.js";
 
@@ -69,11 +70,13 @@ function createMemoryRepository() {
     },
     async recordPublishProgressAndRequeue(ownerEmail, id, results, status, retryAt, now) {
       const post = posts.find((item) => item.ownerEmail === ownerEmail && item.id === id);
-      for (const result of results.filter((item) => item.status === "published")) {
+      for (const result of results.filter((item) => !item.retryable)) {
         const target = targets.find((item) => item.postId === id && item.platform === result.platform);
-        Object.assign(target, { status: "published", externalPostId: result.externalId ?? null, publishedAt: now, updatedAt: now });
+        Object.assign(target, { status: result.status, externalPostId: result.externalId ?? null,
+          errorMessage: result.error ?? null, publishedAt: result.status === "published" ? now : null, updatedAt: now });
       }
-      for (const target of targets.filter((item) => item.postId === id && item.status === "publishing")) target.status = status;
+      const retryablePlatforms = new Set(results.filter((item) => item.retryable).map((item) => item.platform));
+      for (const target of targets.filter((item) => item.postId === id && item.status === "publishing" && retryablePlatforms.has(item.platform))) target.status = status;
       Object.assign(post, { status, scheduledFor: retryAt, publishingStartedAt: null, updatedAt: now });
       return withTargets(post);
     },
@@ -275,6 +278,7 @@ test("scheduled publishing uses the immutable stored connection after the defaul
   });
   currentDefault = "meta-v2";
   repository.posts[0].status = "draft";
+  repository.targets[0].status = "draft";
   const loaded = [];
 
   await publishPost({
@@ -310,44 +314,108 @@ test("a pre-feature target without a connection id fails safely without any fall
   assert.equal(post.targets[0].errorMessage, "The selected platform connection needs to be reconnected.");
 });
 
-test("immediate lifecycle retry requeues the claim and returns generic 503", async () => {
+test("immediate lifecycle retry automatically queues the claimed post for the next scheduler run", async () => {
   const repository = createMemoryRepository();
   const created = await createPost({ ownerEmail: "owner@example.com", input: { ...input, targets: [input.targets[0]] }, mode: "now", repository, resolveConnection });
   const transient = new Error("private repository outage owner@example.com");
   transient.status = 503;
   transient.retryable = true;
 
-  await assert.rejects(publishPost({
+  const queued = await publishPost({
     ownerEmail: "owner@example.com", postId: created.id, repository,
     getConnection: async () => { throw transient; },
-  }), (error) => error.status === 503 && error.retryable === true && !error.message.includes("private"));
+    now: new Date("2026-07-13T00:00:00.000Z"),
+  });
 
-  assert.equal(repository.posts[0].status, "draft");
-  assert.equal(repository.targets[0].status, "draft");
+  assert.equal(queued.id, created.id);
+  assert.equal(queued.status, "scheduled");
+  assert.equal(queued.scheduledFor.toISOString(), "2026-07-13T01:00:00.000Z");
+  assert.equal(repository.targets[0].status, "scheduled");
 });
 
-test("partial transient publish retries only unfinished targets", async () => {
+test("an untyped storage exception defaults to automatic retry without terminalizing targets", async () => {
+  const repository = createMemoryRepository();
+  const created = await createPost({ ownerEmail: "owner@example.com", input: { ...input, targets: [input.targets[0]] }, mode: "now", repository, resolveConnection });
+  const queued = await publishPost({
+    ownerEmail: "owner@example.com", postId: created.id, repository,
+    getConnection: async () => { throw new Error("private Turso transport failure"); },
+    now: new Date("2026-07-13T00:00:00.000Z"),
+  });
+  assert.equal(queued.status, "scheduled");
+  assert.equal(queued.targets[0].status, "scheduled");
+  assert.equal(JSON.stringify(queued).includes("private Turso"), false);
+});
+
+test("an explicit disconnected connection remains a terminal reconnect outcome", async () => {
+  const repository = createMemoryRepository();
+  const created = await createPost({ ownerEmail: "owner@example.com", input: { ...input, targets: [input.targets[0]] }, mode: "now", repository, resolveConnection });
+  const result = await publishPost({
+    ownerEmail: "owner@example.com", postId: created.id, repository,
+    getConnection: async (ownerEmail, id) => ({ id, ownerEmail, platform: "meta", state: "disconnected", credentials: {} }),
+  });
+  assert.equal(result.status, "failed");
+  assert.equal(result.targets[0].status, "failed");
+});
+
+test("partial transient immediate publish queues only unfinished targets and preserves completed targets", async () => {
   const repository = createMemoryRepository();
   const created = await createPost({ ownerEmail: "owner@example.com", input, mode: "now", repository, resolveConnection });
-  await assert.rejects(publishPost({
+  const queued = await publishPost({
     ownerEmail: "owner@example.com", postId: created.id, repository,
     getConnection: async (ownerEmail, id) => ({ ...Object.values(defaultConnections).find((item) => item.id === id), ownerEmail }),
     publishTargets: async () => [
       { platform: "meta", status: "published", externalId: "meta-1" },
       { platform: "line", status: "failed", error: "temporary", retryable: true },
     ],
-  }), (error) => error.status === 503 && error.retryable);
-  assert.deepEqual(repository.targets.map((target) => [target.platform, target.status]), [["meta", "published"], ["line", "draft"]]);
+  });
+  assert.equal(queued.status, "scheduled");
+  assert.deepEqual(repository.targets.map((target) => [target.platform, target.status]), [["meta", "published"], ["line", "scheduled"]]);
+});
 
-  const retried = await publishPost({
+test("mixed immediate permanent Meta failure and transient LINE failure schedules only LINE", async () => {
+  const repository = createMemoryRepository();
+  const created = await createPost({ ownerEmail: "owner@example.com", input, mode: "now", repository, resolveConnection });
+  let batches = 0;
+  const queued = await publishPost({
     ownerEmail: "owner@example.com", postId: created.id, repository,
     getConnection: async (ownerEmail, id) => ({ ...Object.values(defaultConnections).find((item) => item.id === id), ownerEmail }),
-    publishTargets: async ({ targets }) => {
-      assert.deepEqual(targets.map((target) => target.platform), ["line"]);
-      return [{ platform: "line", status: "published", externalId: "line-1" }];
+    publishTargets: async () => {
+      batches += 1;
+      return [
+        { platform: "meta", status: "failed", error: "meta publishing failed." },
+        { platform: "line", status: "failed", error: "line publishing failed.", retryable: true },
+      ];
     },
   });
-  assert.equal(retried.status, "published");
+  assert.equal(batches, 1);
+  assert.equal(queued.status, "scheduled");
+  assert.deepEqual(repository.targets.map((target) => [target.platform, target.status]), [["meta", "failed"], ["line", "scheduled"]]);
+});
+
+test("unexpected retry error fallback never creates a stale failure for an already published target", async () => {
+  const publishedAt = new Date("2026-07-12T01:00:00.000Z");
+  let recorded;
+  const post = {
+    id: 77, ownerEmail: "owner@example.com", status: "publishing", imageImgurUrl: null,
+    targets: [
+      { platform: "meta", platformConnectionId: "meta-77", content: "done", hashtagsJson: "[]", status: "published", externalPostId: "meta-external", publishedAt },
+      { platform: "line", platformConnectionId: "line-77", content: "retry", hashtagsJson: "[]", status: "publishing" },
+    ],
+  };
+  const result = await publishClaimedPost({
+    post,
+    repository: {
+      async recordPublishResults(_owner, _id, results) {
+        recorded = results;
+        return { ...post, status: "partial_failed" };
+      },
+    },
+    getConnection: async (ownerEmail, id) => ({ id, ownerEmail, platform: "line", state: "active", credentials: {} }),
+    publishTargets: async () => { throw new Error("unexpected internal failure"); },
+  });
+
+  assert.deepEqual(recorded.map((item) => item.platform), ["line"]);
+  assert.equal(result.status, "partial_failed");
 });
 
 test("redacts nested connection credentials before persisting a publisher error", async () => {

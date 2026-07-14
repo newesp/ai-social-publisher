@@ -37,6 +37,12 @@ test("wizard exposes OpenAI's one-option model controls", async () => {
   assert.equal(source.includes('getImageModelOptions(form.imageProvider)'), true);
 });
 
+test("wizard renders an automatic retry notice for an accepted scheduled immediate post", async () => {
+  const source = await readFile(new URL("../src/components/CreatePostWizard.js", import.meta.url), "utf8");
+  assert.equal(source.includes("Queued for automatic retry at the next scheduled run"), true);
+  assert.equal(source.includes('publishResult.status === "scheduled"'), true);
+});
+
 test("wizard fetches connection availability and renders only active platform choices", async () => {
   const source = await readFile(new URL("../src/components/CreatePostWizard.js", import.meta.url), "utf8");
 

@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 import { decryptJson, encryptJson } from "../settings/credential-crypto.js";
+import { permanentConnectionFailureError } from "./connection-lifecycle.js";
 
 const PLATFORMS = new Set(["meta", "line"]);
 
@@ -74,8 +75,15 @@ function toNewRecord(ownerEmail, input, encryptionKey) {
 
 function toConnection(record, encryptionKey) {
   return { id: record.id, ownerEmail: record.ownerEmail, platform: record.platform, displayName: record.displayName,
-    state: record.state, credentials: decryptJson(record.encryptedCredentials, encryptionKey), expiresAt: record.credentialExpiresAt ?? null,
+    state: record.state, credentials: decryptConnectionCredentials(record.encryptedCredentials, encryptionKey), expiresAt: record.credentialExpiresAt ?? null,
     createdAt: record.createdAt, updatedAt: record.updatedAt };
+}
+function decryptConnectionCredentials(encryptedCredentials, encryptionKey) {
+  try {
+    return decryptJson(encryptedCredentials, encryptionKey);
+  } catch {
+    throw permanentConnectionFailureError();
+  }
 }
 function toAvailability(record) { return { platform: record.platform, state: record.state, displayName: record.displayName, expiresAt: record.credentialExpiresAt ?? null }; }
 function normalizeOwner(ownerEmail) { const value = String(ownerEmail ?? "").trim().toLowerCase(); if (!value) throw new Error("A connection owner is required."); return value; }
