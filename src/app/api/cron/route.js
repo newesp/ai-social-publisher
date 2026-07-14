@@ -1,14 +1,15 @@
 import { NextResponse } from "next/server";
 
 import { createPostRepository } from "../../../lib/posts/post-repository.js";
+import { createPublishingConnectionResolver } from "../../../lib/posts/post-route-handlers.js";
 import { createCronRouteHandlers, runDuePostScheduler } from "../../../lib/scheduler/run-due-post-scheduler.js";
 import { publishTargets } from "../../../lib/platforms/publish-service.js";
-import { readSettings } from "../../../lib/settings/settings-store.js";
+import { getPlatformConnectionServices } from "../../../lib/platform-connections/platform-connection-route-handlers.js";
 
 const handlers = createCronRouteHandlers({
   runScheduler: () => runDuePostScheduler({
     repository: createPostRepository(),
-    readSettings,
+    createGetConnection: () => createPublishingConnectionResolver(getPlatformConnectionServices()),
     publishTargets,
   }),
   respond: (body, init) => NextResponse.json(body, init),

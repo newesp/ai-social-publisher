@@ -1,6 +1,22 @@
 import { cancelScheduledPost, createPost, listPosts, publishPost } from "./post-service.js";
 
-export function createPostRouteHandlers({ requireAppUser, requirePublisher, getRepository, readSettings, publishTargets, now = () => new Date(), respond = (body, init) => Response.json(body, init) }) {
+export function createPublishingConnectionResolver({ connections, line, meta }) {
+  return async function getConnection(ownerEmail, connectionId) {
+    const connection = await connections.getById(ownerEmail, connectionId);
+    if (!connection) return null;
+    const usable = connection.platform === "line"
+      ? await line.ensureUsable(ownerEmail, connectionId)
+      : connection.platform === "meta"
+        ? await meta.ensureUsable(ownerEmail, connectionId)
+        : connection;
+    return {
+      ...usable,
+      markNeedsReconnect: () => connections.markNeedsReconnect(ownerEmail, connectionId),
+    };
+  };
+}
+
+export function createPostRouteHandlers({ requireAppUser, requirePublisher, getRepository, resolveConnection, getConnection, createGetConnection = () => getConnection, createConnectionContext, publishTargets, now = () => new Date(), respond = (body, init) => Response.json(body, init) }) {
   return {
     async GET() {
       const ownerEmail = await requireAppUser();
@@ -12,16 +28,20 @@ export function createPostRouteHandlers({ requireAppUser, requirePublisher, getR
       const ownerEmail = await requirePublisher();
       const repository = await getRepository();
       const input = await request.json();
-      const post = await createPost({ ownerEmail, input, mode: input.mode, repository, now: now() });
+      const connectionContext = createConnectionContext?.() ?? null;
+      const post = await createPost({ ownerEmail, input, mode: input.mode, repository,
+        resolveConnection: connectionContext?.resolveConnection ?? resolveConnection, now: now() });
       let published = post;
       if (input.mode === "now") {
         try {
-          published = await publishPost({ ownerEmail, postId: post.id, repository, readSettings, publishTargets, now: now() });
-        } catch {
+          published = await publishPost({ ownerEmail, postId: post.id, repository,
+            getConnection: connectionContext?.getConnection ?? createGetConnection(), publishTargets, now: now() });
+        } catch (error) {
+          if (error?.retryable) throw routeError("Publishing is temporarily unavailable. Please retry shortly.", 503);
           throw routeError("Publishing failed and the outcome could not be recorded.", 500);
         }
       }
-      return respond({ post: toPostResponse(published) }, { status: 201 });
+      return respond({ post: toPostResponse(published) }, { status: input.mode === "now" && published.status === "scheduled" ? 202 : 201 });
     },
   };
 }
@@ -46,7 +66,7 @@ function toPostResponse(post) {
   const { ownerEmail: _ownerEmail, targets = [], ...safePost } = post;
   return {
     ...safePost,
-    targets: targets.map(({ errorMessage: _errorMessage, ...target }) => ({
+    targets: targets.map(({ errorMessage: _errorMessage, platformConnectionId: _platformConnectionId, ...target }) => ({
       ...target,
       errorMessage: target.status === "failed" ? "Publishing failed." : null,
     })),

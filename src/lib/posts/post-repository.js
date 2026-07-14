@@ -1,19 +1,29 @@
 import { and, desc, eq, inArray, lte } from "drizzle-orm";
 
 import { createDbClient } from "../db/index.js";
-import { postTargets, posts } from "../db/schema.js";
+import { platformConnections, postTargets, posts } from "../db/schema.js";
 import { POST_STATUS, resolvePostStatus } from "./post-status.js";
 
 export function createPostRepository(db = createDbClient()) {
   return {
     async createPostWithTargets({ post, targetRows }) {
-      return db.transaction(async (tx) => {
+      return retryBusyTransaction(() => db.transaction(async (tx) => {
+        for (const target of targetRows) {
+          if (!target.platformConnectionId) throw reconnectError();
+          const [connection] = await tx.select({ id: platformConnections.id }).from(platformConnections).where(and(
+            eq(platformConnections.id, target.platformConnectionId),
+            eq(platformConnections.ownerEmail, post.ownerEmail),
+            eq(platformConnections.platform, target.platform),
+            eq(platformConnections.state, "active"),
+          )).limit(1);
+          if (!connection) throw reconnectError();
+        }
         const [createdPost] = await tx.insert(posts).values(post).returning();
         const createdTargets = targetRows.length
           ? await tx.insert(postTargets).values(targetRows.map((target) => ({ ...target, postId: createdPost.id }))).returning()
           : [];
         return { ...createdPost, targets: createdTargets };
-      });
+      }));
     },
     async listPostsByOwner(ownerEmail) {
       const postRows = await db.select().from(posts).where(eq(posts.ownerEmail, ownerEmail)).orderBy(desc(posts.createdAt));
@@ -39,7 +49,9 @@ export function createPostRepository(db = createDbClient()) {
         const [updated] = await tx.update(posts).set({ status: POST_STATUS.PUBLISHING, publishingStartedAt: now, updatedAt: now })
           .where(and(eq(posts.ownerEmail, ownerEmail), eq(posts.id, postId), eq(posts.status, POST_STATUS.DRAFT))).returning();
         if (!updated) return null;
-        await tx.update(postTargets).set({ status: POST_STATUS.PUBLISHING, updatedAt: now }).where(eq(postTargets.postId, postId));
+        await tx.update(postTargets).set({ status: POST_STATUS.PUBLISHING, updatedAt: now }).where(and(
+          eq(postTargets.postId, postId), eq(postTargets.status, POST_STATUS.DRAFT),
+        ));
         return findPostByOwner(tx, ownerEmail, postId);
       });
     },
@@ -56,10 +68,46 @@ export function createPostRepository(db = createDbClient()) {
         const claimedPosts = [];
         for (const duePost of duePosts) {
           await tx.update(postTargets).set({ status: POST_STATUS.PUBLISHING, updatedAt: now })
-            .where(eq(postTargets.postId, duePost.id));
+            .where(and(eq(postTargets.postId, duePost.id), eq(postTargets.status, POST_STATUS.SCHEDULED)));
           claimedPosts.push(await findPostByOwner(tx, duePost.ownerEmail, duePost.id));
         }
         return claimedPosts;
+      }));
+    },
+    async requeueClaimedPost(ownerEmail, postId, status, retryAt, now) {
+      return retryBusyTransaction(() => db.transaction(async (tx) => {
+        const [updated] = await tx.update(posts).set({
+          status, scheduledFor: status === POST_STATUS.SCHEDULED ? retryAt : null,
+          publishingStartedAt: null, updatedAt: now,
+        }).where(and(eq(posts.ownerEmail, ownerEmail), eq(posts.id, postId), eq(posts.status, POST_STATUS.PUBLISHING))).returning();
+        if (!updated) return null;
+        await tx.update(postTargets).set({ status, updatedAt: now }).where(and(
+          eq(postTargets.postId, postId), eq(postTargets.status, POST_STATUS.PUBLISHING),
+        ));
+        return findPostByOwner(tx, ownerEmail, postId);
+      }));
+    },
+    async recordPublishProgressAndRequeue(ownerEmail, postId, results, status, retryAt, now) {
+      return retryBusyTransaction(() => db.transaction(async (tx) => {
+        const [current] = await tx.select({ id: posts.id }).from(posts).where(and(
+          eq(posts.ownerEmail, ownerEmail), eq(posts.id, postId), eq(posts.status, POST_STATUS.PUBLISHING),
+        )).limit(1);
+        if (!current) return null;
+        for (const result of results.filter((item) => !item.retryable)) {
+          await tx.update(postTargets).set({
+            status: result.status, externalPostId: result.externalId ?? null, errorMessage: result.error ?? null,
+            publishedAt: result.status === POST_STATUS.PUBLISHED ? now : null, updatedAt: now,
+          }).where(and(eq(postTargets.postId, postId), eq(postTargets.platform, result.platform), eq(postTargets.status, POST_STATUS.PUBLISHING)));
+        }
+        const retryablePlatforms = results.filter((item) => item.retryable).map((item) => item.platform);
+        if (retryablePlatforms.length) {
+          await tx.update(postTargets).set({ status, errorMessage: null, updatedAt: now }).where(and(
+            eq(postTargets.postId, postId), eq(postTargets.status, POST_STATUS.PUBLISHING), inArray(postTargets.platform, retryablePlatforms),
+          ));
+        }
+        await tx.update(posts).set({ status, scheduledFor: status === POST_STATUS.SCHEDULED ? retryAt : null,
+          publishingStartedAt: null, updatedAt: now }).where(and(eq(posts.ownerEmail, ownerEmail), eq(posts.id, postId)));
+        return findPostByOwner(tx, ownerEmail, postId);
       }));
     },
     async recordPublishResults(ownerEmail, postId, results, now) {
@@ -73,7 +121,9 @@ export function createPostRepository(db = createDbClient()) {
             errorMessage: result.error ?? null,
             publishedAt: result.status === POST_STATUS.PUBLISHED ? now : null,
             updatedAt: now,
-          }).where(and(eq(postTargets.postId, postId), eq(postTargets.platform, result.platform)));
+          }).where(and(
+            eq(postTargets.postId, postId), eq(postTargets.platform, result.platform), eq(postTargets.status, POST_STATUS.PUBLISHING),
+          ));
         }
         const targets = await targetsForPosts(tx, [postId]);
         const status = resolvePostStatus(targets);
@@ -83,6 +133,12 @@ export function createPostRepository(db = createDbClient()) {
       });
     },
   };
+}
+
+function reconnectError() {
+  const error = new Error("The selected platform connection needs to be reconnected.");
+  error.status = 409;
+  return error;
 }
 
 async function retryBusyTransaction(transaction, attempts = 8) {

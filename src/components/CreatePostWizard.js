@@ -23,7 +23,7 @@ import { createDraftTargets } from "../lib/content/draft-content.js";
 import { buildPlatformPreviews } from "../lib/platform-preview/build-platform-previews.js";
 import { ACTIVE_PLATFORMS } from "../lib/platforms/platform-config.js";
 import { buildPostSubmission, SCHEDULE_TIME } from "../lib/wizard/post-submission.js";
-import { WIZARD_STEPS, getInitialPostForm, shouldGenerateOnPreviewAdvance } from "../lib/wizard/wizard-flow.js";
+import { WIZARD_STEPS, getInitialPostForm, reconcileConnectedPlatforms, shouldGenerateOnPreviewAdvance } from "../lib/wizard/wizard-flow.js";
 import { getImageModelOptions, getLLMModelOptions } from "../lib/ai/model-config.js";
 import { getPreferredModel, readModelPreferences, writeModelPreferences } from "../lib/wizard/model-preferences.js";
 import { PlatformPreview } from "./PlatformPreview.js";
@@ -39,6 +39,8 @@ export function CreatePostWizard() {
   const [generationError, setGenerationError] = useState("");
   const [publishStatus, setPublishStatus] = useState("idle");
   const [publishResult, setPublishResult] = useState(null);
+  const [connectedPlatforms, setConnectedPlatforms] = useState([]);
+  const [availabilityStatus, setAvailabilityStatus] = useState("loading");
 
   useEffect(() => {
     const preferences = readModelPreferences();
@@ -49,8 +51,37 @@ export function CreatePostWizard() {
     }));
   }, []);
 
+  useEffect(() => {
+    loadConnectedPlatforms();
+  }, []);
+
+  async function loadConnectedPlatforms() {
+    setAvailabilityStatus("loading");
+    try {
+      const response = await fetch("/api/platform-connections");
+      const data = await response.json();
+      if (!response.ok || !Array.isArray(data.connections)) throw new Error();
+      const activePlatforms = [...new Set(data.connections
+        .filter((connection) => connection.state === "active")
+        .map((connection) => connection.platform)
+        .filter((platform) => ACTIVE_PLATFORMS.some((option) => option.value === platform)))];
+      setConnectedPlatforms(activePlatforms);
+      setForm((currentForm) => ({
+        ...currentForm,
+        platforms: reconcileConnectedPlatforms(currentForm.platforms, activePlatforms),
+      }));
+      setAvailabilityStatus("success");
+    } catch {
+      setConnectedPlatforms([]);
+      setForm((currentForm) => ({ ...currentForm, platforms: [] }));
+      setAvailabilityStatus("error");
+    }
+  }
+
   const targets = useMemo(() => generatedTargets ?? createDraftTargets(form), [form, generatedTargets]);
   const previews = useMemo(() => buildPlatformPreviews({ imageUrl, targets }), [imageUrl, targets]);
+  const connectedPlatformOptions = useMemo(() => ACTIVE_PLATFORMS.filter((option) => connectedPlatforms.includes(option.value)), [connectedPlatforms]);
+  const platformProgressDisabled = availabilityStatus !== "success" || connectedPlatforms.length === 0;
   const updateForm = (nextForm) => {
     setForm(nextForm);
     setGeneratedTargets(null);
@@ -81,7 +112,7 @@ export function CreatePostWizard() {
       </div>
 
       <Paper withBorder radius={8} p="lg">
-        <Stepper active={active} onStepClick={setActive}>
+        <Stepper active={active} onStepClick={(step) => { if (step === WIZARD_STEPS.PRODUCT || !platformProgressDisabled) setActive(step); }}>
           <Stepper.Step label="商品資訊">
             <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md" mt="md">
               <TextInput ref={productNameRef} name="productName" label="商品名稱" value={form.productName} onChange={(event) => updateForm({ ...form, productName: event.currentTarget.value })} />
@@ -90,9 +121,26 @@ export function CreatePostWizard() {
             <Textarea ref={productFeaturesRef} name="productFeatures" mt="md" minRows={4} label="商品特色" value={form.productFeatures} onChange={(event) => updateForm({ ...form, productFeatures: event.currentTarget.value })} />
             <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md" mt="md">
               <Select label="內容語氣" value={form.tone} onChange={(tone) => updateForm({ ...form, tone: tone ?? "friendly" })} data={[{ value: "professional", label: "專業" }, { value: "active", label: "活潑" }, { value: "friendly", label: "親切" }, { value: "premium", label: "高質感" }, { value: "humor", label: "幽默" }]} />
-              <Checkbox.Group label="發布平台" value={form.platforms} onChange={(platforms) => updateForm({ ...form, platforms })}>
-                <Group mt="xs">{ACTIVE_PLATFORMS.map((option) => <Checkbox key={option.value} value={option.value} label={option.label} />)}</Group>
-              </Checkbox.Group>
+              <Stack gap="xs">
+                <Text fw={500} size="sm">Publishing platforms</Text>
+                {availabilityStatus === "loading" ? <Text c="dimmed" size="sm">Loading connected platforms…</Text> : null}
+                {availabilityStatus === "error" ? (
+                  <Stack gap="xs" align="flex-start">
+                    <Text c="red.7" size="sm">Could not load publishing connections.</Text>
+                    <Button size="xs" variant="light" onClick={loadConnectedPlatforms}>Try again</Button>
+                  </Stack>
+                ) : null}
+                {availabilityStatus === "success" && connectedPlatforms.length === 0 ? (
+                  <Button component="a" href="/settings?tab=publishing" variant="light" w="fit-content">
+                    Connect a publishing platform in Settings
+                  </Button>
+                ) : null}
+                {availabilityStatus === "success" && connectedPlatforms.length > 0 ? (
+                  <Checkbox.Group label="Connected publishing platforms" value={form.platforms} onChange={(platforms) => updateForm({ ...form, platforms })}>
+                    <Group mt="xs" wrap="wrap">{connectedPlatformOptions.map((option) => <Checkbox key={option.value} value={option.value} label={option.label} />)}</Group>
+                  </Checkbox.Group>
+                ) : null}
+              </Stack>
             </SimpleGrid>
           </Stepper.Step>
 
@@ -118,13 +166,13 @@ export function CreatePostWizard() {
               <SegmentedControl value={form.mode} onChange={(mode) => setForm({ ...form, mode })} data={[{ label: "立即發布", value: "now" }, { label: "排程發布", value: "scheduled" }]} />
               {form.mode === "scheduled" ? <SimpleGrid cols={{ base: 1, sm: 2 }} mt="sm"><DateInput label="發布日期" value={form.scheduledDate ?? null} onChange={(scheduledDate) => setForm({ ...form, scheduledDate: scheduledDate ?? "" })} valueFormat="YYYY-MM-DD" minDate={new Date()} clearable={false} /><Select label="發布時間（台北）" value={form.scheduledTime ?? SCHEDULE_TIME} onChange={(scheduledTime) => setForm({ ...form, scheduledTime: scheduledTime ?? SCHEDULE_TIME })} data={[{ value: "09:00", label: "09:00" }]} /></SimpleGrid> : null}
             </Paper>
-            {publishResult ? <Stack gap={4} mt="md"><Badge color={publishResult.status === "failed" ? "red" : publishResult.status === "scheduled" ? "orange" : "green"}>{publishResult.status}</Badge>{publishResult.targets?.map((target) => <Text key={target.id ?? target.platform} size="sm" c={target.status === "failed" ? "red.7" : "green.7"}>{target.platform}: {target.status}{target.errorMessage ? ` - ${target.errorMessage}` : ""}</Text>)}</Stack> : null}
+            {publishResult ? <Stack gap={4} mt="md"><Badge color={publishResult.status === "failed" ? "red" : publishResult.status === "scheduled" ? "orange" : "green"}>{publishResult.status}</Badge>{form.mode === "now" && publishResult.status === "scheduled" ? <Text role="status" c="orange.8">Queued for automatic retry at the next scheduled run.</Text> : null}{publishResult.targets?.map((target) => <Text key={target.id ?? target.platform} size="sm" c={target.status === "failed" ? "red.7" : "green.7"}>{target.platform}: {target.status}{target.errorMessage ? ` - ${target.errorMessage}` : ""}</Text>)}</Stack> : null}
           </Stepper.Step>
         </Stepper>
 
         <Group justify="space-between" mt="xl">
           <Button variant="default" onClick={() => setActive((step) => Math.max(0, step - 1))}>上一步</Button>
-          {active < WIZARD_STEPS.PREVIEW ? <Button disabled={generationStatus === "loading"} onClick={() => goToNextStep({ active, form, generatedTargets, productNameRef, productFeaturesRef, setForm, setGeneratedTargets, setGenerationStatus, setGenerationError, setImageUrl, setActive })}>下一步</Button> : <Button leftSection={form.mode === "scheduled" ? <IconCalendar size={16} /> : <IconSend size={16} />} loading={publishStatus === "loading"} disabled={generationStatus === "loading"} onClick={() => submitPost({ form, targets, imageUrl, setPublishStatus, setPublishResult })}>{form.mode === "scheduled" ? "安排 09:00 發布" : "立即發布"}</Button>}
+          {active < WIZARD_STEPS.PREVIEW ? <Button disabled={generationStatus === "loading" || platformProgressDisabled} onClick={() => goToNextStep({ active, form, generatedTargets, productNameRef, productFeaturesRef, setForm, setGeneratedTargets, setGenerationStatus, setGenerationError, setImageUrl, setActive })}>下一步</Button> : <Button leftSection={form.mode === "scheduled" ? <IconCalendar size={16} /> : <IconSend size={16} />} loading={publishStatus === "loading"} disabled={generationStatus === "loading" || platformProgressDisabled} onClick={() => submitPost({ form, targets, imageUrl, setPublishStatus, setPublishResult })}>{form.mode === "scheduled" ? "安排 09:00 發布" : "立即發布"}</Button>}
         </Group>
       </Paper>
     </Stack>

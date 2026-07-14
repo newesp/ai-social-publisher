@@ -11,6 +11,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "migrate:platform-connections": "node scripts/migrate-platform-connections.mjs",
+    "migrate:platform-schema": "node scripts/apply-platform-schema.mjs",
+    "cleanup:legacy-platform-credentials": "node scripts/remove-legacy-platform-credentials.mjs",
     "test": "node --test"
   },
   "dependencies": {

@@ -1,7 +1,8 @@
 import { publishClaimedPost } from "../posts/post-service.js";
 
-export async function runDuePostScheduler({ repository, readSettings, publishTargets, now = new Date() }) {
+export async function runDuePostScheduler({ repository, getConnection, createGetConnection = () => getConnection, publishTargets, now = new Date() }) {
   const claimedPosts = await repository.claimDueScheduledPosts(now);
+  const connectionResolver = createGetConnection();
   const posts = [];
 
   for (const post of claimedPosts) {
@@ -9,13 +10,13 @@ export async function runDuePostScheduler({ repository, readSettings, publishTar
       const result = await publishClaimedPost({
         post,
         repository,
-        readSettings,
+        getConnection: connectionResolver,
         publishTargets,
         now,
       });
       posts.push({ id: post.id, status: result.status });
-    } catch {
-      posts.push({ id: post.id, status: "failed" });
+    } catch (error) {
+      posts.push({ id: post.id, status: error?.retryable ? "scheduled" : "failed" });
     }
   }
 

@@ -3,9 +3,56 @@ import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 
 import {
+  createPublishingConnectionResolver,
   createPostCancellationHandler,
   createPostRouteHandlers,
 } from "../src/lib/posts/post-route-handlers.js";
+
+test("publishing connection resolution runs LINE ensureUsable before returning credentials", async () => {
+  const calls = [];
+  const getConnectionForPublish = createPublishingConnectionResolver({
+    connections: {
+      async getById(ownerEmail, id) {
+        calls.push(["get", ownerEmail, id]);
+        return { id, ownerEmail, platform: "line", state: "active", credentials: { accessToken: "old" } };
+      },
+      async markNeedsReconnect(ownerEmail, id) { calls.push(["mark", ownerEmail, id]); },
+    },
+    line: {
+      async ensureUsable(ownerEmail, id) {
+        calls.push(["ensure", ownerEmail, id]);
+        return { id, ownerEmail, platform: "line", state: "active", credentials: { accessToken: "renewed" } };
+      },
+    },
+  });
+
+  const connection = await getConnectionForPublish("owner@example.com", "line-1");
+  await connection.markNeedsReconnect();
+
+  assert.equal(connection.credentials.accessToken, "renewed");
+  assert.deepEqual(calls, [
+    ["get", "owner@example.com", "line-1"],
+    ["ensure", "owner@example.com", "line-1"],
+    ["mark", "owner@example.com", "line-1"],
+  ]);
+});
+
+test("publishing connection resolution runs Meta ensureUsable through the same immediate and scheduled resolver", async () => {
+  const calls = [];
+  const resolver = createPublishingConnectionResolver({
+    connections: {
+      async getById(ownerEmail, id) { calls.push(["get", ownerEmail, id]); return { id, ownerEmail, platform: "meta", state: "archived" }; },
+      async markNeedsReconnect() {},
+    },
+    line: { async ensureUsable() { throw new Error("LINE must not run"); } },
+    meta: { async ensureUsable(ownerEmail, id) { calls.push(["ensure", ownerEmail, id]); return { id, ownerEmail, platform: "meta", state: "archived", credentials: { pageAccessToken: "validated" } }; } },
+  });
+
+  const connection = await resolver("owner@example.com", "meta-1");
+
+  assert.equal(connection.credentials.pageAccessToken, "validated");
+  assert.deepEqual(calls, [["get", "owner@example.com", "meta-1"], ["ensure", "owner@example.com", "meta-1"]]);
+});
 
 function createMemoryRepository() {
   const posts = [];
@@ -40,6 +87,27 @@ function createMemoryRepository() {
       targets.filter((target) => target.postId === postId).forEach((target) => { target.status = "publishing"; });
       return withTargets(post);
     },
+    async requeueClaimedPost(owner, postId, status, retryAt, now) {
+      const post = posts.find((item) => item.ownerEmail === owner && item.id === postId && item.status === "publishing");
+      if (!post) return null;
+      Object.assign(post, { status, scheduledFor: retryAt, publishingStartedAt: null, updatedAt: now });
+      targets.filter((target) => target.postId === postId && target.status === "publishing")
+        .forEach((target) => { target.status = status; target.updatedAt = now; });
+      return withTargets(post);
+    },
+    async recordPublishProgressAndRequeue(owner, postId, results, status, retryAt, now) {
+      const post = posts.find((item) => item.ownerEmail === owner && item.id === postId);
+      for (const result of results.filter((item) => !item.retryable)) {
+        const target = targets.find((item) => item.postId === postId && item.platform === result.platform);
+        Object.assign(target, { status: result.status, externalPostId: result.externalId ?? null,
+          errorMessage: result.error ?? null, publishedAt: result.status === "published" ? now : null, updatedAt: now });
+      }
+      const retryablePlatforms = new Set(results.filter((item) => item.retryable).map((item) => item.platform));
+      targets.filter((target) => target.postId === postId && target.status === "publishing" && retryablePlatforms.has(target.platform))
+        .forEach((target) => { target.status = status; target.updatedAt = now; });
+      Object.assign(post, { status, scheduledFor: retryAt, publishingStartedAt: null, updatedAt: now });
+      return withTargets(post);
+    },
     async recordPublishResults(owner, postId, results, now) {
       const post = posts.find((item) => item.ownerEmail === owner && item.id === postId);
       for (const result of results) {
@@ -64,6 +132,9 @@ const body = {
   targets: [{ platform: "meta", content: "Meta", hashtags: [] }],
 };
 
+const resolveConnection = async (ownerEmail, platform) => ({ id: `${platform}-connection`, ownerEmail, platform, state: "active", credentials: {} });
+const getConnection = async (ownerEmail, id) => ({ id, ownerEmail, platform: id.split("-", 1)[0], state: "active", credentials: {} });
+
 test("posts handlers derive the owner and keep scheduled requests provider-free", async () => {
   const repository = createMemoryRepository();
   let providerCalls = 0;
@@ -71,7 +142,8 @@ test("posts handlers derive the owner and keep scheduled requests provider-free"
     requireAppUser: async () => "owner@example.com",
     requirePublisher: async () => "owner@example.com",
     getRepository: async () => repository,
-    readSettings: async () => ({}),
+    resolveConnection,
+    getConnection,
     publishTargets: async () => { providerCalls += 1; return []; },
     now: () => new Date("2026-07-09T00:00:00.000Z"),
   });
@@ -88,14 +160,15 @@ test("posts handlers derive the owner and keep scheduled requests provider-free"
   assert.equal((await listed.json()).posts.length, 1);
 });
 
-test("publish-now handler uses the signed-in owner's settings without returning provider errors", async () => {
+test("publish-now handler loads the signed-in owner's bound connection without returning provider errors", async () => {
   const repository = createMemoryRepository();
   const owners = [];
   const handlers = createPostRouteHandlers({
     requireAppUser: async () => "owner@example.com",
     requirePublisher: async () => "owner@example.com",
     getRepository: async () => repository,
-    readSettings: async (owner) => { owners.push(owner); return { lineChannelAccessToken: "private" }; },
+    resolveConnection,
+    getConnection: async (owner, id) => { owners.push(owner); return { id, ownerEmail: owner, platform: "meta", state: "active", credentials: { pageAccessToken: "private" } }; },
     publishTargets: async () => [{ platform: "meta", status: "failed", error: "provider refused private" }],
     now: () => new Date("2026-07-09T00:00:00.000Z"),
   });
@@ -118,7 +191,8 @@ test("posts API responses never expose an owner email or settings token", async 
     requireAppUser: async () => "owner@example.com",
     requirePublisher: async () => "owner@example.com",
     getRepository: async () => repository,
-    readSettings: async () => ({ metaPageAccessToken: "owner-token" }),
+    resolveConnection,
+    getConnection: async (owner, id) => ({ id, ownerEmail: owner, platform: "meta", state: "active", credentials: { pageAccessToken: "owner-token" } }),
     publishTargets: async () => [{
       platform: "meta",
       status: "failed",
@@ -146,7 +220,8 @@ test("publish-now records a safe failed result when the publisher throws after c
     requireAppUser: async () => "owner@example.com",
     requirePublisher: async () => "owner@example.com",
     getRepository: async () => repository,
-    readSettings: async () => ({ metaPageAccessToken: "owner-token" }),
+    resolveConnection,
+    getConnection,
     publishTargets: async () => { throw new Error("provider failed for owner@example.com Bearer owner-token"); },
     now: () => new Date("2026-07-09T00:00:00.000Z"),
   });
@@ -164,13 +239,14 @@ test("publish-now records a safe failed result when the publisher throws after c
   assert.equal(post.targets[0].errorMessage.includes("owner@example.com"), false);
 });
 
-test("publish-now records a safe failed result when owner settings cannot be read", async () => {
+test("publish-now safely queues an untyped connection-storage failure", async () => {
   const repository = createMemoryRepository();
   const handlers = createPostRouteHandlers({
     requireAppUser: async () => "owner@example.com",
     requirePublisher: async () => "owner@example.com",
     getRepository: async () => repository,
-    readSettings: async () => { throw new Error("settings unavailable for owner@example.com token=owner-token"); },
+    resolveConnection,
+    getConnection: async () => { throw new Error("connection unavailable for owner@example.com token=owner-token"); },
     publishTargets: async () => { throw new Error("publisher must not run"); },
     now: () => new Date("2026-07-09T00:00:00.000Z"),
   });
@@ -181,11 +257,11 @@ test("publish-now records a safe failed result when owner settings cannot be rea
   }));
   const { post } = await response.json();
 
-  assert.equal(response.status, 201);
-  assert.equal(post.status, "failed");
-  assert.equal(post.targets[0].status, "failed");
-  assert.equal(post.targets[0].errorMessage.includes("owner-token"), false);
-  assert.equal(post.targets[0].errorMessage.includes("owner@example.com"), false);
+  assert.equal(response.status, 202);
+  assert.equal(post.status, "scheduled");
+  assert.equal(post.targets[0].status, "scheduled");
+  assert.equal(JSON.stringify(post).includes("owner-token"), false);
+  assert.equal(JSON.stringify(post).includes("owner@example.com"), false);
 });
 
 test("cancellation handler conditionally cancels only the current owner's scheduled row", async () => {
@@ -194,7 +270,8 @@ test("cancellation handler conditionally cancels only the current owner's schedu
     requireAppUser: async () => "owner@example.com",
     requirePublisher: async () => "owner@example.com",
     getRepository: async () => repository,
-    readSettings: async () => ({}),
+    resolveConnection,
+    getConnection,
     publishTargets: async () => [],
     now: () => new Date("2026-07-09T00:00:00.000Z"),
   });
@@ -213,6 +290,92 @@ test("cancellation handler conditionally cancels only the current owner's schedu
     { status: 404 },
   );
   assert.equal((await repository.findPostByOwner("owner@example.com", post.id)).status, "scheduled");
+});
+
+test("post handlers bind selected targets through the authenticated owner's resolver", async () => {
+  const repository = createMemoryRepository();
+  const resolved = [];
+  const handlers = createPostRouteHandlers({
+    requireAppUser: async () => "owner@example.com",
+    requirePublisher: async () => " OWNER@example.com ",
+    getRepository: async () => repository,
+    resolveConnection: async (ownerEmail, platform) => {
+      resolved.push([ownerEmail, platform]);
+      return { id: "meta-immutable", ownerEmail, platform, state: "active", credentials: {} };
+    },
+    getConnection,
+    publishTargets: async () => [],
+    now: () => new Date("2026-07-09T00:00:00.000Z"),
+  });
+
+  const response = await handlers.POST(new Request("http://localhost/api/posts", {
+    method: "POST",
+    body: JSON.stringify({ ...body, mode: "scheduled", scheduledDate: "2026-07-11", scheduledTime: "09:00" }),
+  }));
+
+  assert.equal(response.status, 201);
+  assert.deepEqual(resolved, [["owner@example.com", "meta"]]);
+  assert.equal(repository.findPostByOwner ? (await repository.findPostByOwner("owner@example.com", 1)).targets[0].platformConnectionId : null, "meta-immutable");
+  assert.equal(JSON.stringify(await response.json()).includes("meta-immutable"), false);
+});
+
+test("publish-now composes one connection resolver per request and reuses it for all targets", async () => {
+  const repository = createMemoryRepository();
+  let factories = 0;
+  const handlers = createPostRouteHandlers({
+    requireAppUser: async () => "owner@example.com", requirePublisher: async () => "owner@example.com",
+    getRepository: async () => repository, resolveConnection,
+    createGetConnection: () => { factories += 1; return getConnection; },
+    publishTargets: async ({ targets }) => targets.map((target) => ({ platform: target.platform, status: "published" })),
+    now: () => new Date("2026-07-09T00:00:00.000Z"),
+  });
+
+  await handlers.POST(new Request("http://localhost/api/posts", { method: "POST", body: JSON.stringify({
+    productName: "Demo", productFeatures: "Fast", mode: "now",
+    targets: [{ platform: "meta", content: "Meta", hashtags: [] }, { platform: "line", content: "Line", hashtags: [] }],
+  }) }));
+
+  assert.equal(factories, 1);
+});
+
+test("Meta plus LINE immediate create and publish composes one shared service context", async () => {
+  const repository = createMemoryRepository();
+  let contexts = 0;
+  const handlers = createPostRouteHandlers({
+    requireAppUser: async () => "owner@example.com", requirePublisher: async () => "owner@example.com",
+    getRepository: async () => repository,
+    createConnectionContext: () => {
+      contexts += 1;
+      return { resolveConnection, getConnection };
+    },
+    publishTargets: async ({ targets }) => targets.map((target) => ({ platform: target.platform, status: "published" })),
+    now: () => new Date("2026-07-09T00:00:00.000Z"),
+  });
+  const response = await handlers.POST(new Request("http://localhost/api/posts", { method: "POST", body: JSON.stringify({
+    productName: "Demo", productFeatures: "Fast", mode: "now",
+    targets: [{ platform: "meta", content: "Meta", hashtags: [] }, { platform: "line", content: "Line", hashtags: [] }],
+  }) }));
+  assert.equal(response.status, 201);
+  assert.equal(contexts, 1);
+});
+
+test("immediate transient publish returns an accepted scheduled post instead of a resubmit error", async () => {
+  const repository = createMemoryRepository();
+  const transient = new Error("private temporary outage"); transient.retryable = true; transient.status = 503;
+  const handlers = createPostRouteHandlers({
+    requireAppUser: async () => "owner@example.com", requirePublisher: async () => "owner@example.com",
+    getRepository: async () => repository, resolveConnection,
+    createGetConnection: () => async () => { throw transient; },
+    now: () => new Date("2026-07-09T00:00:00.000Z"),
+  });
+  const response = await handlers.POST(new Request("http://localhost/api/posts", { method: "POST", body: JSON.stringify({
+    productName: "Demo", productFeatures: "Fast", mode: "now", targets: [{ platform: "meta", content: "Meta", hashtags: [] }],
+  }) }));
+  const body = await response.json();
+  assert.equal(response.status, 202);
+  assert.equal(body.post.status, "scheduled");
+  assert.equal(body.post.id, 1);
+  assert.equal(JSON.stringify(body).includes("private"), false);
 });
 
 test("legacy direct publish route is retired instead of accepting a client-controlled post payload", async () => {

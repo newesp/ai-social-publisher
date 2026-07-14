@@ -9,12 +9,10 @@ export default function LoginPage() {
       <Paper className="login-panel" shadow="md" p="xl" radius={8}>
         <Stack gap="lg">
           <div>
-            <Text size="sm" c="orange.8" fw={700}>
-              AI Social Publisher
-            </Text>
+            <Text size="sm" c="orange.8" fw={700}>AI Social Publisher</Text>
             <Title order={1}>使用 Google 帳號登入</Title>
             <Text c="dimmed" mt="sm">
-              MVP 展示期允許所有 Google 帳號登入；設定與 token 管理僅限 admin。
+              每個登入帳號都會連結自己的發布平台，並保有各自的 AI 設定。
             </Text>
           </div>
           <Button leftSection={<IconBrandGoogle size={18} />} component="a" href="/api/auth/signin">
