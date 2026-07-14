@@ -27,6 +27,11 @@ export function SettingsPanel() {
 
     const params = new URLSearchParams(window.location.search);
     if (params.get("tab") === "publishing" || params.has("meta")) setActiveTab("publishing");
+    if (params.get("meta") === "start_error") {
+      setConnectionError("Meta connection could not be started. Please try again.");
+      params.delete("meta");
+      window.history.replaceState({}, "", `${window.location.pathname}?${params.toString()}`);
+    }
     const transactionId = params.get("transactionId") ?? "";
     if (params.get("meta") === "select" && transactionId) loadMetaPages(transactionId);
     if (params.get("meta") === "reconnect") setConnectionError("Meta could not be connected. Please try again.");
@@ -75,26 +80,6 @@ export function SettingsPanel() {
       setSettingsStatus("saved");
     } catch {
       setSettingsStatus("save-error");
-    }
-  }
-
-  async function startMetaConnection() {
-    if (connectionAction) return;
-    setConnectionAction("meta-start");
-    setConnectionError("");
-    setConnectionNotice("");
-    try {
-      const response = await fetch("/api/platform-connections/meta/start", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ returnPath: "/settings?tab=publishing" }),
-      });
-      const data = await response.json();
-      if (!response.ok || !data.authorizeUrl) throw new Error();
-      window.location.assign(data.authorizeUrl);
-    } catch {
-      setConnectionError("Meta connection could not be started. Please try again.");
-      setConnectionAction("");
     }
   }
 
@@ -226,7 +211,16 @@ export function SettingsPanel() {
                       </Stack>
                     ) : (
                       <Group wrap="wrap">
-                        <Button loading={connectionAction === "meta-start"} disabled={Boolean(connectionAction)} onClick={startMetaConnection}>{metaConnection.state === "active" ? "Change Page" : metaConnection.state === "needs_reconnect" ? "Reconnect" : "Connect Meta"}</Button>
+                        <form
+                          action="/api/platform-connections/meta/start"
+                          method="post"
+                          onSubmit={() => setConnectionAction("meta-start")}
+                        >
+                          <input type="hidden" name="returnPath" value="/settings?tab=publishing" />
+                          <Button type="submit" loading={connectionAction === "meta-start"} disabled={Boolean(connectionAction)}>
+                            {metaConnection.state === "active" ? "Change Page" : metaConnection.state === "needs_reconnect" ? "Reconnect" : "Connect Meta"}
+                          </Button>
+                        </form>
                         {metaConnection.state === "active" ? <Button color="red" variant="light" loading={connectionAction === "meta-disconnect"} disabled={Boolean(connectionAction)} onClick={() => disconnectPlatform("meta")}>Disconnect</Button> : null}
                       </Group>
                     )}
@@ -235,6 +229,15 @@ export function SettingsPanel() {
                   <ConnectionCard title="LINE" connection={lineConnection}>
                     {lineEditing ? (
                       <Stack gap="sm">
+                        <details>
+                          <summary style={{ cursor: "pointer", fontWeight: 600 }}>How to get Channel ID / Channel secret</summary>
+                          <ol style={{ marginBlock: "0.75rem 0", paddingInlineStart: "1.25rem" }}>
+                            <li><Text size="sm">Sign in to <Text component="a" href="https://developers.line.biz/" target="_blank" rel="noreferrer noopener" inherit td="underline">LINE Developers Console</Text>.</Text></li>
+                            <li><Text size="sm">Select your Provider and its <strong>Messaging API</strong> Channel. If none exists, create a LINE Official Account and enable Messaging API first.</Text></li>
+                            <li><Text size="sm">Open <strong>Basic settings</strong>, then copy the <strong>Channel ID</strong> and <strong>Channel secret</strong>.</Text></li>
+                            <li><Text size="sm">Paste those two values below. Do not paste a Channel access token; this application obtains and renews it automatically.</Text></li>
+                          </ol>
+                        </details>
                         <TextInput label="Channel ID" value={lineCredentials.channelId} onChange={(event) => setLineCredentials((current) => ({ ...current, channelId: event.currentTarget.value }))} autoComplete="off" />
                         <PasswordInput label="Channel Secret" value={lineCredentials.channelSecret} onChange={(event) => setLineCredentials((current) => ({ ...current, channelSecret: event.currentTarget.value }))} autoComplete="new-password" />
                         <Group wrap="wrap">

@@ -28,6 +28,58 @@ test("settings uses safe per-user connection APIs instead of stored publishing c
   }
 });
 
+test("Meta connection starts with a native POST form and consumes only a safe error flag", async () => {
+  const source = await readFile(new URL("../src/components/SettingsPanel.js", import.meta.url), "utf8");
+
+  assert.equal(source.includes('action="/api/platform-connections/meta/start"'), true);
+  assert.equal(source.includes('method="post"'), true);
+  assert.equal(source.includes('name="returnPath"'), true);
+  assert.equal(source.includes('type="submit"'), true);
+  assert.equal(source.includes('fetch("/api/platform-connections/meta/start"'), false);
+  assert.equal(source.includes('params.get("meta") === "start_error"'), true);
+  assert.equal(source.includes('params.delete("meta")'), true);
+});
+
+test("LINE credential form explains where to find Channel ID and Channel secret", async () => {
+  const source = await readFile(new URL("../src/components/SettingsPanel.js", import.meta.url), "utf8");
+
+  for (const expected of [
+    "How to get Channel ID / Channel secret",
+    "https://developers.line.biz/",
+    "Messaging API",
+    "Basic settings",
+    "LINE Official Account",
+    "Do not paste a Channel access token",
+    'rel="noreferrer noopener"',
+  ]) {
+    assert.equal(source.includes(expected), true, `missing ${expected}`);
+  }
+  assert.equal(source.includes("<details"), true);
+  assert.equal(source.includes("<summary"), true);
+
+  const disclosureStart = source.indexOf("<details>");
+  const disclosureEnd = source.indexOf("</details>", disclosureStart);
+  const disclosure = source.slice(disclosureStart, disclosureEnd + "</details>".length);
+  assert.equal((disclosure.match(/<ol\b/g) ?? []).length, 1);
+  assert.equal((disclosure.match(/<li\b/g) ?? []).length, 4);
+  let previousStep = -1;
+  for (const step of [
+    "Sign in to",
+    "Select your Provider",
+    "Open <strong>Basic settings</strong>",
+    "Paste those two values below",
+  ]) {
+    const stepIndex = disclosure.indexOf(step);
+    assert.equal(stepIndex > previousStep, true, `LINE disclosure step is missing or out of order: ${step}`);
+    previousStep = stepIndex;
+  }
+
+  const channelIdInput = source.indexOf('label="Channel ID"');
+  const channelSecretInput = source.indexOf('label="Channel Secret"');
+  assert.equal(disclosureEnd < channelIdInput, true);
+  assert.equal(channelIdInput < channelSecretInput, true);
+});
+
 test("settings renders actionable loading, disconnected, active, reconnect, and error states", async () => {
   const source = await readFile(new URL("../src/components/SettingsPanel.js", import.meta.url), "utf8");
   const lifecycleSource = await readFile(new URL("../src/lib/platform-connections/settings-platform-lifecycle.js", import.meta.url), "utf8");
