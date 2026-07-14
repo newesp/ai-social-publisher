@@ -1,6 +1,6 @@
 import Google from "next-auth/providers/google";
-import { canSignInWithGoogle, normalizeEmail } from "./auth/policy.js";
-import { getRoleForEmail } from "./auth/roles.js";
+import { canSignInWithGoogle } from "./auth/policy.js";
+import { applyGoogleProfileToToken, applyTokenToSession } from "./auth/session-profile.js";
 
 export const authOptions = {
   providers: [
@@ -14,18 +14,10 @@ export const authOptions = {
       return canSignInWithGoogle(user?.email);
     },
     async jwt({ token, user }) {
-      const email = normalizeEmail(user?.email ?? token.email);
-      if (email) {
-        token.email = email;
-        token.role = getRoleForEmail(email);
-      }
-      return token;
+      return applyGoogleProfileToToken({ token, user });
     },
     async session({ session, token }) {
-      const email = normalizeEmail(token.email ?? session.user?.email);
-      session.user.email = email;
-      session.user.role = token.role ?? getRoleForEmail(email);
-      return session;
+      return applyTokenToSession({ session, token });
     },
   },
 };

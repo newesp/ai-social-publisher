@@ -44,12 +44,12 @@ test("LINE credential form explains where to find Channel ID and Channel secret"
   const source = await readFile(new URL("../src/components/SettingsPanel.js", import.meta.url), "utf8");
 
   for (const expected of [
-    "How to get Channel ID / Channel secret",
+    "如何取得 Channel ID／Channel Secret",
     "https://developers.line.biz/",
     "Messaging API",
     "Basic settings",
     "LINE Official Account",
-    "Do not paste a Channel access token",
+    "請勿貼上 Channel access token",
     'rel="noreferrer noopener"',
   ]) {
     assert.equal(source.includes(expected), true, `missing ${expected}`);
@@ -64,10 +64,10 @@ test("LINE credential form explains where to find Channel ID and Channel secret"
   assert.equal((disclosure.match(/<li\b/g) ?? []).length, 4);
   let previousStep = -1;
   for (const step of [
-    "Sign in to",
-    "Select your Provider",
-    "Open <strong>Basic settings</strong>",
-    "Paste those two values below",
+    "登入",
+    "選擇 Provider",
+    "開啟 <strong>Basic settings</strong>",
+    "將兩個值貼至下方",
   ]) {
     const stepIndex = disclosure.indexOf(step);
     assert.equal(stepIndex > previousStep, true, `LINE disclosure step is missing or out of order: ${step}`);
@@ -84,12 +84,12 @@ test("settings renders actionable loading, disconnected, active, reconnect, and 
   const source = await readFile(new URL("../src/components/SettingsPanel.js", import.meta.url), "utf8");
   const lifecycleSource = await readFile(new URL("../src/lib/platform-connections/settings-platform-lifecycle.js", import.meta.url), "utf8");
 
-  for (const expected of ["Loading publishing connections", "Not connected", "Connected", "Reconnect", "Change Page", "Try again", "Channel ID", "Channel Secret"]) {
+  for (const expected of ["正在載入發布平台連線", "尚未連線", "已連線", "重新連線", "更換粉絲專頁", "重試", "Channel ID", "Channel Secret"]) {
     assert.equal(source.includes(expected), true, `missing ${expected}`);
   }
   assert.equal(source.includes("setLineCredentials({ channelId: \"\", channelSecret: \"\" })"), true);
   assert.equal(source.includes("response.status === 409"), true);
-  assert.equal(lifecycleSource.includes("Cancel or wait for pending posts"), true);
+  assert.equal(lifecycleSource.includes("請取消待發布貼文"), true);
   assert.equal(source.includes('role="status"'), true);
   assert.equal(source.includes("disconnectFeedback"), true);
   assert.equal(source.includes("platformLifecycleStatus"), true);

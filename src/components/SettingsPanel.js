@@ -28,13 +28,13 @@ export function SettingsPanel() {
     const params = new URLSearchParams(window.location.search);
     if (params.get("tab") === "publishing" || params.has("meta")) setActiveTab("publishing");
     if (params.get("meta") === "start_error") {
-      setConnectionError("Meta connection could not be started. Please try again.");
+      setConnectionError("無法開始 Meta 連線，請再試一次。");
       params.delete("meta");
       window.history.replaceState({}, "", `${window.location.pathname}?${params.toString()}`);
     }
     const transactionId = params.get("transactionId") ?? "";
     if (params.get("meta") === "select" && transactionId) loadMetaPages(transactionId);
-    if (params.get("meta") === "reconnect") setConnectionError("Meta could not be connected. Please try again.");
+    if (params.get("meta") === "reconnect") setConnectionError("無法連結 Meta，請再試一次。");
   }, []);
 
   async function loadSettings() {
@@ -59,7 +59,7 @@ export function SettingsPanel() {
       setConnectionsStatus("success");
     } catch {
       setConnectionsStatus("error");
-      setConnectionError("Publishing connections could not be loaded.");
+      setConnectionError("無法載入發布平台連線。");
     }
   }
 
@@ -94,7 +94,7 @@ export function SettingsPanel() {
       setMetaTransactionId(transactionId);
       setSelectedMetaPage(data.pages[0].id);
     } catch {
-      setConnectionError("Meta Page choices could not be loaded. Start the connection again.");
+      setConnectionError("無法載入 Meta 粉絲專頁選項，請重新開始連線。");
     } finally {
       setConnectionAction("");
     }
@@ -118,7 +118,7 @@ export function SettingsPanel() {
       window.history.replaceState({}, "", "/settings?tab=publishing");
       await loadConnections();
     } catch {
-      setConnectionError("Meta Page could not be selected. Please try again.");
+      setConnectionError("無法選擇 Meta 粉絲專頁，請再試一次。");
     } finally {
       setConnectionAction("");
     }
@@ -139,7 +139,7 @@ export function SettingsPanel() {
       setLineEditing(false);
       await loadConnections();
     } catch {
-      setConnectionError("LINE could not be connected. Check the Channel ID and Channel Secret, then try again.");
+      setConnectionError("無法連結 LINE，請檢查 Channel ID 與 Channel Secret 後再試一次。");
     } finally {
       setLineCredentials({ channelId: "", channelSecret: "" });
       setConnectionAction("");
@@ -163,7 +163,7 @@ export function SettingsPanel() {
       await loadConnections();
       setConnectionNotice(feedback.notice);
     } catch {
-      setConnectionError(`${platform === "meta" ? "Meta" : "LINE"} could not be disconnected. Please try again.`);
+      setConnectionError(`無法中斷 ${platform === "meta" ? "Meta" : "LINE"} 連線，請再試一次。`);
     } finally {
       setConnectionAction("");
     }
@@ -175,39 +175,39 @@ export function SettingsPanel() {
   return (
     <Stack gap="lg">
       <div>
-        <Title order={2}>Settings</Title>
-        <Text c="dimmed">AI keys and publishing connections are private to your signed-in account.</Text>
-        {settingsStatus === "saved" ? <Text c="green.7" size="sm" mt={4}>Settings saved.</Text> : null}
-        {settingsStatus === "load-error" || settingsStatus === "save-error" ? <Text c="red.7" size="sm" mt={4}>AI settings could not be saved. Please try again.</Text> : null}
+        <Title order={2}>系統設定</Title>
+        <Text c="dimmed">AI 金鑰與發布平台連線僅供目前登入帳號使用。</Text>
+        {settingsStatus === "saved" ? <Text c="green.7" size="sm" mt={4}>設定已儲存。</Text> : null}
+        {settingsStatus === "load-error" || settingsStatus === "save-error" ? <Text c="red.7" size="sm" mt={4}>無法儲存 AI 設定，請再試一次。</Text> : null}
       </div>
 
       <Paper withBorder radius={8} p={{ base: "md", sm: "lg" }}>
         <Tabs value={activeTab} onChange={(tab) => setActiveTab(tab ?? "ai")}>
           <Tabs.List>
             <Tabs.Tab value="ai" leftSection={<IconKey size={16} />}>AI</Tabs.Tab>
-            <Tabs.Tab value="publishing">Publishing platforms</Tabs.Tab>
+            <Tabs.Tab value="publishing">發布平台</Tabs.Tab>
           </Tabs.List>
 
           <Tabs.Panel value="ai" pt="md">
             <Stack>
               <PasswordInput label="Google AI API Key" placeholder={maskedSettings.googleAiApiKey ?? "AIza..."} value={values.googleAiApiKey ?? ""} onChange={(event) => setValues((current) => ({ ...current, googleAiApiKey: event.currentTarget.value }))} />
               <PasswordInput label="OpenAI API Key" placeholder={maskedSettings.openAiApiKey ?? "sk-..."} value={values.openAiApiKey ?? ""} onChange={(event) => setValues((current) => ({ ...current, openAiApiKey: event.currentTarget.value }))} />
-              <Button w="fit-content" loading={settingsStatus === "saving"} onClick={() => saveSettings(["googleAiApiKey", "openAiApiKey"])}>Save AI settings</Button>
+              <Button w="fit-content" loading={settingsStatus === "saving"} onClick={() => saveSettings(["googleAiApiKey", "openAiApiKey"])}>儲存 AI 設定</Button>
             </Stack>
           </Tabs.Panel>
 
           <Tabs.Panel value="publishing" pt="md">
             <Stack aria-live="polite">
-              <Text c="dimmed" size="sm">Every signed-in account connects its own publishing platforms.</Text>
-              {connectionsStatus === "loading" ? <Text c="dimmed">Loading publishing connections…</Text> : null}
-              {connectionsStatus === "error" ? <Group wrap="wrap"><Text c="red.7">{connectionError}</Text><Button variant="light" onClick={loadConnections}>Try again</Button></Group> : null}
+              <Text c="dimmed" size="sm">每個登入帳號都會連結各自的發布平台。</Text>
+              {connectionsStatus === "loading" ? <Text c="dimmed">正在載入發布平台連線…</Text> : null}
+              {connectionsStatus === "error" ? <Group wrap="wrap"><Text c="red.7">{connectionError}</Text><Button variant="light" onClick={loadConnections}>重試</Button></Group> : null}
               {connectionsStatus === "success" ? (
                 <SimpleGrid cols={{ base: 1, md: 2 }} spacing="md">
                   <ConnectionCard title="Meta" connection={metaConnection}>
                     {metaPages.length > 0 ? (
                       <Stack gap="sm">
-                        <Select label="Choose a Meta Page" data={metaPages.map((page) => ({ value: page.id, label: page.name }))} value={selectedMetaPage} onChange={(value) => setSelectedMetaPage(value ?? "")} />
-                        <Button loading={connectionAction === "meta-select"} disabled={!selectedMetaPage || Boolean(connectionAction)} onClick={selectMetaPage}>Connect selected Page</Button>
+                        <Select label="選擇 Meta 粉絲專頁" data={metaPages.map((page) => ({ value: page.id, label: page.name }))} value={selectedMetaPage} onChange={(value) => setSelectedMetaPage(value ?? "")} />
+                        <Button loading={connectionAction === "meta-select"} disabled={!selectedMetaPage || Boolean(connectionAction)} onClick={selectMetaPage}>連結所選粉絲專頁</Button>
                       </Stack>
                     ) : (
                       <Group wrap="wrap">
@@ -218,10 +218,10 @@ export function SettingsPanel() {
                         >
                           <input type="hidden" name="returnPath" value="/settings?tab=publishing" />
                           <Button type="submit" loading={connectionAction === "meta-start"} disabled={Boolean(connectionAction)}>
-                            {metaConnection.state === "active" ? "Change Page" : metaConnection.state === "needs_reconnect" ? "Reconnect" : "Connect Meta"}
+                            {metaConnection.state === "active" ? "更換粉絲專頁" : metaConnection.state === "needs_reconnect" ? "重新連線" : "連結 Meta"}
                           </Button>
                         </form>
-                        {metaConnection.state === "active" ? <Button color="red" variant="light" loading={connectionAction === "meta-disconnect"} disabled={Boolean(connectionAction)} onClick={() => disconnectPlatform("meta")}>Disconnect</Button> : null}
+                        {metaConnection.state === "active" ? <Button color="red" variant="light" loading={connectionAction === "meta-disconnect"} disabled={Boolean(connectionAction)} onClick={() => disconnectPlatform("meta")}>中斷連線</Button> : null}
                       </Group>
                     )}
                   </ConnectionCard>
@@ -230,25 +230,25 @@ export function SettingsPanel() {
                     {lineEditing ? (
                       <Stack gap="sm">
                         <details>
-                          <summary style={{ cursor: "pointer", fontWeight: 600 }}>How to get Channel ID / Channel secret</summary>
+                          <summary style={{ cursor: "pointer", fontWeight: 600 }}>如何取得 Channel ID／Channel Secret</summary>
                           <ol style={{ marginBlock: "0.75rem 0", paddingInlineStart: "1.25rem" }}>
-                            <li><Text size="sm">Sign in to <Text component="a" href="https://developers.line.biz/" target="_blank" rel="noreferrer noopener" inherit td="underline">LINE Developers Console</Text>.</Text></li>
-                            <li><Text size="sm">Select your Provider and its <strong>Messaging API</strong> Channel. If none exists, create a LINE Official Account and enable Messaging API first.</Text></li>
-                            <li><Text size="sm">Open <strong>Basic settings</strong>, then copy the <strong>Channel ID</strong> and <strong>Channel secret</strong>.</Text></li>
-                            <li><Text size="sm">Paste those two values below. Do not paste a Channel access token; this application obtains and renews it automatically.</Text></li>
+                            <li><Text size="sm">登入 <Text component="a" href="https://developers.line.biz/" target="_blank" rel="noreferrer noopener" inherit td="underline">LINE Developers Console</Text>。</Text></li>
+                            <li><Text size="sm">選擇 Provider 及其 <strong>Messaging API</strong> Channel；若尚未建立，請先建立 LINE Official Account 並啟用 Messaging API。</Text></li>
+                            <li><Text size="sm">開啟 <strong>Basic settings</strong>，複製 <strong>Channel ID</strong> 與 <strong>Channel Secret</strong>。</Text></li>
+                            <li><Text size="sm">將兩個值貼至下方。請勿貼上 Channel access token；系統會自動取得並更新。</Text></li>
                           </ol>
                         </details>
                         <TextInput label="Channel ID" value={lineCredentials.channelId} onChange={(event) => setLineCredentials((current) => ({ ...current, channelId: event.currentTarget.value }))} autoComplete="off" />
                         <PasswordInput label="Channel Secret" value={lineCredentials.channelSecret} onChange={(event) => setLineCredentials((current) => ({ ...current, channelSecret: event.currentTarget.value }))} autoComplete="new-password" />
                         <Group wrap="wrap">
-                          <Button loading={connectionAction === "line-connect"} disabled={Boolean(connectionAction) || !lineCredentials.channelId.trim() || !lineCredentials.channelSecret.trim()} onClick={connectLine}>Connect LINE</Button>
-                          <Button variant="default" disabled={Boolean(connectionAction)} onClick={() => { setLineEditing(false); setLineCredentials({ channelId: "", channelSecret: "" }); }}>Cancel</Button>
+                          <Button loading={connectionAction === "line-connect"} disabled={Boolean(connectionAction) || !lineCredentials.channelId.trim() || !lineCredentials.channelSecret.trim()} onClick={connectLine}>連結 LINE</Button>
+                          <Button variant="default" disabled={Boolean(connectionAction)} onClick={() => { setLineEditing(false); setLineCredentials({ channelId: "", channelSecret: "" }); }}>取消</Button>
                         </Group>
                       </Stack>
                     ) : (
                       <Group wrap="wrap">
-                        <Button disabled={Boolean(connectionAction)} onClick={() => setLineEditing(true)}>{lineConnection.state === "needs_reconnect" ? "Reconnect" : lineConnection.state === "active" ? "Reconnect" : "Connect LINE"}</Button>
-                        {lineConnection.state === "active" ? <Button color="red" variant="light" loading={connectionAction === "line-disconnect"} disabled={Boolean(connectionAction)} onClick={() => disconnectPlatform("line")}>Disconnect</Button> : null}
+                        <Button disabled={Boolean(connectionAction)} onClick={() => setLineEditing(true)}>{lineConnection.state === "needs_reconnect" || lineConnection.state === "active" ? "重新連線" : "連結 LINE"}</Button>
+                        {lineConnection.state === "active" ? <Button color="red" variant="light" loading={connectionAction === "line-disconnect"} disabled={Boolean(connectionAction)} onClick={() => disconnectPlatform("line")}>中斷連線</Button> : null}
                       </Group>
                     )}
                   </ConnectionCard>
@@ -276,9 +276,9 @@ function ConnectionCard({ title, connection, children }) {
         <Group justify="space-between" align="flex-start" wrap="wrap">
           <div style={{ minWidth: 0 }}>
             <Text fw={700}>{title}</Text>
-            <Text size="sm" c="dimmed" style={{ overflowWrap: "anywhere" }}>{active ? connection.displayName : reconnect ? "Connection needs attention" : "Not connected"}</Text>
+            <Text size="sm" c="dimmed" style={{ overflowWrap: "anywhere" }}>{active ? connection.displayName : reconnect ? "連線需要處理" : "尚未連線"}</Text>
           </div>
-          <Badge color={active ? "green" : reconnect ? "orange" : "gray"}>{active ? "Connected" : reconnect ? "Reconnect" : "Not connected"}</Badge>
+          <Badge color={active ? "green" : reconnect ? "orange" : "gray"}>{active ? "已連線" : reconnect ? "需要重新連線" : "尚未連線"}</Badge>
         </Group>
         {lifecycle ? <Text size="xs" c="dimmed">{lifecycle}</Text> : null}
         <div style={{ marginTop: "auto" }}>{children}</div>

@@ -8,7 +8,7 @@ import { Notifications } from "@mantine/notifications";
 
 export const metadata = {
   title: "AI Social Publisher",
-  description: "Generate, preview, schedule, and publish AI-assisted social posts.",
+  description: "使用 AI 產生、預覽、排程及發布社群貼文。",
 };
 
 export default function RootLayout({ children }) {

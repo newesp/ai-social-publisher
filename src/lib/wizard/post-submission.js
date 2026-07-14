@@ -17,13 +17,13 @@ export function buildPostSubmission({ form, targets, imageUrl = null, now = new 
   if (mode === "scheduled") {
     const scheduledTime = form.scheduledTime ?? SCHEDULE_TIME;
     if (scheduledTime !== SCHEDULE_TIME) {
-      throw new Error(`Scheduled time must be ${SCHEDULE_TIME}.`);
+      throw new Error(`排程時間必須為 ${SCHEDULE_TIME}。`);
     }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(form.scheduledDate ?? ""))) {
-      throw new Error("Choose a schedule date.");
+      throw new Error("請選擇排程日期。");
     }
     if (form.scheduledDate < taipeiDate(now)) {
-      throw new Error("Scheduled date cannot be in the past.");
+      throw new Error("排程日期不能早於今天。");
     }
     payload.scheduledDate = form.scheduledDate;
     payload.scheduledTime = scheduledTime;

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  canSelectWizardStep,
   getInitialPostForm,
   reconcileConnectedPlatforms,
+  isProductStepComplete,
   shouldGenerateOnPreviewAdvance,
 } from "../src/lib/wizard/wizard-flow.js";
 
@@ -38,11 +40,11 @@ test("generates AI content only when advancing from provider step without genera
   );
   assert.equal(
     shouldGenerateOnPreviewAdvance({
-      currentStep: 2,
+      currentStep: 0,
       nextStep: 2,
       hasGeneratedTargets: false,
     }),
-    false,
+    true,
   );
   assert.equal(
     shouldGenerateOnPreviewAdvance({
@@ -52,4 +54,30 @@ test("generates AI content only when advancing from provider step without genera
     }),
     false,
   );
+});
+
+test("requires every product field before later steps can be selected", () => {
+  const complete = {
+    ...getInitialPostForm(),
+    productName: "  新商品  ",
+    productFeatures: "  輕巧耐用  ",
+    platforms: ["meta"],
+  };
+
+  assert.equal(isProductStepComplete(complete), true);
+  assert.equal(canSelectWizardStep({ step: 1, form: complete }), true);
+  assert.equal(canSelectWizardStep({ step: 2, form: complete }), true);
+
+  for (const incomplete of [
+    { ...complete, productName: "   " },
+    { ...complete, productFeatures: "\n" },
+    { ...complete, audience: "" },
+    { ...complete, tone: null },
+    { ...complete, platforms: [] },
+  ]) {
+    assert.equal(isProductStepComplete(incomplete), false);
+    assert.equal(canSelectWizardStep({ step: 1, form: incomplete }), false);
+    assert.equal(canSelectWizardStep({ step: 2, form: incomplete }), false);
+    assert.equal(canSelectWizardStep({ step: 0, form: incomplete }), true);
+  }
 });

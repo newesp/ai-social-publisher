@@ -12,6 +12,8 @@ import {
 } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
 import { IconCalendarStats, IconLogout, IconPencilPlus, IconSettings } from "@tabler/icons-react";
+import { useEffect, useState } from "react";
+import { clearWizardDraft } from "../lib/wizard/wizard-draft-storage.js";
 
 const navItems = [
   { href: "/", label: "新增貼文", icon: IconPencilPlus, value: "create" },
@@ -21,6 +23,18 @@ const navItems = [
 
 export function AppShellFrame({ active, children }) {
   const [opened, { toggle }] = useDisclosure();
+  const [user, setUser] = useState(null);
+
+  useEffect(() => {
+    let current = true;
+    fetch("/api/auth/session")
+      .then((response) => response.json())
+      .then((session) => {
+        if (current) setUser(session?.user ?? null);
+      })
+      .catch(() => {});
+    return () => { current = false; };
+  }, []);
 
   return (
     <AppShell
@@ -42,10 +56,10 @@ export function AppShellFrame({ active, children }) {
             </div>
           </Group>
           <Group gap="sm" wrap="nowrap">
-            <Avatar color="orange" radius="xl">
-              A
+            <Avatar color="orange" radius="xl" src={user?.image} alt={user?.name ? `${user.name} 的 Google 頭像` : "Google 帳號頭像"}>
+              {getUserInitial(user)}
             </Avatar>
-            <UnstyledButton component="a" href="/api/auth/signout" title="登出">
+            <UnstyledButton component="a" href="/api/auth/signout" title="登出" onClick={() => clearWizardDraft(undefined, user?.email)}>
               <IconLogout size={20} />
             </UnstyledButton>
           </Group>
@@ -70,4 +84,8 @@ export function AppShellFrame({ active, children }) {
       <AppShell.Main>{children}</AppShell.Main>
     </AppShell>
   );
+}
+
+function getUserInitial(user) {
+  return (user?.name?.trim() || user?.email?.trim() || "A").charAt(0).toUpperCase();
 }

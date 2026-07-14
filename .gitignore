@@ -9,6 +9,8 @@ ai-social-publisher-secrets-*.json
 data/settings.json
 .worktrees/
 tests/
+!tests/
+!tests/**/*.test.js
 
 .vercel
 .env*

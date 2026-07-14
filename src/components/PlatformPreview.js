@@ -19,13 +19,13 @@ function MetaPreview({ data, content, onContentChange }) {
           <div>
             <Text fw={700}>New ESP</Text>
             <Text size="xs" c="dimmed">
-              Facebook feed preview
+              Facebook 動態消息預覽
             </Text>
           </div>
         </Group>
         <PreviewTextarea value={content} onChange={onContentChange} ariaLabel="Facebook 文案" />
         {data.preview.imageUrl ? (
-          <Image src={data.preview.imageUrl} alt="Meta preview image" radius={6} fit="cover" h={220} />
+          <Image src={data.preview.imageUrl} alt="Meta 預覽圖片" radius={6} fit="cover" h={220} />
         ) : null}
       </Stack>
     </Paper>
@@ -41,11 +41,11 @@ function InstagramPreview({ data }) {
           <div>
             <Text fw={700}>newesp.tw</Text>
             <Text size="xs" c="dimmed">
-              Instagram 1:1 feed preview
+              Instagram 1:1 動態消息預覽
             </Text>
           </div>
         </Group>
-        <Image src={data.preview.imageUrl} alt="Instagram preview image" radius={6} fit="cover" h={260} />
+        <Image src={data.preview.imageUrl} alt="Instagram 預覽圖片" radius={6} fit="cover" h={260} />
         <Text size="sm" lineClamp={6} style={{ whiteSpace: "pre-wrap" }}>
           <strong>newesp.tw</strong> {data.preview.caption}
         </Text>
@@ -63,7 +63,7 @@ function LinePreview({ data, content, onContentChange }) {
           <div>
             <Text fw={700}>New ESP 官方帳號</Text>
             <Text size="xs" c="dimmed">
-              LINE broadcast preview
+              LINE 廣播預覽
             </Text>
           </div>
         </Group>
@@ -71,7 +71,7 @@ function LinePreview({ data, content, onContentChange }) {
           <PreviewTextarea value={content} onChange={onContentChange} ariaLabel="LINE 文案" />
         </Paper>
         {data.preview.imageUrl ? (
-          <Image src={data.preview.imageUrl} alt="LINE preview image" radius={6} fit="cover" h={180} />
+          <Image src={data.preview.imageUrl} alt="LINE 預覽圖片" radius={6} fit="cover" h={180} />
         ) : null}
       </Stack>
     </Paper>

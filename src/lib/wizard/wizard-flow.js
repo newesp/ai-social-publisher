@@ -39,8 +39,23 @@ export function shouldGenerateOnPreviewAdvance({
   hasGeneratedTargets,
 }) {
   return (
-    currentStep === WIZARD_STEPS.PROVIDER &&
+    currentStep !== WIZARD_STEPS.PREVIEW &&
     nextStep === WIZARD_STEPS.PREVIEW &&
     !hasGeneratedTargets
   );
+}
+
+export function isProductStepComplete(form = {}) {
+  return Boolean(
+    form.productName?.trim() &&
+    form.productFeatures?.trim() &&
+    form.audience &&
+    form.tone &&
+    Array.isArray(form.platforms) &&
+    form.platforms.length > 0
+  );
+}
+
+export function canSelectWizardStep({ step, form }) {
+  return step === WIZARD_STEPS.PRODUCT || isProductStepComplete(form);
 }

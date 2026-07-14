@@ -33,7 +33,7 @@ test("only permits 09:00 and rejects a past Taipei schedule date", () => {
       targets: [{ platform: "meta", content: "Copy", hashtags: [] }],
       now: new Date("2026-07-11T00:00:00.000Z"),
     }),
-    /past/,
+    /不能早於今天/,
   );
   assert.equal(buildPostSubmission({
     form: { productName: "Demo", productFeatures: "Fast", mode: "scheduled", scheduledDate: "2026-07-11", scheduledTime: "09:00" },

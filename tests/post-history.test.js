@@ -23,3 +23,10 @@ test("cancels a scheduled post through its owner-scoped API endpoint", async () 
 
   assert.deepEqual(result, post);
 });
+
+test("history API fallback errors are shown in Chinese", async () => {
+  const failingFetch = async () => ({ ok: false, async json() { return {}; } });
+
+  await assert.rejects(() => loadPostHistory(failingFetch), /無法載入貼文紀錄/);
+  await assert.rejects(() => cancelScheduledPost(failingFetch, 7), /無法取消排程貼文/);
+});

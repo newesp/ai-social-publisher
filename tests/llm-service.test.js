@@ -1,7 +1,29 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { generatePlatformTargets } from "../src/lib/ai/llm-service.js";
+import { generatePlatformTargets, generateText } from "../src/lib/ai/llm-service.js";
+
+test("separates system instructions from untrusted input for both providers", async () => {
+  for (const llmProvider of ["openai", "google"]) {
+    let requestBody;
+    await generateText({
+      llmProvider,
+      settings: { openAiApiKey: "openai-key", googleAiApiKey: "google-key" },
+      systemPrompt: "Trusted instruction",
+      prompt: "Untrusted post text",
+      fetchImpl: async (_url, options) => {
+        requestBody = JSON.parse(options.body);
+        return { ok: true, json: async () => ({ output_text: "{}" }), text: async () => "" };
+      },
+    });
+
+    assert.equal(requestBody.input, "Untrusted post text");
+    assert.equal(
+      llmProvider === "openai" ? requestBody.instructions : requestBody.system_instruction,
+      "Trusted instruction",
+    );
+  }
+});
 
 test("generates active platform targets with OpenAI responses", async () => {
   const calls = [];
@@ -61,7 +83,7 @@ test("generates active platform targets with Gemini responses", async () => {
   ]);
   assert.equal(calls[0].url, "https://generativelanguage.googleapis.com/v1beta/interactions");
   assert.equal(calls[0].options.headers["x-goog-api-key"], "google-key");
-  assert.equal(JSON.parse(calls[0].options.body).model, "gemini-2.5-flash-lite");
+  assert.equal(JSON.parse(calls[0].options.body).model, "gemini-3.1-flash-lite");
 });
 
 test("uses the requested LLM model in provider requests", async () => {

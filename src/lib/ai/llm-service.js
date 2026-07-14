@@ -13,10 +13,13 @@ export async function generatePlatformTargets({
 
   for (const platform of platforms) {
     const prompt = buildPlatformPrompt(platform, input);
-    const content =
-      llmProvider === "openai"
-        ? await generateWithOpenAI(prompt, llmModel, settings, fetchImpl)
-        : await generateWithGemini(prompt, llmModel, settings, fetchImpl);
+    const content = await generateText({
+      llmProvider,
+      llmModel,
+      settings,
+      prompt,
+      fetchImpl,
+    });
 
     targets.push({
       platform,
@@ -26,6 +29,19 @@ export async function generatePlatformTargets({
   }
 
   return targets;
+}
+
+export function generateText({
+  llmProvider = "google",
+  llmModel,
+  settings,
+  systemPrompt,
+  prompt,
+  fetchImpl = fetch,
+}) {
+  return llmProvider === "openai"
+    ? generateWithOpenAI(prompt, llmModel, settings, fetchImpl, systemPrompt)
+    : generateWithGemini(prompt, llmModel, settings, fetchImpl, systemPrompt);
 }
 
 export function buildPlatformPrompt(platform, input) {
@@ -43,7 +59,7 @@ export function buildPlatformPrompt(platform, input) {
   ].join("\n");
 }
 
-async function generateWithOpenAI(prompt, llmModel, settings, fetchImpl) {
+async function generateWithOpenAI(prompt, llmModel, settings, fetchImpl, systemPrompt) {
   if (!settings.openAiApiKey) {
     throw new Error("OPENAI_API_KEY is required.");
   }
@@ -57,6 +73,7 @@ async function generateWithOpenAI(prompt, llmModel, settings, fetchImpl) {
       },
       body: JSON.stringify({
         model: getLLMModel("openai", llmModel),
+        ...(systemPrompt ? { instructions: systemPrompt } : {}),
         input: prompt,
       }),
     }),
@@ -66,7 +83,7 @@ async function generateWithOpenAI(prompt, llmModel, settings, fetchImpl) {
   return extractOpenAIText(body);
 }
 
-async function generateWithGemini(prompt, llmModel, settings, fetchImpl) {
+async function generateWithGemini(prompt, llmModel, settings, fetchImpl, systemPrompt) {
   if (!settings.googleAiApiKey) {
     throw new Error("GOOGLE_AI_API_KEY is required.");
   }
@@ -81,6 +98,7 @@ async function generateWithGemini(prompt, llmModel, settings, fetchImpl) {
       },
       body: JSON.stringify({
         model,
+        ...(systemPrompt ? { system_instruction: systemPrompt } : {}),
         input: prompt,
       }),
     }),

@@ -53,7 +53,7 @@ test("restores remembered Gemini models in the initial wizard form", () => {
 test("uses configured defaults when a provider has no remembered model", () => {
   const form = getInitialPostForm();
 
-  assert.equal(form.llmModel, "gemini-2.5-flash-lite");
+  assert.equal(form.llmModel, "gemini-3.1-flash-lite");
   assert.equal(form.imageModel, "gemini-3.1-flash-lite-image");
 });
 

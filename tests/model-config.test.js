@@ -10,8 +10,8 @@ import {
   getImageModel,
 } from "../src/lib/ai/model-config.js";
 
-test("uses gemini-2.5-flash-lite as the default Google text model", () => {
-  assert.equal(getLLMModel("google"), "gemini-2.5-flash-lite");
+test("uses gemini-3.1-flash-lite as the default Google text model", () => {
+  assert.equal(getLLMModel("google"), "gemini-3.1-flash-lite");
 });
 
 test("uses gemini-3.1-flash-lite-image as the default Google image model", () => {
@@ -30,10 +30,10 @@ test("keeps legacy image models out of the primary provider list", () => {
 
 test("exposes the supported model options for each provider", () => {
   assert.deepEqual(getLLMModelOptions("google"), [
-    "gemini-2.5-flash-lite",
     "gemini-3.1-flash-lite",
     "gemini-3.5-flash",
   ]);
+  assert.ok(!getLLMModelOptions("google").includes("gemini-2.5-flash-lite"));
   assert.deepEqual(getImageModelOptions("google"), [
     "gemini-3.1-flash-lite-image",
     "gemini-3.1-flash-image",
