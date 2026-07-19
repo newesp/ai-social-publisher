@@ -364,7 +364,6 @@ test("LINE connect retains the connection and returns a safe retry state when we
 
   assert.equal(response.status, 201);
   assert.deepEqual(calls, [
-    ["disable", "owner@example.com", "connection-1", false],
     ["readiness", "owner@example.com", "connection-1"],
   ]);
   assert.deepEqual(body, {
@@ -380,6 +379,82 @@ test("LINE connect retains the connection and returns a safe retry state when we
   assert.equal(JSON.stringify(body).includes("private LINE provider body"), false);
   assert.equal(JSON.stringify(body).includes("line-access-token"), false);
   assert.equal(JSON.stringify(body).includes("connection-1"), false);
+});
+
+test("LINE connect does not disable a newer webhook attempt when provisioning is already in flight", async () => {
+  let disableCalls = 0;
+  const handlers = createPlatformConnectionRouteHandlers({
+    requireOwner: async () => "owner@example.com",
+    getServices: async () => ({
+      line: {
+        async connect() {
+          return {
+            platform: "line",
+            state: "active",
+            displayName: "Owner OA",
+            expiresAt: null,
+          };
+        },
+      },
+      connections: {
+        async getDefault() {
+          return {
+            id: "connection-1",
+            platform: "line",
+            state: "active",
+          };
+        },
+      },
+      onboarding: {
+        async provisionLineWebhook() {
+          const error = new Error("LINE support setup is already in progress.");
+          error.status = 409;
+          error.setupRetryable = true;
+          throw error;
+        },
+        async setSupportEnabled() {
+          disableCalls += 1;
+        },
+        async getReadiness() {
+          return {
+            status: "needs_attention",
+            ready: false,
+            supportEnabled: false,
+            state: "disabled",
+            connection: { connected: true, active: true, displayName: "Owner OA" },
+            checks: {
+              lineActive: true,
+              providerConfigured: false,
+              providerTested: false,
+              enabledFaq: false,
+              webhookVerified: false,
+              redeliveryAcknowledged: false,
+              nativeRepliesDisabledAcknowledged: false,
+            },
+          };
+        },
+      },
+    }),
+  });
+
+  const response = await handlers.connectLine(new Request(
+    "https://publisher.example/api/platform-connections/line",
+    {
+      method: "POST",
+      headers: {
+        origin: "https://publisher.example",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        channelId: "channel-id",
+        channelSecret: "channel-secret",
+      }),
+    },
+  ));
+
+  assert.equal(response.status, 201);
+  assert.equal(disableCalls, 0);
+  assert.equal((await response.json()).supportSetup.status, "retryable");
 });
 
 test("LINE connect rejects cross-origin requests before initializing platform stores", async () => {

@@ -10,7 +10,10 @@ test("configuration and FAQ handlers pass only the authenticated owner to lazy s
   const calls = [];
   const store = {
     async getConfiguration(owner) { calls.push(["getConfiguration", owner]); return { brandName: "Acme" }; },
-    async updateConfiguration(owner, body) { calls.push(["updateConfiguration", owner, body]); return { brandName: body.brandName }; },
+    async updateConfigurationForActiveDefault(owner, body) {
+      calls.push(["updateConfigurationForActiveDefault", owner, body]);
+      return { brandName: body.brandName };
+    },
     async listFaqs(owner) { calls.push(["listFaqs", owner]); return []; },
     async createFaq(owner, body) { calls.push(["createFaq", owner, body]); return { id: "faq-1", ...body }; },
     async updateFaq(owner, id, body) { calls.push(["updateFaq", owner, id, body]); return { id, ...body }; },
@@ -32,12 +35,76 @@ test("configuration and FAQ handlers pass only the authenticated owner to lazy s
   assert.equal(deleted.status, 204);
   assert.deepEqual(calls, [
     ["store"], ["getConfiguration", "owner@example.com"],
-    ["origin"], ["store"], ["updateConfiguration", "owner@example.com", { brandName: "Updated" }],
+    ["origin"], ["store"], ["updateConfigurationForActiveDefault", "owner@example.com", { brandName: "Updated" }],
     ["store"], ["listFaqs", "owner@example.com"],
     ["origin"], ["store"], ["createFaq", "owner@example.com", { question: "Q", answer: "A" }],
     ["origin"], ["store"], ["updateFaq", "owner@example.com", "faq-1", { answer: "Updated" }],
     ["origin"], ["store"], ["deleteFaq", "owner@example.com", "faq-1"],
   ]);
+});
+
+test("configuration responses and writes use only the browser allowlist", async () => {
+  const writes = [];
+  const internalConfiguration = {
+    id: "configuration-1",
+    ownerEmail: "owner@example.com",
+    platformConnectionId: "connection-1",
+    brandName: "Acme",
+    assistantName: "Ada",
+    replyTone: "friendly",
+    llmProvider: "google",
+    llmModel: "gemini-3.1-flash-lite",
+    redeliveryAcknowledged: true,
+    nativeRepliesDisabledAcknowledged: true,
+    supportState: "enabled",
+    webhookVerified: true,
+    providerTested: true,
+    webhookKeyHash: "private-hash",
+    version: 7,
+    createdAt: new Date("2026-07-19T00:00:00.000Z"),
+    updatedAt: new Date("2026-07-19T00:00:00.000Z"),
+  };
+  const browserInput = {
+    brandName: "Updated",
+    assistantName: "Ada",
+    replyTone: "professional",
+    llmProvider: "openai",
+    llmModel: "gpt-4o",
+    redeliveryAcknowledged: true,
+    nativeRepliesDisabledAcknowledged: true,
+  };
+  const handlers = createSupportSettingsRouteHandlers({
+    requireOwner: async () => "owner@example.com",
+    requireSameOrigin: () => {},
+    getStore: async () => ({
+      async getConfiguration() {
+        return internalConfiguration;
+      },
+      async updateConfigurationForActiveDefault(owner, input) {
+        writes.push([owner, input]);
+        return { ...internalConfiguration, ...input };
+      },
+    }),
+  });
+
+  const loaded = await handlers.getConfiguration();
+  assert.deepEqual(await loaded.json(), {
+    configuration: {
+      brandName: "Acme",
+      assistantName: "Ada",
+      replyTone: "friendly",
+      llmProvider: "google",
+      llmModel: "gemini-3.1-flash-lite",
+      redeliveryAcknowledged: true,
+      nativeRepliesDisabledAcknowledged: true,
+    },
+  });
+
+  const updated = await handlers.updateConfiguration(jsonRequest("PUT", browserInput));
+  assert.deepEqual(await updated.json(), {
+    configuration: browserInput,
+  });
+  assert.deepEqual(writes, [["owner@example.com", browserInput]]);
 });
 
 test("every mutation rejects cross-origin requests before lazy store initialization", async () => {

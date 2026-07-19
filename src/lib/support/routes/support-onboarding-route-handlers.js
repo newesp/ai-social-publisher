@@ -36,16 +36,11 @@ export function createSupportOnboardingRouteHandlers({
         });
       } catch (error) {
         if (!error?.setupRetryable) throw error;
-        try {
-          await onboarding.setSupportEnabled(ownerEmail, connection.id, false);
-        } catch {
-          // Provisioning already disables support; this is a defensive best effort.
-        }
         const readiness = await onboarding.getReadiness(ownerEmail, connection.id);
         return respond({
           setup: { status: "retryable", retryable: true },
           readiness: toSafeSupportReadiness(readiness),
-        }, { status: 502 });
+        }, { status: error?.status === 409 ? 409 : 502 });
       }
     },
 

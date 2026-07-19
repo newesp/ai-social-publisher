@@ -149,6 +149,9 @@ test("settings adds the approved 客服 tab without exposing an arbitrary system
   assert.equal(supportSource.includes("system prompt"), false);
   assert.equal(supportSource.includes("LLM_MODEL_OPTIONS"), true);
   assert.equal(supportSource.includes('"gemini-3.5-flash"'), false);
+  assert.equal(supportSource.includes("platformConnectionId"), false);
+  assert.equal(supportSource.includes("JSON.stringify(form)"), false);
+  assert.equal(supportSource.includes("writableConfiguration(form)"), true);
   assert.equal(supportSource.includes("自訂提示詞"), false);
 });
 
@@ -213,6 +216,16 @@ test("FAQ manager implements explicit CRUD, filtering, and safe loading/error/em
   }
   assert.equal(source.includes("response.status === 204"), true);
   assert.equal(source.includes("window.confirm"), true);
+});
+
+test("FAQ manager announces its initial load error to assistive technology", async () => {
+  const source = await readFile(
+    new URL("../src/components/support/FaqManager.js", import.meta.url),
+    "utf8",
+  );
+  const loadErrorBranch = source.match(/\{status === "error"[\s\S]*?\) : null\}/)?.[0] ?? "";
+
+  assert.match(loadErrorBranch, /<Group[^>]*role="alert"[^>]*aria-live="assertive"/);
 });
 
 test("support settings use structural narrow-screen wrapping without page-level horizontal overflow", async () => {

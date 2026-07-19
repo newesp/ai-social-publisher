@@ -1,13 +1,33 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, exists, sql } from "drizzle-orm";
 
+import { getLLMModelOptions } from "../ai/model-config.js";
 import { createDbClient } from "../db/index.js";
-import { platformConnections, supportConfigurations, supportFaqs } from "../db/schema.js";
+import {
+  platformConnections,
+  supportConfigurations,
+  supportFaqs,
+  userSettings,
+} from "../db/schema.js";
 import { normalizeEmail } from "../auth/policy.js";
+import { decryptJson } from "../settings/credential-crypto.js";
 
-export function createSupportRepository(db = createDbClient()) {
+const PROVIDER_KEY_BY_NAME = Object.freeze({
+  google: "googleAiApiKey",
+  openai: "openAiApiKey",
+});
+
+export function createSupportRepository(db = createDbClient(), {
+  encryptionKey,
+  decryptSettings = (encryptedSettings) => decryptJson(encryptedSettings, encryptionKey),
+  modelOptions = getLLMModelOptions,
+} = {}) {
   return {
     async findOwnedLineConnection(ownerEmail, connectionId) {
       return findOwnedLineConnection(db, normalizeOwner(ownerEmail), connectionId);
+    },
+
+    async findActiveLineConnection(ownerEmail) {
+      return findActiveLineConnection(db, normalizeOwner(ownerEmail));
     },
 
     async getConfiguration(ownerEmail) {
@@ -28,10 +48,15 @@ export function createSupportRepository(db = createDbClient()) {
       return created;
     },
 
-    async updateConfiguration(ownerEmail, id, changes, { expectedVersion } = {}) {
+    async updateConfiguration(ownerEmail, id, changes, {
+      expectedVersion,
+      expectedWebhookKeyHash,
+    } = {}) {
       const owner = normalizeOwner(ownerEmail);
       if (expectedVersion != null
         && (!Number.isInteger(expectedVersion) || expectedVersion < 0)) return null;
+      if (expectedWebhookKeyHash != null
+        && (typeof expectedWebhookKeyHash !== "string" || !expectedWebhookKeyHash)) return null;
       const safeChanges = pickChanges(changes, [
         "platformConnectionId", "brandName", "assistantName", "replyTone", "llmProvider", "llmModel",
         "supportState", "webhookKeyHash", "webhookVerifiedAt", "redeliveryAcknowledgedAt",
@@ -46,10 +71,78 @@ export function createSupportRepository(db = createDbClient()) {
       if (expectedVersion != null) {
         predicates.push(eq(supportConfigurations.version, expectedVersion));
       }
+      if (expectedWebhookKeyHash != null) {
+        predicates.push(eq(supportConfigurations.webhookKeyHash, expectedWebhookKeyHash));
+      }
       const [updated] = await db.update(supportConfigurations).set(safeChanges)
         .where(and(...predicates))
         .returning();
       return updated ?? null;
+    },
+
+    async enableConfigurationIfReady(ownerEmail, connectionId, now) {
+      const owner = normalizeOwner(ownerEmail);
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const [[configuration], [connection], [storedSettings], [enabledFaq]] = await Promise.all([
+          db.select().from(supportConfigurations).where(and(
+            eq(supportConfigurations.ownerEmail, owner),
+            eq(supportConfigurations.platformConnectionId, connectionId),
+          )).limit(1),
+          db.select({ id: platformConnections.id }).from(platformConnections).where(and(
+            eq(platformConnections.id, connectionId),
+            eq(platformConnections.ownerEmail, owner),
+            eq(platformConnections.platform, "line"),
+            eq(platformConnections.state, "active"),
+          )).limit(1),
+          db.select({
+            encryptedSettings: userSettings.encryptedSettings,
+          }).from(userSettings).where(eq(userSettings.ownerEmail, owner)).limit(1),
+          db.select({ id: supportFaqs.id }).from(supportFaqs).where(and(
+            eq(supportFaqs.ownerEmail, owner),
+            eq(supportFaqs.enabled, true),
+          )).limit(1),
+        ]);
+        if (!configuration || !connection || !storedSettings || !enabledFaq
+          || !hasPersistedReadiness(configuration)) return null;
+
+        let settings;
+        try {
+          settings = await decryptSettings(storedSettings.encryptedSettings);
+        } catch {
+          return null;
+        }
+        if (!hasConfiguredProvider(configuration, settings, modelOptions)) return null;
+
+        const settingsUnchanged = db.select({ one: sql`1` }).from(userSettings).where(and(
+          eq(userSettings.ownerEmail, owner),
+          eq(userSettings.encryptedSettings, storedSettings.encryptedSettings),
+        ));
+        const lineStillActive = db.select({ one: sql`1` }).from(platformConnections).where(and(
+          eq(platformConnections.id, connectionId),
+          eq(platformConnections.ownerEmail, owner),
+          eq(platformConnections.platform, "line"),
+          eq(platformConnections.state, "active"),
+        ));
+        const faqStillEnabled = db.select({ one: sql`1` }).from(supportFaqs).where(and(
+          eq(supportFaqs.ownerEmail, owner),
+          eq(supportFaqs.enabled, true),
+        ));
+        const updated = await retryBusyOperation(() => db.update(supportConfigurations).set({
+          supportState: "enabled",
+          version: configuration.version + 1,
+          updatedAt: now,
+        }).where(and(
+          eq(supportConfigurations.id, configuration.id),
+          eq(supportConfigurations.ownerEmail, owner),
+          eq(supportConfigurations.platformConnectionId, connectionId),
+          eq(supportConfigurations.version, configuration.version),
+          exists(settingsUnchanged),
+          exists(lineStillActive),
+          exists(faqStillEnabled),
+        )).returning());
+        if (updated[0]) return updated[0];
+      }
+      return null;
     },
 
     async listFaqs(ownerEmail) {
@@ -87,6 +180,42 @@ export function createSupportRepository(db = createDbClient()) {
   };
 }
 
+function hasPersistedReadiness(configuration) {
+  return Boolean(
+    configuration.webhookVerifiedAt
+    && configuration.redeliveryAcknowledgedAt
+    && configuration.nativeRepliesDisabledAcknowledgedAt,
+  );
+}
+
+function hasConfiguredProvider(configuration, settings, modelOptions) {
+  const provider = configuration?.llmProvider;
+  const model = configuration?.llmModel;
+  const keyName = PROVIDER_KEY_BY_NAME[provider];
+  const models = provider
+    ? (typeof modelOptions === "function" ? modelOptions(provider) : modelOptions?.[provider])
+    : [];
+  return Boolean(
+    keyName
+    && typeof model === "string"
+    && Array.isArray(models)
+    && models.includes(model)
+    && typeof settings?.[keyName] === "string"
+    && settings[keyName].trim(),
+  );
+}
+
+async function retryBusyOperation(operation, attempts = 8) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!String(error?.code ?? "").startsWith("SQLITE_BUSY") || attempt === attempts - 1) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 10 * (attempt + 1)));
+    }
+  }
+}
+
 async function findOwnedLineConnection(db, ownerEmail, connectionId) {
   const [record] = await db.select({
     id: platformConnections.id,
@@ -96,6 +225,20 @@ async function findOwnedLineConnection(db, ownerEmail, connectionId) {
   }).from(platformConnections).where(and(
     eq(platformConnections.ownerEmail, ownerEmail),
     eq(platformConnections.id, connectionId),
+    eq(platformConnections.platform, "line"),
+    eq(platformConnections.state, "active"),
+  )).limit(1);
+  return record ?? null;
+}
+
+async function findActiveLineConnection(db, ownerEmail) {
+  const [record] = await db.select({
+    id: platformConnections.id,
+    ownerEmail: platformConnections.ownerEmail,
+    platform: platformConnections.platform,
+    state: platformConnections.state,
+  }).from(platformConnections).where(and(
+    eq(platformConnections.ownerEmail, ownerEmail),
     eq(platformConnections.platform, "line"),
     eq(platformConnections.state, "active"),
   )).limit(1);

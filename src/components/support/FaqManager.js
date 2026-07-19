@@ -192,7 +192,7 @@ export function FaqManager({ onChanged }) {
             />
             {status === "loading" ? <Text c="dimmed">載入 FAQ 中…</Text> : null}
             {status === "error" ? (
-              <Group wrap="wrap">
+              <Group wrap="wrap" role="alert" aria-live="assertive">
                 <Text c="red.7">{error}</Text>
                 <Button variant="light" onClick={loadFaqs}>重新載入</Button>
               </Group>

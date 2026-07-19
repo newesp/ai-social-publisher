@@ -97,6 +97,82 @@ test("an inactive or unreachable configured webhook remains a safe needs-action 
   assert.equal(JSON.stringify(result).includes("line-access-token"), false);
 });
 
+test("concurrent webhook provisioning for one owner and connection is single-flight", async () => {
+  let configureCalls = 0;
+  let releaseFirst;
+  let markFirstStarted;
+  const firstStarted = new Promise((resolve) => {
+    markFirstStarted = resolve;
+  });
+  const firstPending = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  const harness = createHarness({
+    webhookProvisionFlights: new Map(),
+    lineAdapter: {
+      async configureWebhook() {
+        configureCalls += 1;
+        if (configureCalls === 1) {
+          markFirstStarted();
+          await firstPending;
+        }
+      },
+    },
+  });
+
+  const first = harness.service.provisionLineWebhook(OWNER, CONNECTION_ID);
+  await firstStarted;
+  try {
+    await assert.rejects(
+      harness.service.provisionLineWebhook(OWNER, CONNECTION_ID),
+      (error) => error.status === 409
+        && error.setupRetryable === true
+        && error.message === "LINE support setup is already in progress.",
+    );
+  } finally {
+    releaseFirst();
+  }
+  await first;
+  assert.equal(configureCalls, 1);
+  assert.deepEqual(harness.providerCalls.map(({ operation }) => operation), ["test", "status"]);
+  await harness.service.provisionLineWebhook(OWNER, CONNECTION_ID);
+  assert.equal(configureCalls, 2);
+});
+
+test("webhook provisioning single-flight is shared across service instances", async () => {
+  let releaseFirst;
+  let markFirstStarted;
+  const firstStarted = new Promise((resolve) => {
+    markFirstStarted = resolve;
+  });
+  const firstPending = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  const firstHarness = createHarness({
+    lineAdapter: {
+      async configureWebhook() {
+        markFirstStarted();
+        await firstPending;
+      },
+    },
+  });
+  const secondHarness = createHarness();
+
+  const first = firstHarness.service.provisionLineWebhook(OWNER, CONNECTION_ID);
+  await firstStarted;
+  try {
+    await assert.rejects(
+      secondHarness.service.provisionLineWebhook(OWNER, CONNECTION_ID),
+      (error) => error.status === 409
+        && error.message === "LINE support setup is already in progress.",
+    );
+  } finally {
+    releaseFirst();
+  }
+  await first;
+  assert.deepEqual(secondHarness.providerCalls, []);
+});
+
 test("readiness is static and does not call LINE or the AI provider on page load", async () => {
   let lineCalls = 0;
   let generationCalls = 0;
@@ -287,45 +363,46 @@ test("support can be enabled only when every required static readiness check pas
   assert.equal(harness.configuration.supportState, "disabled");
 });
 
-test("a stale readiness snapshot cannot re-enable support after configuration changes", async () => {
-  let releaseSettings;
-  let markSettingsRead;
-  let observedExpectedVersion;
-  const settingsRead = new Promise((resolve) => {
-    markSettingsRead = resolve;
-  });
-  const settingsPending = new Promise((resolve) => {
-    releaseSettings = resolve;
-  });
+test("support enable invokes the repository-backed mutation gate before readiness diagnostics", async () => {
+  const calls = [];
   const harness = createHarness({
     settingsStore: {
       async read() {
-        markSettingsRead();
-        await settingsPending;
+        calls.push("settings-read");
         return { googleAiApiKey: "google-secret" };
       },
     },
   });
-  harness.configuration.version = 7;
   harness.configuration.webhookVerified = true;
-  harness.supportStore.setSupportState = async (_ownerEmail, _connectionId, _state, options) => {
-    observedExpectedVersion = options?.expectedVersion;
-    if (observedExpectedVersion !== harness.configuration.version) {
-      const error = new Error("Support configuration changed. Refresh readiness and try again.");
-      error.status = 409;
-      throw error;
-    }
+  harness.supportStore.enableIfReady = async () => {
+    calls.push("atomic-enable");
     harness.configuration.supportState = "enabled";
+    harness.configuration.version += 1;
+    return { ...harness.configuration };
   };
 
-  const enabling = harness.service.setSupportEnabled(OWNER, CONNECTION_ID, true);
-  await settingsRead;
-  harness.configuration.version = 8;
-  harness.configuration.supportState = "disabled";
-  releaseSettings();
+  const result = await harness.service.setSupportEnabled(OWNER, CONNECTION_ID, true);
 
-  await assert.rejects(enabling, (error) => error.status === 409);
-  assert.equal(observedExpectedVersion, 7);
+  assert.equal(result.supportEnabled, true);
+  assert.equal(harness.configuration.supportState, "enabled");
+  assert.deepEqual(calls, ["atomic-enable", "settings-read"]);
+});
+
+test("an authoritative gate rejection cannot be bypassed by a ready diagnostic snapshot", async () => {
+  const harness = createHarness();
+  harness.configuration.webhookVerified = true;
+  harness.supportStore.enableIfReady = async () => {
+    const error = new Error("AI support is not ready to be enabled.");
+    error.status = 409;
+    throw error;
+  };
+
+  await assert.rejects(
+    harness.service.setSupportEnabled(OWNER, CONNECTION_ID, true),
+    (error) => error.status === 409
+      && error.message === "AI support is not ready to be enabled."
+      && error.readiness?.ready === true,
+  );
   assert.equal(harness.configuration.supportState, "disabled");
 });
 
@@ -413,11 +490,20 @@ function createHarness(overrides = {}) {
       configuration.supportState = "disabled";
       return { ...configuration };
     },
-    async recordWebhookVerification(ownerEmail, connectionId, verified) {
+    async recordWebhookVerification(ownerEmail, connectionId, verified, options = {}) {
       assert.equal(ownerEmail, OWNER);
       assert.equal(connectionId, CONNECTION_ID);
+      if (
+        options.expectedVersion !== configuration.version
+        || options.expectedWebhookKeyHash !== configuration.webhookKeyHash
+      ) {
+        const error = new Error("Support configuration changed. Refresh readiness and try again.");
+        error.status = 409;
+        throw error;
+      }
       configuration.webhookVerified = verified;
       if (!verified) configuration.supportState = "disabled";
+      configuration.version += 1;
       return { ...configuration };
     },
     async recordProviderTest(ownerEmail, connectionId, tested, options = {}) {
@@ -430,6 +516,32 @@ function createHarness(overrides = {}) {
       }
       configuration.providerTested = tested;
       if (!tested) configuration.supportState = "disabled";
+      configuration.version += 1;
+      return { ...configuration };
+    },
+    async enableIfReady(ownerEmail, connectionId) {
+      assert.equal(ownerEmail, OWNER);
+      assert.equal(connectionId, CONNECTION_ID);
+      const currentConnection = await connections.getById(ownerEmail, connectionId);
+      const currentSettings = await settingsStore.read(ownerEmail);
+      const providerKey = configuration.llmProvider === "google"
+        ? currentSettings.googleAiApiKey
+        : currentSettings.openAiApiKey;
+      if (
+        currentConnection?.platform !== "line"
+        || currentConnection?.state !== "active"
+        || typeof providerKey !== "string"
+        || !providerKey.trim()
+        || !faqs.some((faq) => faq.enabled)
+        || configuration.webhookVerified !== true
+        || configuration.redeliveryAcknowledged !== true
+        || configuration.nativeRepliesDisabledAcknowledged !== true
+      ) {
+        const error = new Error("AI support is not ready to be enabled.");
+        error.status = 409;
+        throw error;
+      }
+      configuration.supportState = "enabled";
       configuration.version += 1;
       return { ...configuration };
     },
@@ -487,6 +599,7 @@ function createHarness(overrides = {}) {
     env: overrides.env ?? { NEXTAUTH_URL: "https://app.example" },
     providerTestTimeoutMs: overrides.providerTestTimeoutMs,
     providerTestFlights: overrides.providerTestFlights,
+    webhookProvisionFlights: overrides.webhookProvisionFlights,
     randomBytes: (size) => {
       assert.equal(size, 32);
       return FIXED_RANDOM_BYTES;

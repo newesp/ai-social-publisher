@@ -10,7 +10,9 @@ export function createSupportSettingsRouteHandlers({
     async getConfiguration() {
       const ownerEmail = await requireOwner();
       const supportStore = await getStore();
-      return respond({ configuration: await supportStore.getConfiguration(ownerEmail) });
+      return respond({
+        configuration: toBrowserConfiguration(await supportStore.getConfiguration(ownerEmail)),
+      });
     },
 
     async updateConfiguration(request) {
@@ -18,7 +20,11 @@ export function createSupportSettingsRouteHandlers({
       requireSameOrigin(request);
       const supportStore = await getStore();
       const input = await jsonBody(request);
-      return respond({ configuration: await supportStore.updateConfiguration(ownerEmail, input) });
+      return respond({
+        configuration: toBrowserConfiguration(
+          await supportStore.updateConfigurationForActiveDefault(ownerEmail, input),
+        ),
+      });
     },
 
     async listFaqs() {
@@ -50,6 +56,19 @@ export function createSupportSettingsRouteHandlers({
       await supportStore.deleteFaq(ownerEmail, id);
       return empty({ status: 204 });
     },
+  };
+}
+
+function toBrowserConfiguration(value) {
+  if (!value) return null;
+  return {
+    brandName: typeof value.brandName === "string" ? value.brandName : "",
+    assistantName: typeof value.assistantName === "string" ? value.assistantName : "",
+    replyTone: typeof value.replyTone === "string" ? value.replyTone : "friendly",
+    llmProvider: typeof value.llmProvider === "string" ? value.llmProvider : null,
+    llmModel: typeof value.llmModel === "string" ? value.llmModel : null,
+    redeliveryAcknowledged: value.redeliveryAcknowledged === true,
+    nativeRepliesDisabledAcknowledged: value.nativeRepliesDisabledAcknowledged === true,
   };
 }
 

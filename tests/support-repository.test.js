@@ -6,12 +6,21 @@ import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { createClient } from "@libsql/client";
+import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/libsql";
 
-import { platformConnections } from "../src/lib/db/schema.js";
+import {
+  platformConnections,
+  supportConfigurations,
+  supportFaqs,
+  userSettings,
+} from "../src/lib/db/schema.js";
+import { decryptJson, encryptJson } from "../src/lib/settings/credential-crypto.js";
 import { createSupportRepository } from "../src/lib/support/support-repository.js";
 
 const NOW = new Date("2026-07-19T00:00:00.000Z");
+const LATER = new Date("2026-07-19T00:01:00.000Z");
+const SETTINGS_ENCRYPTION_KEY = "support-repository-test-key";
 
 test("configuration lookups and mutations stay scoped to the normalized owner", async () => {
   await withDatabase(async (db) => {
@@ -110,12 +119,182 @@ test("FAQ mutations require both normalized owner and FAQ id", async () => {
   });
 });
 
+test("webhook verification writes require the prepared version and key hash", async () => {
+  await withDatabase(async (db) => {
+    const repository = createSupportRepository(db);
+    await db.insert(platformConnections).values(
+      connection("11111111-1111-4111-8111-111111111111", "owner@example.com"),
+    );
+    await repository.createConfiguration("owner@example.com", configurationRecord());
+
+    assert.equal(
+      await repository.updateConfiguration(
+        "owner@example.com",
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        { webhookVerifiedAt: LATER, version: 1 },
+        { expectedVersion: 0, expectedWebhookKeyHash: "wrong-hash" },
+      ),
+      null,
+    );
+    const updated = await repository.updateConfiguration(
+      "owner@example.com",
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      { webhookVerifiedAt: LATER, version: 1 },
+      { expectedVersion: 0, expectedWebhookKeyHash: "secret-hash" },
+    );
+    assert.equal(updated.webhookVerifiedAt.toISOString(), LATER.toISOString());
+    assert.equal(updated.version, 1);
+  });
+});
+
+test("atomic enable rejects an FAQ disabled after its readiness snapshot", async () => {
+  await withDatabase(async (db, { createSecondaryDb }) => {
+    await seedReadySupport(db);
+    const interleaving = createDecryptInterleaving();
+    const repository = createSupportRepository(db, {
+      encryptionKey: SETTINGS_ENCRYPTION_KEY,
+      decryptSettings: interleaving.decrypt,
+    });
+
+    const enabling = repository.enableConfigurationIfReady(
+      "owner@example.com",
+      "11111111-1111-4111-8111-111111111111",
+      LATER,
+    );
+    await interleaving.started;
+    const secondaryDb = await createSecondaryDb();
+    await secondaryDb.update(supportFaqs).set({ enabled: false, updatedAt: LATER })
+      .where(eq(supportFaqs.id, "ffffffff-ffff-4fff-8fff-ffffffffffff"));
+    interleaving.release();
+
+    assert.equal(await enabling, null);
+    assert.equal((await repository.getConfiguration("owner@example.com")).supportState, "disabled");
+  });
+});
+
+test("atomic enable rejects a provider key removed after its readiness snapshot", async () => {
+  await withDatabase(async (db, { createSecondaryDb }) => {
+    await seedReadySupport(db);
+    const interleaving = createDecryptInterleaving();
+    const repository = createSupportRepository(db, {
+      encryptionKey: SETTINGS_ENCRYPTION_KEY,
+      decryptSettings: interleaving.decrypt,
+    });
+
+    const enabling = repository.enableConfigurationIfReady(
+      "owner@example.com",
+      "11111111-1111-4111-8111-111111111111",
+      LATER,
+    );
+    await interleaving.started;
+    const secondaryDb = await createSecondaryDb();
+    await secondaryDb.update(userSettings).set({
+      encryptedSettings: encryptJson({}, SETTINGS_ENCRYPTION_KEY),
+      updatedAt: LATER,
+    }).where(eq(userSettings.ownerEmail, "owner@example.com"));
+    interleaving.release();
+
+    assert.equal(await enabling, null);
+    assert.equal((await repository.getConfiguration("owner@example.com")).supportState, "disabled");
+  });
+});
+
+test("atomic enable rejects the configured LINE connection becoming inactive after its readiness snapshot", async () => {
+  await withDatabase(async (db, { createSecondaryDb }) => {
+    await seedReadySupport(db);
+    const interleaving = createDecryptInterleaving();
+    const repository = createSupportRepository(db, {
+      encryptionKey: SETTINGS_ENCRYPTION_KEY,
+      decryptSettings: interleaving.decrypt,
+    });
+
+    const enabling = repository.enableConfigurationIfReady(
+      "owner@example.com",
+      "11111111-1111-4111-8111-111111111111",
+      LATER,
+    );
+    await interleaving.started;
+    const secondaryDb = await createSecondaryDb();
+    await secondaryDb.update(platformConnections).set({
+      state: "needs_reconnect",
+      updatedAt: LATER,
+    }).where(eq(platformConnections.id, "11111111-1111-4111-8111-111111111111"));
+    interleaving.release();
+
+    assert.equal(await enabling, null);
+    assert.equal((await repository.getConfiguration("owner@example.com")).supportState, "disabled");
+  });
+});
+
+test("atomic enable rejects replacement of the configured LINE default after its readiness snapshot", async () => {
+  await withDatabase(async (db, { createSecondaryDb }) => {
+    await seedReadySupport(db);
+    const interleaving = createDecryptInterleaving();
+    const repository = createSupportRepository(db, {
+      encryptionKey: SETTINGS_ENCRYPTION_KEY,
+      decryptSettings: interleaving.decrypt,
+    });
+
+    const enabling = repository.enableConfigurationIfReady(
+      "owner@example.com",
+      "11111111-1111-4111-8111-111111111111",
+      LATER,
+    );
+    await interleaving.started;
+    const secondaryDb = await createSecondaryDb();
+    await secondaryDb.update(platformConnections).set({
+      state: "archived",
+      updatedAt: LATER,
+    }).where(eq(platformConnections.id, "11111111-1111-4111-8111-111111111111"));
+    await secondaryDb.insert(platformConnections).values(
+      connection("22222222-2222-4222-8222-222222222222", "owner@example.com"),
+    );
+    interleaving.release();
+
+    assert.equal(await enabling, null);
+    assert.equal((await repository.getConfiguration("owner@example.com")).supportState, "disabled");
+  });
+});
+
+test("atomic enable accepts rotation to another current non-empty provider key", async () => {
+  await withDatabase(async (db, { createSecondaryDb }) => {
+    await seedReadySupport(db);
+    const interleaving = createDecryptInterleaving();
+    const repository = createSupportRepository(db, {
+      encryptionKey: SETTINGS_ENCRYPTION_KEY,
+      decryptSettings: interleaving.decrypt,
+    });
+
+    const enabling = repository.enableConfigurationIfReady(
+      "owner@example.com",
+      "11111111-1111-4111-8111-111111111111",
+      LATER,
+    );
+    await interleaving.started;
+    const secondaryDb = await createSecondaryDb();
+    await secondaryDb.update(userSettings).set({
+      encryptedSettings: encryptJson({ googleAiApiKey: "rotated-key" }, SETTINGS_ENCRYPTION_KEY),
+      updatedAt: LATER,
+    }).where(eq(userSettings.ownerEmail, "owner@example.com"));
+    interleaving.release();
+
+    const enabled = await enabling;
+    assert.equal(enabled.supportState, "enabled");
+    assert.equal(enabled.version, 1);
+    assert.equal((await repository.getConfiguration("owner@example.com")).supportState, "enabled");
+  });
+});
+
 async function withDatabase(run) {
   const directory = await mkdtemp(join(tmpdir(), "support-repository-"));
-  const client = createClient({ url: pathToFileURL(join(directory, "support.db")).href });
+  const databaseUrl = pathToFileURL(join(directory, "support.db")).href;
+  const client = createClient({ url: databaseUrl });
+  const secondaryClients = [];
   try {
     await client.executeMultiple(`
       PRAGMA foreign_keys = ON;
+      PRAGMA journal_mode = WAL;
+      PRAGMA busy_timeout = 5000;
       CREATE TABLE platform_connections (
         id TEXT PRIMARY KEY NOT NULL, owner_email TEXT NOT NULL, platform TEXT NOT NULL,
         display_name TEXT NOT NULL, state TEXT NOT NULL, encrypted_credentials TEXT NOT NULL,
@@ -140,9 +319,22 @@ async function withDatabase(run) {
         enabled INTEGER NOT NULL DEFAULT 1, priority INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
       );
+      CREATE TABLE user_settings (
+        owner_email TEXT PRIMARY KEY NOT NULL, encrypted_settings TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
     `);
-    await run(drizzle(client));
+    await run(drizzle(client), {
+      async createSecondaryDb() {
+        const secondaryClient = createClient({ url: databaseUrl });
+        secondaryClients.push(secondaryClient);
+        await secondaryClient.execute("PRAGMA foreign_keys = ON");
+        await secondaryClient.execute("PRAGMA busy_timeout = 5000");
+        return drizzle(secondaryClient);
+      },
+    });
   } finally {
+    await Promise.all(secondaryClients.map((secondaryClient) => secondaryClient.close()));
     await client.close();
     try {
       await rm(directory, { recursive: true, force: true });
@@ -150,6 +342,48 @@ async function withDatabase(run) {
       if (error.code !== "EBUSY") throw error;
     }
   }
+}
+
+async function seedReadySupport(db) {
+  await db.insert(platformConnections).values(
+    connection("11111111-1111-4111-8111-111111111111", "owner@example.com"),
+  );
+  await db.insert(supportConfigurations).values(configurationRecord());
+  await db.insert(supportFaqs).values({
+    ...faqRecord(),
+    id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    ownerEmail: "owner@example.com",
+  });
+  await db.insert(userSettings).values({
+    ownerEmail: "owner@example.com",
+    encryptedSettings: encryptJson({ googleAiApiKey: "current-key" }, SETTINGS_ENCRYPTION_KEY),
+    updatedAt: NOW,
+  });
+}
+
+function createDecryptInterleaving() {
+  let release;
+  let announceStarted;
+  let reads = 0;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const started = new Promise((resolve) => {
+    announceStarted = resolve;
+  });
+  return {
+    started,
+    release,
+    async decrypt(encryptedSettings) {
+      const settings = decryptJson(encryptedSettings, SETTINGS_ENCRYPTION_KEY);
+      reads += 1;
+      if (reads === 1) {
+        announceStarted();
+        await gate;
+      }
+      return settings;
+    },
+  };
 }
 
 function connection(id, ownerEmail) {
@@ -169,6 +403,7 @@ function connection(id, ownerEmail) {
 function configurationRecord() {
   return {
     id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    ownerEmail: "owner@example.com",
     platformConnectionId: "11111111-1111-4111-8111-111111111111",
     brandName: "Acme",
     assistantName: "Ada",
@@ -177,7 +412,7 @@ function configurationRecord() {
     llmModel: "gemini-3.1-flash-lite",
     supportState: "disabled",
     webhookKeyHash: "secret-hash",
-    webhookVerifiedAt: null,
+    webhookVerifiedAt: NOW,
     redeliveryAcknowledgedAt: NOW,
     nativeRepliesDisabledAcknowledgedAt: NOW,
     providerTestedAt: null,

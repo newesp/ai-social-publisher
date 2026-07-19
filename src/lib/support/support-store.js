@@ -15,6 +15,9 @@ const CONFIGURATION_KEYS = Object.freeze([
   "redeliveryAcknowledged",
   "nativeRepliesDisabledAcknowledged",
 ]);
+const BROWSER_CONFIGURATION_KEYS = Object.freeze(
+  CONFIGURATION_KEYS.filter((key) => key !== "platformConnectionId"),
+);
 const FAQ_KEYS = Object.freeze(["question", "answer", "category", "keywords", "enabled", "priority"]);
 const REPLY_TONES = new Set(["friendly", "professional", "concise"]);
 const LLM_PROVIDERS = new Set(["google", "openai"]);
@@ -30,23 +33,82 @@ export function createSupportStore({
 }) {
   requireText(encryptionKey, "SETTINGS_ENCRYPTION_KEY", 500);
 
-  async function mutateReadiness(ownerEmail, connectionId, changes, { expectedVersion } = {}) {
+  async function mutateReadiness(ownerEmail, connectionId, changes, {
+    expectedVersion,
+    expectedWebhookKeyHash,
+  } = {}) {
     const owner = requireOwner(ownerEmail);
     const id = requireText(connectionId, "Platform connection ID");
     const current = await repository.getConfiguration(owner);
     if (!current || current.platformConnectionId !== id) throw notFound();
     if (expectedVersion != null && current.version !== expectedVersion) throw versionConflict();
+    if (expectedWebhookKeyHash != null && current.webhookKeyHash !== expectedWebhookKeyHash) {
+      throw versionConflict();
+    }
     const timestamp = now();
     const updated = await repository.updateConfiguration(owner, current.id, {
       ...changes(current, timestamp),
       version: current.version + 1,
       updatedAt: timestamp,
-    }, expectedVersion == null ? undefined : { expectedVersion });
+    }, {
+      expectedVersion: current.version,
+      ...(expectedWebhookKeyHash == null ? {} : { expectedWebhookKeyHash }),
+    });
     if (!updated) {
-      if (expectedVersion != null) throw versionConflict();
-      throw notFound();
+      throw versionConflict();
     }
     return toConfiguration(updated);
+  }
+
+  async function persistConfiguration(owner, configuration) {
+    const timestamp = now();
+    const current = await repository.getConfiguration(owner);
+    const values = {
+      platformConnectionId: configuration.platformConnectionId,
+      brandName: configuration.brandName,
+      assistantName: configuration.assistantName,
+      replyTone: configuration.replyTone,
+      llmProvider: configuration.llmProvider,
+      llmModel: configuration.llmModel,
+      redeliveryAcknowledgedAt: timestamp,
+      nativeRepliesDisabledAcknowledgedAt: timestamp,
+      updatedAt: timestamp,
+    };
+
+    if (current) {
+      const connectionChanged = current.platformConnectionId !== configuration.platformConnectionId;
+      const providerChanged = current.llmProvider !== configuration.llmProvider
+        || current.llmModel !== configuration.llmModel;
+      const updated = await repository.updateConfiguration(owner, current.id, {
+        ...values,
+        ...(connectionChanged ? {
+          supportState: "disabled",
+          webhookKeyHash: null,
+          webhookVerifiedAt: null,
+          providerTestedAt: null,
+        } : {}),
+        ...(providerChanged ? {
+          supportState: "disabled",
+          providerTestedAt: null,
+        } : {}),
+        version: current.version + 1,
+      }, { expectedVersion: current.version });
+      if (!updated) throw versionConflict();
+      return toConfiguration(updated);
+    }
+
+    const created = await repository.createConfiguration(owner, {
+      id: randomUUID(),
+      ...values,
+      supportState: "disabled",
+      webhookKeyHash: null,
+      webhookVerifiedAt: null,
+      providerTestedAt: null,
+      version: 0,
+      createdAt: timestamp,
+    });
+    if (!created) throw notFound();
+    return toConfiguration(created);
   }
 
   return {
@@ -60,55 +122,20 @@ export function createSupportStore({
       const configuration = validateConfiguration(input, modelOptions);
       const connection = await repository.findOwnedLineConnection(owner, configuration.platformConnectionId);
       if (!connection) throw notFound();
+      return persistConfiguration(owner, configuration);
+    },
 
-      const timestamp = now();
-      const current = await repository.getConfiguration(owner);
-      const values = {
-        platformConnectionId: configuration.platformConnectionId,
-        brandName: configuration.brandName,
-        assistantName: configuration.assistantName,
-        replyTone: configuration.replyTone,
-        llmProvider: configuration.llmProvider,
-        llmModel: configuration.llmModel,
-        redeliveryAcknowledgedAt: timestamp,
-        nativeRepliesDisabledAcknowledgedAt: timestamp,
-        updatedAt: timestamp,
-      };
-
-      if (current) {
-        const connectionChanged = current.platformConnectionId !== configuration.platformConnectionId;
-        const providerChanged = current.llmProvider !== configuration.llmProvider
-          || current.llmModel !== configuration.llmModel;
-        const updated = await repository.updateConfiguration(owner, current.id, {
-          ...values,
-          ...(connectionChanged ? {
-            supportState: "disabled",
-            webhookKeyHash: null,
-            webhookVerifiedAt: null,
-            providerTestedAt: null,
-          } : {}),
-          ...(providerChanged ? {
-            supportState: "disabled",
-            providerTestedAt: null,
-          } : {}),
-          version: current.version + 1,
-        });
-        if (!updated) throw notFound();
-        return toConfiguration(updated);
-      }
-
-      const created = await repository.createConfiguration(owner, {
-        id: randomUUID(),
-        ...values,
-        supportState: "disabled",
-        webhookKeyHash: null,
-        webhookVerifiedAt: null,
-        providerTestedAt: null,
-        version: 0,
-        createdAt: timestamp,
-      });
-      if (!created) throw notFound();
-      return toConfiguration(created);
+    async updateConfigurationForActiveDefault(ownerEmail, input) {
+      const owner = requireOwner(ownerEmail);
+      requirePlainObject(input, "Configuration");
+      requireExactKeys(input, BROWSER_CONFIGURATION_KEYS, "Configuration");
+      const connection = await repository.findActiveLineConnection(owner);
+      if (!connection?.id) throw noActiveLineConnection();
+      const configuration = validateConfiguration({
+        ...input,
+        platformConnectionId: connection.id,
+      }, modelOptions);
+      return persistConfiguration(owner, configuration);
     },
 
     async prepareWebhook(ownerEmail, connectionId, webhookKeyHash) {
@@ -132,8 +159,8 @@ export function createSupportStore({
           ...(connectionChanged ? { providerTestedAt: null } : {}),
           version: current.version + 1,
           updatedAt: timestamp,
-        });
-        if (!updated) throw notFound();
+        }, { expectedVersion: current.version });
+        if (!updated) throw versionConflict();
         return toConfiguration(updated);
       }
 
@@ -159,12 +186,27 @@ export function createSupportStore({
       return toConfiguration(created);
     },
 
-    async recordWebhookVerification(ownerEmail, connectionId, verified) {
+    async recordWebhookVerification(ownerEmail, connectionId, verified, {
+      expectedVersion,
+      expectedWebhookKeyHash,
+    } = {}) {
       if (typeof verified !== "boolean") throw badRequest("Webhook verification must be a boolean.");
-      return mutateReadiness(ownerEmail, connectionId, (current, timestamp) => ({
-        webhookVerifiedAt: verified ? timestamp : null,
-        ...(!verified ? { supportState: "disabled" } : {}),
-      }));
+      if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+        throw badRequest("Expected configuration version is required.");
+      }
+      if (typeof expectedWebhookKeyHash !== "string"
+        || !WEBHOOK_HASH_PATTERN.test(expectedWebhookKeyHash)) {
+        throw badRequest("Expected webhook key hash is required.");
+      }
+      return mutateReadiness(
+        ownerEmail,
+        connectionId,
+        (current, timestamp) => ({
+          webhookVerifiedAt: verified ? timestamp : null,
+          ...(!verified ? { supportState: "disabled" } : {}),
+        }),
+        { expectedVersion, expectedWebhookKeyHash },
+      );
     },
 
     async recordProviderTest(ownerEmail, connectionId, tested, { expectedVersion } = {}) {
@@ -183,19 +225,22 @@ export function createSupportStore({
       );
     },
 
-    async setSupportState(ownerEmail, connectionId, state, { expectedVersion } = {}) {
-      if (state !== "enabled" && state !== "disabled") {
+    async enableIfReady(ownerEmail, connectionId) {
+      const owner = requireOwner(ownerEmail);
+      const id = requireText(connectionId, "Platform connection ID");
+      const enabled = await repository.enableConfigurationIfReady(owner, id, now());
+      if (!enabled) throw supportNotReady();
+      return toConfiguration(enabled);
+    },
+
+    async setSupportState(ownerEmail, connectionId, state) {
+      if (state !== "disabled") {
         throw badRequest("Support state is invalid.");
-      }
-      if (state === "enabled"
-        && (!Number.isInteger(expectedVersion) || expectedVersion < 0)) {
-        throw badRequest("Expected configuration version is required.");
       }
       return mutateReadiness(
         ownerEmail,
         connectionId,
         () => ({ supportState: state }),
-        state === "enabled" ? { expectedVersion } : {},
       );
     },
 
@@ -240,7 +285,10 @@ export function createSupportStore({
 
 export function getSupportStore(env = process.env) {
   return createSupportStore({
-    repository: createSupportRepository(createDbClient(env)),
+    repository: createSupportRepository(createDbClient(env), {
+      encryptionKey: env.SETTINGS_ENCRYPTION_KEY,
+      modelOptions: getLLMModelOptions,
+    }),
     encryptionKey: env.SETTINGS_ENCRYPTION_KEY,
     modelOptions: getLLMModelOptions,
   });
@@ -436,6 +484,14 @@ function notFound() {
 
 function versionConflict() {
   return routeError("Support configuration changed. Refresh readiness and try again.", 409);
+}
+
+function noActiveLineConnection() {
+  return routeError("Connect LINE before saving support settings.", 409);
+}
+
+function supportNotReady() {
+  return routeError("AI support is not ready to be enabled.", 409);
 }
 
 function routeError(message, status) {

@@ -16,6 +16,7 @@ import { createPlatformConnectionsRepository } from "./platform-connections-repo
 import { fetchWithDeadline } from "./connection-lifecycle.js";
 
 const supportProviderTestFlights = new Map();
+const supportWebhookProvisionFlights = new Map();
 
 export function createPlatformConnectionRouteHandlers({ requireOwner, getServices = () => getPlatformConnectionServices(), fetchImpl = fetch, requestTimeoutMs = 10_000, respond = (body, init) => Response.json(body, init), redirect = (url, status = 302) => Response.redirect(url, status) }) {
   return {
@@ -79,14 +80,9 @@ export function createPlatformConnectionRouteHandlers({ requireOwner, getService
           },
           readiness: toSafeSupportReadiness(setup?.readiness),
         }, { status: 201 });
-      } catch {
+      } catch (setupError) {
         let readiness = unavailableReadiness(connection);
         if (internalConnection?.id) {
-          try {
-            await onboarding.setSupportEnabled(ownerEmail, internalConnection.id, false);
-          } catch {
-            // The connection remains valid even when support-state persistence cannot be confirmed.
-          }
           try {
             readiness = await onboarding.getReadiness(ownerEmail, internalConnection.id);
           } catch {
@@ -157,6 +153,7 @@ export function getPlatformConnectionServices(env = process.env) {
     generateTextImpl: generateText,
     env,
     providerTestFlights: supportProviderTestFlights,
+    webhookProvisionFlights: supportWebhookProvisionFlights,
   });
   return {
     connections,

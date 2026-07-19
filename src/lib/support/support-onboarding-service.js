@@ -8,6 +8,7 @@ const WEBHOOK_KEY_BYTES = 32;
 const DEFAULT_PROVIDER_TEST_TIMEOUT_MS = 10_000;
 const AI_TEST_SYSTEM_PROMPT = "Return exactly OK.";
 const AI_TEST_PROMPT = "OK";
+const defaultWebhookProvisionFlights = new Map();
 const PROVIDER_KEY_BY_NAME = Object.freeze({
   google: "googleAiApiKey",
   openai: "openAiApiKey",
@@ -23,48 +24,32 @@ export function createSupportOnboardingService({
   randomBytes = crypto.randomBytes,
   providerTestTimeoutMs = DEFAULT_PROVIDER_TEST_TIMEOUT_MS,
   providerTestFlights = new Map(),
+  webhookProvisionFlights = defaultWebhookProvisionFlights,
 }) {
   return {
     async provisionLineWebhook(ownerEmail, connectionId) {
       const owner = requireOwner(ownerEmail);
       const id = requireConnectionId(connectionId);
-      const baseUrl = trustedHttpsBase(env?.NEXTAUTH_URL);
-      const connection = await requireActiveLineConnection(connections, owner, id);
-      const accessToken = requireConnectionToken(connection);
-      const webhookKey = toWebhookKey(randomBytes(WEBHOOK_KEY_BYTES));
-      const webhookUrl = new URL(`/api/webhooks/line/${webhookKey}`, baseUrl).toString();
-
-      await supportStore.prepareWebhook(owner, id, hashWebhookKey(webhookKey));
-
-      let verified = false;
+      const flightKey = `${owner}\u0000${id}`;
+      if (webhookProvisionFlights.has(flightKey)) throw webhookProvisionBusyError();
+      const operation = runWebhookProvision({
+        connections,
+        supportStore,
+        settingsStore,
+        lineAdapter,
+        env,
+        randomBytes,
+        owner,
+        connectionId: id,
+      });
+      webhookProvisionFlights.set(flightKey, operation);
       try {
-        await lineAdapter.configureWebhook({ accessToken, webhookUrl });
-        const testResult = await lineAdapter.testWebhook({ accessToken });
-        const status = await lineAdapter.getWebhookStatus({ accessToken });
-        verified = testResult?.success === true
-          && status?.active === true
-          && sameWebhookUrl(status?.endpoint, webhookUrl);
-        await supportStore.recordWebhookVerification(owner, id, verified);
-      } catch {
-        try {
-          await supportStore.recordWebhookVerification(owner, id, false);
-        } catch {
-          // The setup error below remains bounded even if readiness persistence also fails.
+        return await operation;
+      } finally {
+        if (webhookProvisionFlights.get(flightKey) === operation) {
+          webhookProvisionFlights.delete(flightKey);
         }
-        throw setupError();
       }
-
-      return {
-        webhookUrl,
-        setupStatus: verified ? "verified" : "needs_action",
-        readiness: await getReadiness({
-          connections,
-          supportStore,
-          settingsStore,
-          owner,
-          connectionId: id,
-        }),
-      };
     },
 
     async getReadiness(ownerEmail, connectionId) {
@@ -110,6 +95,20 @@ export function createSupportOnboardingService({
         return { supportEnabled: false, state: "disabled" };
       }
 
+      try {
+        await supportStore.enableIfReady(owner, id);
+      } catch (error) {
+        if (error?.status !== 409) throw error;
+        error.readiness = await getReadiness({
+          connections,
+          supportStore,
+          settingsStore,
+          owner,
+          connectionId: id,
+        });
+        throw error;
+      }
+
       const readiness = await getReadiness({
         connections,
         supportStore,
@@ -117,21 +116,84 @@ export function createSupportOnboardingService({
         owner,
         connectionId: id,
       });
-      if (!readiness.ready) {
-        const error = routeError("AI support is not ready to be enabled.", 409);
-        error.readiness = readiness;
-        throw error;
-      }
-
-      await supportStore.setSupportState(owner, id, "enabled", {
-        expectedVersion: readiness.configurationVersion,
-      });
       return {
         ...readiness,
         supportEnabled: true,
         state: "enabled",
       };
     },
+  };
+}
+
+async function runWebhookProvision({
+  connections,
+  supportStore,
+  settingsStore,
+  lineAdapter,
+  env,
+  randomBytes,
+  owner,
+  connectionId,
+}) {
+  const baseUrl = trustedHttpsBase(env?.NEXTAUTH_URL);
+  const connection = await requireActiveLineConnection(connections, owner, connectionId);
+  const accessToken = requireConnectionToken(connection);
+  const webhookKey = toWebhookKey(randomBytes(WEBHOOK_KEY_BYTES));
+  const webhookUrl = new URL(`/api/webhooks/line/${webhookKey}`, baseUrl).toString();
+  const webhookKeyHash = hashWebhookKey(webhookKey);
+
+  let prepared;
+  try {
+    prepared = await supportStore.prepareWebhook(owner, connectionId, webhookKeyHash);
+  } catch (error) {
+    if (isConfigurationChanged(error)) throw webhookProvisionConflictError();
+    throw setupError();
+  }
+  const attempt = {
+    expectedVersion: prepared.version,
+    expectedWebhookKeyHash: webhookKeyHash,
+  };
+
+  let verified = false;
+  try {
+    await lineAdapter.configureWebhook({ accessToken, webhookUrl });
+    const testResult = await lineAdapter.testWebhook({ accessToken });
+    const status = await lineAdapter.getWebhookStatus({ accessToken });
+    verified = testResult?.success === true
+      && status?.active === true
+      && sameWebhookUrl(status?.endpoint, webhookUrl);
+    await supportStore.recordWebhookVerification(
+      owner,
+      connectionId,
+      verified,
+      attempt,
+    );
+  } catch (error) {
+    if (isConfigurationChanged(error)) throw webhookProvisionConflictError();
+    try {
+      await supportStore.recordWebhookVerification(
+        owner,
+        connectionId,
+        false,
+        attempt,
+      );
+    } catch (recordError) {
+      if (isConfigurationChanged(recordError)) throw webhookProvisionConflictError();
+      // The setup error below remains bounded even if readiness persistence also fails.
+    }
+    throw setupError();
+  }
+
+  return {
+    webhookUrl,
+    setupStatus: verified ? "verified" : "needs_action",
+    readiness: await getReadiness({
+      connections,
+      supportStore,
+      settingsStore,
+      owner,
+      connectionId,
+    }),
   };
 }
 
@@ -202,9 +264,6 @@ async function getReadiness({ connections, supportStore, settingsStore, owner, c
       displayName: typeof connection?.displayName === "string" ? connection.displayName : "",
     },
     checks,
-    configurationVersion: configurationMatches && Number.isInteger(configuration.version)
-      ? configuration.version
-      : null,
   };
 }
 
@@ -363,6 +422,20 @@ function optionalConnectionId(value) {
 
 function setupError() {
   const error = routeError("LINE support setup could not be completed.", 502);
+  error.retryable = true;
+  error.setupRetryable = true;
+  return error;
+}
+
+function webhookProvisionBusyError() {
+  const error = routeError("LINE support setup is already in progress.", 409);
+  error.retryable = true;
+  error.setupRetryable = true;
+  return error;
+}
+
+function webhookProvisionConflictError() {
+  const error = routeError("LINE support setup changed. Retry readiness.", 409);
   error.retryable = true;
   error.setupRetryable = true;
   return error;

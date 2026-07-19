@@ -116,6 +116,7 @@ test("explicit readiness action provisions the active default but returns no ID,
 });
 
 test("readiness retry failure returns a bounded retryable setup state and disabled readiness", async () => {
+  let disableCalls = 0;
   const readiness = readinessState();
   const handlers = createHandlers({
     connections: {
@@ -129,8 +130,8 @@ test("readiness retry failure returns a bounded retryable setup state and disabl
         error.setupRetryable = true;
         throw error;
       },
-      async setSupportEnabled(ownerEmail, connectionId, enabled) {
-        assert.deepEqual([ownerEmail, connectionId, enabled], [OWNER, CONNECTION_ID, false]);
+      async setSupportEnabled() {
+        disableCalls += 1;
       },
       async getReadiness() {
         return readiness;
@@ -148,7 +149,45 @@ test("readiness retry failure returns a bounded retryable setup state and disabl
     setup: { status: "retryable", retryable: true },
     readiness,
   });
+  assert.equal(disableCalls, 0);
   assert.equal(JSON.stringify(body).includes("private provider response"), false);
+});
+
+test("concurrent readiness refresh returns a bounded 409 without disabling a newer attempt", async () => {
+  let disableCalls = 0;
+  const readiness = readinessState();
+  const handlers = createHandlers({
+    connections: {
+      async getDefault() {
+        return { id: CONNECTION_ID, platform: "line", state: "active" };
+      },
+    },
+    onboarding: {
+      async provisionLineWebhook() {
+        const error = new Error("LINE support setup is already in progress.");
+        error.status = 409;
+        error.setupRetryable = true;
+        throw error;
+      },
+      async setSupportEnabled() {
+        disableCalls += 1;
+      },
+      async getReadiness() {
+        return readiness;
+      },
+    },
+  });
+
+  const response = await handlers.refreshReadiness(
+    sameOriginRequest("/api/support/configuration/readiness", {}),
+  );
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), {
+    setup: { status: "retryable", retryable: true },
+    readiness,
+  });
+  assert.equal(disableCalls, 0);
 });
 
 test("provider test is explicit and returns only pass or bounded failure status", async () => {

@@ -7,6 +7,7 @@ import { createSupportStore } from "../src/lib/support/support-store.js";
 const CONNECTION_ID = "11111111-1111-4111-8111-111111111111";
 const SECOND_CONNECTION_ID = "22222222-2222-4222-8222-222222222222";
 const WEBHOOK_KEY_HASH = "a".repeat(64);
+const SECOND_WEBHOOK_KEY_HASH = "b".repeat(64);
 
 test("configuration validates the complete allowlist and returns only safe readiness fields", async () => {
   const repository = createMemoryRepository();
@@ -50,6 +51,33 @@ test("configuration rejects unknown, invalid, and unacknowledged values with 400
   await rejectsStatus(store.updateConfiguration("owner@example.com", { ...validConfiguration(), llmModel: "unsupported" }), 400);
   await rejectsStatus(store.updateConfiguration("owner@example.com", { ...validConfiguration(), redeliveryAcknowledged: false }), 400);
   await rejectsStatus(store.updateConfiguration("owner@example.com", { ...validConfiguration(), nativeRepliesDisabledAcknowledged: false }), 400);
+});
+
+test("browser configuration binds the owner's active LINE default without accepting internal fields", async () => {
+  const repository = createMemoryRepository();
+  const store = createStore(repository);
+  const input = browserConfiguration();
+
+  const configuration = await store.updateConfigurationForActiveDefault(
+    " OWNER@EXAMPLE.COM ",
+    input,
+  );
+
+  assert.equal(configuration.platformConnectionId, CONNECTION_ID);
+  assert.equal(configuration.brandName, "Acme");
+  assert.equal(repository.configurations.get("owner@example.com").platformConnectionId, CONNECTION_ID);
+  await rejectsStatus(
+    store.updateConfigurationForActiveDefault("owner@example.com", {
+      ...input,
+      platformConnectionId: SECOND_CONNECTION_ID,
+    }),
+    400,
+  );
+  repository.connections.delete(CONNECTION_ID);
+  await rejectsStatus(
+    store.updateConfigurationForActiveDefault("owner@example.com", input),
+    409,
+  );
 });
 
 test("configuration cannot bind another owner's LINE connection", async () => {
@@ -97,6 +125,27 @@ test("configuration changes invalidate connection- and provider-dependent readin
 
   assert.equal(providerUpdated.supportState, "disabled");
   assert.equal(providerUpdated.providerTested, false);
+});
+
+test("configuration and disable mutations preserve monotonic versions with compare-and-swap", async () => {
+  const repository = createMemoryRepository();
+  const store = createStore(repository);
+  await store.updateConfiguration("owner@example.com", validConfiguration());
+
+  await store.updateConfiguration("owner@example.com", {
+    ...validConfiguration(),
+    brandName: "Updated",
+  });
+  const configurationWrite = repository.calls
+    .filter(([operation]) => operation === "updateConfiguration")
+    .at(-1);
+  assert.deepEqual(configurationWrite[4], { expectedVersion: 0 });
+
+  await store.setSupportState("owner@example.com", CONNECTION_ID, "disabled");
+  const disableWrite = repository.calls
+    .filter(([operation]) => operation === "updateConfiguration")
+    .at(-1);
+  assert.deepEqual(disableWrite[4], { expectedVersion: 1 });
 });
 
 test("webhook preparation creates a safe skeleton and persists only the owner-scoped hash", async () => {
@@ -169,12 +218,67 @@ test("webhook preparation on a replacement LINE connection preserves settings an
   assert.equal(repository.configurations.get("owner@example.com").webhookKeyHash, WEBHOOK_KEY_HASH);
 });
 
+test("a stale webhook attempt cannot verify or disable a newer prepared endpoint", async () => {
+  const repository = createMemoryRepository();
+  const store = createStore(repository);
+  const first = await store.prepareWebhook(
+    "owner@example.com",
+    CONNECTION_ID,
+    WEBHOOK_KEY_HASH,
+  );
+  const second = await store.prepareWebhook(
+    "owner@example.com",
+    CONNECTION_ID,
+    SECOND_WEBHOOK_KEY_HASH,
+  );
+
+  for (const verified of [true, false]) {
+    await assert.rejects(
+      store.recordWebhookVerification(
+        "owner@example.com",
+        CONNECTION_ID,
+        verified,
+        {
+          expectedVersion: first.version,
+          expectedWebhookKeyHash: WEBHOOK_KEY_HASH,
+        },
+      ),
+      (error) => error.status === 409,
+    );
+  }
+
+  const storedAfterStaleAttempts = repository.configurations.get("owner@example.com");
+  assert.equal(storedAfterStaleAttempts.webhookKeyHash, SECOND_WEBHOOK_KEY_HASH);
+  assert.equal(storedAfterStaleAttempts.webhookVerifiedAt, null);
+  assert.equal(storedAfterStaleAttempts.supportState, "disabled");
+
+  const verified = await store.recordWebhookVerification(
+    "owner@example.com",
+    CONNECTION_ID,
+    true,
+    {
+      expectedVersion: second.version,
+      expectedWebhookKeyHash: SECOND_WEBHOOK_KEY_HASH,
+    },
+  );
+  assert.equal(verified.webhookVerified, true);
+  assert.equal(repository.configurations.get("owner@example.com").webhookKeyHash, SECOND_WEBHOOK_KEY_HASH);
+});
+
 test("readiness mutations require the owner and configured connection and return redacted state", async () => {
   const repository = createMemoryRepository();
   const store = createStore(repository);
-  await store.prepareWebhook("owner@example.com", CONNECTION_ID, WEBHOOK_KEY_HASH);
+  const prepared = await store.prepareWebhook("owner@example.com", CONNECTION_ID, WEBHOOK_KEY_HASH);
 
-  const verified = await store.recordWebhookVerification("owner@example.com", CONNECTION_ID, true);
+  const verified = await store.recordWebhookVerification(
+    "owner@example.com",
+    CONNECTION_ID,
+    true,
+    {
+      expectedVersion: prepared.version,
+      expectedWebhookKeyHash: WEBHOOK_KEY_HASH,
+    },
+  );
   assert.equal(verified.webhookVerified, true);
   assert.equal(
     repository.configurations.get("owner@example.com").webhookVerifiedAt.toISOString(),
@@ -204,36 +308,30 @@ test("readiness mutations require the owner and configured connection and return
   );
   assert.equal((await store.getConfiguration("owner@example.com")).providerTested, true);
 
-  const beforeEnable = await store.getConfiguration("owner@example.com");
-  const enabled = await store.setSupportState(
-    "owner@example.com",
-    CONNECTION_ID,
-    "enabled",
-    { expectedVersion: beforeEnable.version },
-  );
-  assert.equal(enabled.supportState, "enabled");
-  assert.equal(JSON.stringify(enabled).includes(WEBHOOK_KEY_HASH), false);
   await rejectsStatus(
     store.setSupportState(
       "owner@example.com",
       CONNECTION_ID,
       "enabled",
-      { expectedVersion: beforeEnable.version },
+      { expectedVersion: (await store.getConfiguration("owner@example.com")).version },
     ),
-    409,
+    400,
   );
 
-  const unverified = await store.recordWebhookVerification("owner@example.com", CONNECTION_ID, false);
+  const beforeUnverify = await store.getConfiguration("owner@example.com");
+  const unverified = await store.recordWebhookVerification(
+    "owner@example.com",
+    CONNECTION_ID,
+    false,
+    {
+      expectedVersion: beforeUnverify.version,
+      expectedWebhookKeyHash: WEBHOOK_KEY_HASH,
+    },
+  );
   assert.equal(unverified.webhookVerified, false);
   assert.equal(unverified.supportState, "disabled");
 
-  const beforeSecondEnable = await store.getConfiguration("owner@example.com");
-  await store.setSupportState(
-    "owner@example.com",
-    CONNECTION_ID,
-    "enabled",
-    { expectedVersion: beforeSecondEnable.version },
-  );
+  repository.configurations.get("owner@example.com").supportState = "enabled";
   const beforeFailedProvider = await store.getConfiguration("owner@example.com");
   const failedProvider = await store.recordProviderTest(
     "owner@example.com",
@@ -245,7 +343,15 @@ test("readiness mutations require the owner and configured connection and return
   assert.equal(failedProvider.supportState, "disabled");
 
   await rejectsStatus(
-    store.recordWebhookVerification("owner@example.com", SECOND_CONNECTION_ID, true),
+    store.recordWebhookVerification(
+      "owner@example.com",
+      SECOND_CONNECTION_ID,
+      true,
+      {
+        expectedVersion: (await store.getConfiguration("owner@example.com")).version,
+        expectedWebhookKeyHash: WEBHOOK_KEY_HASH,
+      },
+    ),
     404,
   );
   await rejectsStatus(
@@ -256,6 +362,36 @@ test("readiness mutations require the owner and configured connection and return
     store.setSupportState("owner@example.com", CONNECTION_ID, "paused"),
     400,
   );
+});
+
+test("support enable delegates to the repository mutation-authority gate", async () => {
+  const repository = createMemoryRepository();
+  const store = createStore(repository);
+  await store.updateConfiguration("owner@example.com", validConfiguration());
+  const current = repository.configurations.get("owner@example.com");
+  Object.assign(current, {
+    supportState: "disabled",
+    webhookVerifiedAt: new Date("2026-07-18T00:00:00.000Z"),
+  });
+
+  const enabled = await store.enableIfReady(" OWNER@EXAMPLE.COM ", CONNECTION_ID);
+
+  assert.equal(enabled.supportState, "enabled");
+  assert.equal(enabled.version, 1);
+  assert.equal(JSON.stringify(enabled).includes(WEBHOOK_KEY_HASH), false);
+  assert.deepEqual(
+    repository.calls.find(([operation]) => operation === "enableConfigurationIfReady").slice(1, 3),
+    ["owner@example.com", CONNECTION_ID],
+  );
+
+  repository.enableConfigurationIfReady = async () => null;
+  current.supportState = "disabled";
+  await assert.rejects(
+    store.enableIfReady("owner@example.com", CONNECTION_ID),
+    (error) => error.status === 409
+      && error.message === "AI support is not ready to be enabled.",
+  );
+  assert.equal(current.supportState, "disabled");
 });
 
 test("FAQ CRUD normalizes content, deduplicates keywords, and stays owner scoped", async () => {
@@ -410,6 +546,13 @@ function createMemoryRepository() {
       calls.push(["findOwnedLineConnection", ownerEmail, id]);
       return connections.get(id) === ownerEmail ? { id, ownerEmail, encryptedCredentials: "encrypted-credential" } : null;
     },
+    async findActiveLineConnection(ownerEmail) {
+      calls.push(["findActiveLineConnection", ownerEmail]);
+      const entry = [...connections.entries()].find(([, connectionOwner]) => (
+        connectionOwner === ownerEmail
+      ));
+      return entry ? { id: entry[0], ownerEmail, state: "active", platform: "line" } : null;
+    },
     async getConfiguration(ownerEmail) {
       calls.push(["getConfiguration", ownerEmail]);
       return configurations.get(ownerEmail) ?? null;
@@ -425,7 +568,22 @@ function createMemoryRepository() {
       const current = configurations.get(ownerEmail);
       if (!current || current.id !== id) return null;
       if (options.expectedVersion != null && current.version !== options.expectedVersion) return null;
+      if (options.expectedWebhookKeyHash != null
+        && current.webhookKeyHash !== options.expectedWebhookKeyHash) return null;
       const stored = { ...current, ...changes };
+      configurations.set(ownerEmail, stored);
+      return stored;
+    },
+    async enableConfigurationIfReady(ownerEmail, connectionId, now) {
+      calls.push(["enableConfigurationIfReady", ownerEmail, connectionId, now]);
+      const current = configurations.get(ownerEmail);
+      if (!current || current.platformConnectionId !== connectionId) return null;
+      const stored = {
+        ...current,
+        supportState: "enabled",
+        version: current.version + 1,
+        updatedAt: now,
+      };
       configurations.set(ownerEmail, stored);
       return stored;
     },
@@ -468,6 +626,11 @@ function validConfiguration() {
     redeliveryAcknowledged: true,
     nativeRepliesDisabledAcknowledged: true,
   };
+}
+
+function browserConfiguration() {
+  const { platformConnectionId: _platformConnectionId, ...configuration } = validConfiguration();
+  return configuration;
 }
 
 function sequenceUuid() {

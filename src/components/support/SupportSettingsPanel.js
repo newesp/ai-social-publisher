@@ -18,7 +18,6 @@ import { FaqManager } from "./FaqManager.js";
 import { SupportReadinessPanel } from "./SupportReadinessPanel.js";
 
 const EMPTY_FORM = Object.freeze({
-  platformConnectionId: "",
   brandName: "",
   assistantName: "",
   replyTone: "friendly",
@@ -89,7 +88,7 @@ export function SupportSettingsPanel({ lineConnection, initialSetupRetryable = f
       const response = await fetch("/api/support/configuration", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
+        body: JSON.stringify(writableConfiguration(form)),
       });
       const data = await safeJson(response);
       if (!response.ok || !data.configuration) {
@@ -333,7 +332,6 @@ function toForm(configuration) {
     ? configuration.llmModel
     : MODELS[provider][0];
   return {
-    platformConnectionId: configuration.platformConnectionId ?? "",
     brandName: configuration.brandName ?? "",
     assistantName: configuration.assistantName ?? "",
     replyTone: configuration.replyTone ?? "friendly",
@@ -347,8 +345,7 @@ function toForm(configuration) {
 
 function canSaveConfiguration(form) {
   return Boolean(
-    form.platformConnectionId
-    && form.brandName.trim()
+    form.brandName.trim()
     && form.assistantName.trim()
     && form.replyTone
     && form.llmProvider
@@ -356,6 +353,18 @@ function canSaveConfiguration(form) {
     && form.redeliveryAcknowledged
     && form.nativeRepliesDisabledAcknowledged,
   );
+}
+
+function writableConfiguration(form) {
+  return {
+    brandName: form.brandName,
+    assistantName: form.assistantName,
+    replyTone: form.replyTone,
+    llmProvider: form.llmProvider,
+    llmModel: form.llmModel,
+    redeliveryAcknowledged: form.redeliveryAcknowledged,
+    nativeRepliesDisabledAcknowledged: form.nativeRepliesDisabledAcknowledged,
+  };
 }
 
 async function safeJson(response) {
