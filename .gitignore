@@ -15,3 +15,4 @@ tests/
 
 .vercel
 .env*
+/.swc
