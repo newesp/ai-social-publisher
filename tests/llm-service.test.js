@@ -102,6 +102,26 @@ test("uses the requested LLM model in provider requests", async () => {
   assert.equal(JSON.parse(calls[0].body).model, "gemini-3.5-flash");
 });
 
+test("forwards an abort signal to the provider request", async () => {
+  const controller = new AbortController();
+  let observedSignal;
+
+  await generateText({
+    llmProvider: "openai",
+    llmModel: "gpt-4o",
+    settings: { openAiApiKey: "test-openai-key" },
+    systemPrompt: "Return exactly OK.",
+    prompt: "OK",
+    signal: controller.signal,
+    fetchImpl: async (_url, options) => {
+      observedSignal = options.signal;
+      return { ok: true, json: async () => ({ output_text: "OK" }), text: async () => "" };
+    },
+  });
+
+  assert.equal(observedSignal, controller.signal);
+});
+
 test("fails fast when provider credentials are missing", async () => {
   await assert.rejects(
     () =>

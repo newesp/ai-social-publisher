@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Badge, Button, Group, Paper, PasswordInput, Select, SimpleGrid, Stack, Tabs, Text, TextInput, Title } from "@mantine/core";
 import { IconKey } from "@tabler/icons-react";
 import { disconnectFeedback, platformLifecycleStatus } from "../lib/platform-connections/settings-platform-lifecycle.js";
+import { SupportSettingsPanel } from "./support/SupportSettingsPanel.js";
 
 export function SettingsPanel() {
   const [values, setValues] = useState({});
@@ -15,6 +16,7 @@ export function SettingsPanel() {
   const [connectionAction, setConnectionAction] = useState("");
   const [connectionError, setConnectionError] = useState("");
   const [connectionNotice, setConnectionNotice] = useState("");
+  const [supportSetupRetryable, setSupportSetupRetryable] = useState(false);
   const [lineEditing, setLineEditing] = useState(false);
   const [lineCredentials, setLineCredentials] = useState({ channelId: "", channelSecret: "" });
   const [metaPages, setMetaPages] = useState([]);
@@ -26,6 +28,7 @@ export function SettingsPanel() {
     loadConnections();
 
     const params = new URLSearchParams(window.location.search);
+    if (params.get("tab") === "support") setActiveTab("support");
     if (params.get("tab") === "publishing" || params.has("meta")) setActiveTab("publishing");
     if (params.get("meta") === "start_error") {
       setConnectionError("無法開始 Meta 連線，請再試一次。");
@@ -135,9 +138,15 @@ export function SettingsPanel() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(lineCredentials),
       });
-      if (!response.ok) throw new Error();
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.connection) throw new Error();
       setLineEditing(false);
       await loadConnections();
+      setSupportSetupRetryable(payload.supportSetup?.retryable === true);
+      if (payload.supportSetup?.retryable) {
+        setActiveTab("support");
+        window.history.replaceState({}, "", "/settings?tab=support");
+      }
     } catch {
       setConnectionError("無法連結 LINE，請檢查 Channel ID 與 Channel Secret 後再試一次。");
     } finally {
@@ -183,9 +192,10 @@ export function SettingsPanel() {
 
       <Paper withBorder radius={8} p={{ base: "md", sm: "lg" }}>
         <Tabs value={activeTab} onChange={(tab) => setActiveTab(tab ?? "ai")}>
-          <Tabs.List>
+          <Tabs.List style={{ flexWrap: "wrap" }}>
             <Tabs.Tab value="ai" leftSection={<IconKey size={16} />}>AI</Tabs.Tab>
             <Tabs.Tab value="publishing">發布平台</Tabs.Tab>
+            <Tabs.Tab value="support">客服</Tabs.Tab>
           </Tabs.List>
 
           <Tabs.Panel value="ai" pt="md">
@@ -259,6 +269,13 @@ export function SettingsPanel() {
                 {connectionsStatus === "success" && connectionNotice ? <Text c="blue.7" size="sm">{connectionNotice}</Text> : null}
               </div>
             </Stack>
+          </Tabs.Panel>
+
+          <Tabs.Panel value="support" pt="md">
+            <SupportSettingsPanel
+              lineConnection={lineConnection}
+              initialSetupRetryable={supportSetupRetryable}
+            />
           </Tabs.Panel>
         </Tabs>
       </Paper>

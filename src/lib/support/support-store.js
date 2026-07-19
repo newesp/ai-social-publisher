@@ -19,6 +19,7 @@ const FAQ_KEYS = Object.freeze(["question", "answer", "category", "keywords", "e
 const REPLY_TONES = new Set(["friendly", "professional", "concise"]);
 const LLM_PROVIDERS = new Set(["google", "openai"]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const WEBHOOK_HASH_PATTERN = /^[a-f0-9]{64}$/;
 
 export function createSupportStore({
   repository,
@@ -28,6 +29,25 @@ export function createSupportStore({
   randomUUID = () => crypto.randomUUID(),
 }) {
   requireText(encryptionKey, "SETTINGS_ENCRYPTION_KEY", 500);
+
+  async function mutateReadiness(ownerEmail, connectionId, changes, { expectedVersion } = {}) {
+    const owner = requireOwner(ownerEmail);
+    const id = requireText(connectionId, "Platform connection ID");
+    const current = await repository.getConfiguration(owner);
+    if (!current || current.platformConnectionId !== id) throw notFound();
+    if (expectedVersion != null && current.version !== expectedVersion) throw versionConflict();
+    const timestamp = now();
+    const updated = await repository.updateConfiguration(owner, current.id, {
+      ...changes(current, timestamp),
+      version: current.version + 1,
+      updatedAt: timestamp,
+    }, expectedVersion == null ? undefined : { expectedVersion });
+    if (!updated) {
+      if (expectedVersion != null) throw versionConflict();
+      throw notFound();
+    }
+    return toConfiguration(updated);
+  }
 
   return {
     async getConfiguration(ownerEmail) {
@@ -89,6 +109,94 @@ export function createSupportStore({
       });
       if (!created) throw notFound();
       return toConfiguration(created);
+    },
+
+    async prepareWebhook(ownerEmail, connectionId, webhookKeyHash) {
+      const owner = requireOwner(ownerEmail);
+      const id = requireText(connectionId, "Platform connection ID");
+      if (!UUID_PATTERN.test(id)) throw badRequest("Platform connection ID must be a UUID.");
+      if (typeof webhookKeyHash !== "string" || !WEBHOOK_HASH_PATTERN.test(webhookKeyHash)) {
+        throw badRequest("Webhook key hash is invalid.");
+      }
+      if (!await repository.findOwnedLineConnection(owner, id)) throw notFound();
+
+      const timestamp = now();
+      const current = await repository.getConfiguration(owner);
+      if (current) {
+        const connectionChanged = current.platformConnectionId !== id;
+        const updated = await repository.updateConfiguration(owner, current.id, {
+          platformConnectionId: id,
+          supportState: "disabled",
+          webhookKeyHash,
+          webhookVerifiedAt: null,
+          ...(connectionChanged ? { providerTestedAt: null } : {}),
+          version: current.version + 1,
+          updatedAt: timestamp,
+        });
+        if (!updated) throw notFound();
+        return toConfiguration(updated);
+      }
+
+      const created = await repository.createConfiguration(owner, {
+        id: randomUUID(),
+        platformConnectionId: id,
+        brandName: "",
+        assistantName: "",
+        replyTone: "friendly",
+        llmProvider: null,
+        llmModel: null,
+        supportState: "disabled",
+        webhookKeyHash,
+        webhookVerifiedAt: null,
+        redeliveryAcknowledgedAt: null,
+        nativeRepliesDisabledAcknowledgedAt: null,
+        providerTestedAt: null,
+        version: 0,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+      if (!created) throw notFound();
+      return toConfiguration(created);
+    },
+
+    async recordWebhookVerification(ownerEmail, connectionId, verified) {
+      if (typeof verified !== "boolean") throw badRequest("Webhook verification must be a boolean.");
+      return mutateReadiness(ownerEmail, connectionId, (current, timestamp) => ({
+        webhookVerifiedAt: verified ? timestamp : null,
+        ...(!verified ? { supportState: "disabled" } : {}),
+      }));
+    },
+
+    async recordProviderTest(ownerEmail, connectionId, tested, { expectedVersion } = {}) {
+      if (typeof tested !== "boolean") throw badRequest("Provider test state must be a boolean.");
+      if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+        throw badRequest("Expected configuration version is required.");
+      }
+      return mutateReadiness(
+        ownerEmail,
+        connectionId,
+        (current, timestamp) => ({
+          providerTestedAt: tested ? timestamp : null,
+          ...(!tested ? { supportState: "disabled" } : {}),
+        }),
+        { expectedVersion },
+      );
+    },
+
+    async setSupportState(ownerEmail, connectionId, state, { expectedVersion } = {}) {
+      if (state !== "enabled" && state !== "disabled") {
+        throw badRequest("Support state is invalid.");
+      }
+      if (state === "enabled"
+        && (!Number.isInteger(expectedVersion) || expectedVersion < 0)) {
+        throw badRequest("Expected configuration version is required.");
+      }
+      return mutateReadiness(
+        ownerEmail,
+        connectionId,
+        () => ({ supportState: state }),
+        state === "enabled" ? { expectedVersion } : {},
+      );
     },
 
     async listFaqs(ownerEmail) {
@@ -324,6 +432,10 @@ function badRequest(message) {
 
 function notFound() {
   return routeError("Support resource not found.", 404);
+}
+
+function versionConflict() {
+  return routeError("Support configuration changed. Refresh readiness and try again.", 409);
 }
 
 function routeError(message, status) {

@@ -48,6 +48,24 @@ test("configuration lookups and mutations stay scoped to the normalized owner", 
       (await repository.updateConfiguration("owner@example.com", created.id, { brandName: "Updated" })).brandName,
       "Updated",
     );
+    const versioned = await repository.updateConfiguration(
+      "owner@example.com",
+      created.id,
+      { brandName: "Version one", version: 1 },
+      { expectedVersion: 0 },
+    );
+    assert.equal(versioned.brandName, "Version one");
+    assert.equal(versioned.version, 1);
+    assert.equal(
+      await repository.updateConfiguration(
+        "owner@example.com",
+        created.id,
+        { brandName: "Stale write", version: 2 },
+        { expectedVersion: 0 },
+      ),
+      null,
+    );
+    assert.equal((await repository.getConfiguration("owner@example.com")).brandName, "Version one");
     const protectedRecord = await repository.updateConfiguration("owner@example.com", created.id, {
       id: "changed-id",
       ownerEmail: "other@example.com",

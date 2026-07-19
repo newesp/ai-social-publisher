@@ -28,8 +28,10 @@ export function createSupportRepository(db = createDbClient()) {
       return created;
     },
 
-    async updateConfiguration(ownerEmail, id, changes) {
+    async updateConfiguration(ownerEmail, id, changes, { expectedVersion } = {}) {
       const owner = normalizeOwner(ownerEmail);
+      if (expectedVersion != null
+        && (!Number.isInteger(expectedVersion) || expectedVersion < 0)) return null;
       const safeChanges = pickChanges(changes, [
         "platformConnectionId", "brandName", "assistantName", "replyTone", "llmProvider", "llmModel",
         "supportState", "webhookKeyHash", "webhookVerifiedAt", "redeliveryAcknowledgedAt",
@@ -37,10 +39,16 @@ export function createSupportRepository(db = createDbClient()) {
       ]);
       if (safeChanges.platformConnectionId
         && !await findOwnedLineConnection(db, owner, safeChanges.platformConnectionId)) return null;
-      const [updated] = await db.update(supportConfigurations).set(safeChanges).where(and(
+      const predicates = [
         eq(supportConfigurations.ownerEmail, owner),
         eq(supportConfigurations.id, id),
-      )).returning();
+      ];
+      if (expectedVersion != null) {
+        predicates.push(eq(supportConfigurations.version, expectedVersion));
+      }
+      const [updated] = await db.update(supportConfigurations).set(safeChanges)
+        .where(and(...predicates))
+        .returning();
       return updated ?? null;
     },
 

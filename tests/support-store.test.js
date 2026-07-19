@@ -6,6 +6,7 @@ import { createSupportStore } from "../src/lib/support/support-store.js";
 
 const CONNECTION_ID = "11111111-1111-4111-8111-111111111111";
 const SECOND_CONNECTION_ID = "22222222-2222-4222-8222-222222222222";
+const WEBHOOK_KEY_HASH = "a".repeat(64);
 
 test("configuration validates the complete allowlist and returns only safe readiness fields", async () => {
   const repository = createMemoryRepository();
@@ -96,6 +97,165 @@ test("configuration changes invalidate connection- and provider-dependent readin
 
   assert.equal(providerUpdated.supportState, "disabled");
   assert.equal(providerUpdated.providerTested, false);
+});
+
+test("webhook preparation creates a safe skeleton and persists only the owner-scoped hash", async () => {
+  const repository = createMemoryRepository();
+  const store = createStore(repository);
+
+  const configuration = await store.prepareWebhook(
+    " OWNER@EXAMPLE.COM ",
+    CONNECTION_ID,
+    WEBHOOK_KEY_HASH,
+  );
+  const stored = repository.configurations.get("owner@example.com");
+
+  assert.deepEqual(configuration, {
+    id: configuration.id,
+    platformConnectionId: CONNECTION_ID,
+    brandName: "",
+    assistantName: "",
+    replyTone: "friendly",
+    llmProvider: null,
+    llmModel: null,
+    supportState: "disabled",
+    webhookVerified: false,
+    redeliveryAcknowledged: false,
+    nativeRepliesDisabledAcknowledged: false,
+    providerTested: false,
+    version: 0,
+    createdAt: configuration.createdAt,
+    updatedAt: configuration.updatedAt,
+  });
+  assert.equal(stored.webhookKeyHash, WEBHOOK_KEY_HASH);
+  assert.equal(JSON.stringify(configuration).includes(WEBHOOK_KEY_HASH), false);
+  assert.equal(stored.ownerEmail, "owner@example.com");
+
+  await rejectsStatus(
+    store.prepareWebhook("other@example.com", CONNECTION_ID, WEBHOOK_KEY_HASH),
+    404,
+  );
+  await rejectsStatus(
+    store.prepareWebhook("owner@example.com", CONNECTION_ID, "plaintext-webhook-key"),
+    400,
+  );
+});
+
+test("webhook preparation on a replacement LINE connection preserves settings and invalidates readiness", async () => {
+  const repository = createMemoryRepository();
+  repository.connections.set(SECOND_CONNECTION_ID, "owner@example.com");
+  const store = createStore(repository);
+  await store.updateConfiguration("owner@example.com", validConfiguration());
+  Object.assign(repository.configurations.get("owner@example.com"), {
+    supportState: "enabled",
+    webhookKeyHash: "b".repeat(64),
+    webhookVerifiedAt: new Date("2026-07-18T00:00:00.000Z"),
+    providerTestedAt: new Date("2026-07-18T00:00:00.000Z"),
+  });
+
+  const configuration = await store.prepareWebhook(
+    "owner@example.com",
+    SECOND_CONNECTION_ID,
+    WEBHOOK_KEY_HASH,
+  );
+
+  assert.equal(configuration.platformConnectionId, SECOND_CONNECTION_ID);
+  assert.equal(configuration.brandName, "Acme");
+  assert.equal(configuration.llmModel, "gemini-3.1-flash-lite");
+  assert.equal(configuration.redeliveryAcknowledged, true);
+  assert.equal(configuration.supportState, "disabled");
+  assert.equal(configuration.webhookVerified, false);
+  assert.equal(configuration.providerTested, false);
+  assert.equal(repository.configurations.get("owner@example.com").webhookKeyHash, WEBHOOK_KEY_HASH);
+});
+
+test("readiness mutations require the owner and configured connection and return redacted state", async () => {
+  const repository = createMemoryRepository();
+  const store = createStore(repository);
+  await store.prepareWebhook("owner@example.com", CONNECTION_ID, WEBHOOK_KEY_HASH);
+
+  const verified = await store.recordWebhookVerification("owner@example.com", CONNECTION_ID, true);
+  assert.equal(verified.webhookVerified, true);
+  assert.equal(
+    repository.configurations.get("owner@example.com").webhookVerifiedAt.toISOString(),
+    "2026-07-19T00:00:00.000Z",
+  );
+
+  const beforeProviderTest = await store.getConfiguration("owner@example.com");
+  const tested = await store.recordProviderTest(
+    "owner@example.com",
+    CONNECTION_ID,
+    true,
+    { expectedVersion: beforeProviderTest.version },
+  );
+  assert.equal(tested.providerTested, true);
+  assert.equal(
+    repository.configurations.get("owner@example.com").providerTestedAt.toISOString(),
+    "2026-07-19T00:00:00.000Z",
+  );
+  await rejectsStatus(
+    store.recordProviderTest(
+      "owner@example.com",
+      CONNECTION_ID,
+      false,
+      { expectedVersion: beforeProviderTest.version },
+    ),
+    409,
+  );
+  assert.equal((await store.getConfiguration("owner@example.com")).providerTested, true);
+
+  const beforeEnable = await store.getConfiguration("owner@example.com");
+  const enabled = await store.setSupportState(
+    "owner@example.com",
+    CONNECTION_ID,
+    "enabled",
+    { expectedVersion: beforeEnable.version },
+  );
+  assert.equal(enabled.supportState, "enabled");
+  assert.equal(JSON.stringify(enabled).includes(WEBHOOK_KEY_HASH), false);
+  await rejectsStatus(
+    store.setSupportState(
+      "owner@example.com",
+      CONNECTION_ID,
+      "enabled",
+      { expectedVersion: beforeEnable.version },
+    ),
+    409,
+  );
+
+  const unverified = await store.recordWebhookVerification("owner@example.com", CONNECTION_ID, false);
+  assert.equal(unverified.webhookVerified, false);
+  assert.equal(unverified.supportState, "disabled");
+
+  const beforeSecondEnable = await store.getConfiguration("owner@example.com");
+  await store.setSupportState(
+    "owner@example.com",
+    CONNECTION_ID,
+    "enabled",
+    { expectedVersion: beforeSecondEnable.version },
+  );
+  const beforeFailedProvider = await store.getConfiguration("owner@example.com");
+  const failedProvider = await store.recordProviderTest(
+    "owner@example.com",
+    CONNECTION_ID,
+    false,
+    { expectedVersion: beforeFailedProvider.version },
+  );
+  assert.equal(failedProvider.providerTested, false);
+  assert.equal(failedProvider.supportState, "disabled");
+
+  await rejectsStatus(
+    store.recordWebhookVerification("owner@example.com", SECOND_CONNECTION_ID, true),
+    404,
+  );
+  await rejectsStatus(
+    store.setSupportState("other@example.com", CONNECTION_ID, "disabled"),
+    404,
+  );
+  await rejectsStatus(
+    store.setSupportState("owner@example.com", CONNECTION_ID, "paused"),
+    400,
+  );
 });
 
 test("FAQ CRUD normalizes content, deduplicates keywords, and stays owner scoped", async () => {
@@ -256,14 +416,15 @@ function createMemoryRepository() {
     },
     async createConfiguration(ownerEmail, record) {
       calls.push(["createConfiguration", ownerEmail, record]);
-      const stored = { ...record, ownerEmail, webhookKeyHash: "webhook-hash" };
+      const stored = { ...record, ownerEmail };
       configurations.set(ownerEmail, stored);
       return stored;
     },
-    async updateConfiguration(ownerEmail, id, changes) {
-      calls.push(["updateConfiguration", ownerEmail, id, changes]);
+    async updateConfiguration(ownerEmail, id, changes, options = {}) {
+      calls.push(["updateConfiguration", ownerEmail, id, changes, options]);
       const current = configurations.get(ownerEmail);
       if (!current || current.id !== id) return null;
+      if (options.expectedVersion != null && current.version !== options.expectedVersion) return null;
       const stored = { ...current, ...changes };
       configurations.set(ownerEmail, stored);
       return stored;

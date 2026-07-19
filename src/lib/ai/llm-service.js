@@ -38,10 +38,11 @@ export function generateText({
   systemPrompt,
   prompt,
   fetchImpl = fetch,
+  signal,
 }) {
   return llmProvider === "openai"
-    ? generateWithOpenAI(prompt, llmModel, settings, fetchImpl, systemPrompt)
-    : generateWithGemini(prompt, llmModel, settings, fetchImpl, systemPrompt);
+    ? generateWithOpenAI(prompt, llmModel, settings, fetchImpl, systemPrompt, signal)
+    : generateWithGemini(prompt, llmModel, settings, fetchImpl, systemPrompt, signal);
 }
 
 export function buildPlatformPrompt(platform, input) {
@@ -59,7 +60,7 @@ export function buildPlatformPrompt(platform, input) {
   ].join("\n");
 }
 
-async function generateWithOpenAI(prompt, llmModel, settings, fetchImpl, systemPrompt) {
+async function generateWithOpenAI(prompt, llmModel, settings, fetchImpl, systemPrompt, signal) {
   if (!settings.openAiApiKey) {
     throw new Error("OPENAI_API_KEY is required.");
   }
@@ -71,6 +72,7 @@ async function generateWithOpenAI(prompt, llmModel, settings, fetchImpl, systemP
         "Content-Type": "application/json",
         Authorization: `Bearer ${settings.openAiApiKey}`,
       },
+      signal,
       body: JSON.stringify({
         model: getLLMModel("openai", llmModel),
         ...(systemPrompt ? { instructions: systemPrompt } : {}),
@@ -83,7 +85,7 @@ async function generateWithOpenAI(prompt, llmModel, settings, fetchImpl, systemP
   return extractOpenAIText(body);
 }
 
-async function generateWithGemini(prompt, llmModel, settings, fetchImpl, systemPrompt) {
+async function generateWithGemini(prompt, llmModel, settings, fetchImpl, systemPrompt, signal) {
   if (!settings.googleAiApiKey) {
     throw new Error("GOOGLE_AI_API_KEY is required.");
   }
@@ -96,6 +98,7 @@ async function generateWithGemini(prompt, llmModel, settings, fetchImpl, systemP
         "Content-Type": "application/json",
         "x-goog-api-key": settings.googleAiApiKey,
       },
+      signal,
       body: JSON.stringify({
         model,
         ...(systemPrompt ? { system_instruction: systemPrompt } : {}),
