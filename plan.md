@@ -396,3 +396,52 @@ npx drizzle-kit push          # 推送 schema 到 Turso DB
 4. **立即發文測試**：選擇立即發文，確認各平台成功發文
 5. **排程發文測試**：設定排程，手動呼叫 `/api/cron`，確認自動發文
 6. **Blob 上傳測試**：驗證圖片成功上傳並取得公開 URL
+
+---
+
+## LINE AI Customer Support — Post-MVP Backlog (2026-07-19)
+
+The approved MVP design is documented in
+`docs/superpowers/specs/2026-07-19-line-ai-customer-support-design.md`.
+The following items are intentionally deferred until the personal-account,
+one-to-one, text-only LINE support MVP has been validated:
+
+### Tenant and operations
+
+- Organization/workspace tenancy, organization membership, roles, and permissions.
+- Shared support inboxes, conversation assignment, ownership transfer, and collision handling.
+- Multiple simultaneous LINE or Meta connections per workspace.
+- Configurable business hours, SLA policies, holidays, and escalation schedules.
+
+### Additional channels
+
+- Meta Messenger/DM support through a platform-specific adapter.
+- LINE group and multi-person chat support, including reply-only-when-mentioned rules.
+- Additional messaging channels after their OAuth, webhook, review, and send-window requirements are verified.
+
+### Knowledge and AI
+
+- PDF/document upload, website synchronization, chunking, embeddings, and vector retrieval.
+- Knowledge-source versioning, approval workflow, citations, and stale-content detection.
+- Image understanding, audio transcription, and safe attachment/file processing.
+- Provider fallback, model routing, evaluation datasets, regression scoring, and cost budgets.
+- FAQ suggestions generated from resolved human conversations with explicit approval before publishing.
+
+### Human support
+
+- Email, Slack, or other external handoff notifications that link back to the in-app inbox.
+- Team assignment, internal notes, tags, canned responses, mentions, and collision indicators.
+- Customer satisfaction collection, response-time analytics, resolution analytics, and quality review.
+- Configurable retention, export, deletion, privacy-request, and legal-hold tooling.
+
+### Reliability and scale
+
+- Redis-backed rate limiting, distributed locks, hot FAQ cache, and short-lived session cache when load justifies them.
+- Dedicated queue or alternative durable worker infrastructure if Vercel Workflow no longer meets reliability, cost, or portability requirements.
+- Dead-letter review, automated operational alerts, replay tooling, and richer provider observability.
+
+### Business-system tools
+
+- CRM and customer-account lookup.
+- Order, shipping, payment, refund, and fulfillment integrations.
+- High-impact actions must use typed tools, explicit human confirmation, tenant authorization, idempotency, and audit logs; the LLM must never claim an action succeeded before the external system confirms it.
