@@ -4,6 +4,7 @@ import { test } from "node:test";
 
 import { createClient } from "@libsql/client";
 import { getTableColumns } from "drizzle-orm";
+import { getTableConfig } from "drizzle-orm/sqlite-core";
 
 import * as schema from "../src/lib/db/schema.js";
 
@@ -76,6 +77,35 @@ test("support schema exports all seven UUID-backed tables with the required fiel
   }
 });
 
+test("pending transitions preserve the circular conversation foreign keys", async () => {
+  const sql = await readFile(new URL("../drizzle/0004_line_ai_customer_support.sql", import.meta.url), "utf8");
+  assert.match(
+    sql,
+    /pending_transition_id[^,\n]*references\s+`support_conversation_transitions`\s*\(\s*`id`\s*\)/i,
+  );
+
+  const conversationForeignKeys = getTableConfig(schema.supportConversations).foreignKeys
+    .map((foreignKey) => foreignKey.reference());
+  assert.equal(
+    conversationForeignKeys.some((reference) => (
+      reference.columns[0] === schema.supportConversations.pendingTransitionId
+      && reference.foreignTable === schema.supportConversationTransitions
+      && reference.foreignColumns[0] === schema.supportConversationTransitions.id
+    )),
+    true,
+  );
+  const transitionForeignKeys = getTableConfig(schema.supportConversationTransitions).foreignKeys
+    .map((foreignKey) => foreignKey.reference());
+  assert.equal(
+    transitionForeignKeys.some((reference) => (
+      reference.columns[0] === schema.supportConversationTransitions.conversationId
+      && reference.foreignTable === schema.supportConversations
+      && reference.foreignColumns[0] === schema.supportConversations.id
+    )),
+    true,
+  );
+});
+
 test("support migration is journaled after 0003 and enforces customer and delivery idempotency", async () => {
   const sql = await readFile(new URL("../drizzle/0004_line_ai_customer_support.sql", import.meta.url), "utf8");
   const journal = JSON.parse(await readFile(new URL("../drizzle/meta/_journal.json", import.meta.url), "utf8"));
@@ -93,10 +123,19 @@ test("support migration is journaled after 0003 and enforces customer and delive
   ]) {
     assert.ok(snapshot.tables[tableName], `${tableName} must be represented in the 0004 snapshot`);
   }
+  assert.equal(
+    Object.values(snapshot.tables.support_conversations.foreignKeys).some((foreignKey) => (
+      foreignKey.columnsFrom[0] === "pending_transition_id"
+      && foreignKey.tableTo === "support_conversation_transitions"
+      && foreignKey.columnsTo[0] === "id"
+    )),
+    true,
+  );
 
   const client = createClient({ url: ":memory:" });
   try {
     await client.executeMultiple(`
+      PRAGMA foreign_keys=ON;
       CREATE TABLE platform_connections (id TEXT PRIMARY KEY NOT NULL);
       INSERT INTO platform_connections (id) VALUES ('line-1');
       ${sql.replaceAll("--> statement-breakpoint", "")}
@@ -154,6 +193,25 @@ test("support migration is journaled after 0003 and enforces customer and delive
       ...insertMessage,
       args: message("message-2"),
     }));
+
+    await client.execute(`
+      INSERT INTO support_conversation_transitions (
+        id, conversation_id, requested_action, from_status, to_status,
+        requested_by_owner_email, expected_version, requested_at,
+        effective_at, created_at
+      ) VALUES (
+        'transition-1', 'conversation-1', 'take_over', 'ai_active',
+        'human_active', 'owner@example.com', 0, 1, 2, 1
+      )
+    `);
+    await client.execute(
+      "UPDATE support_conversations SET pending_transition_id = 'transition-1' WHERE id = 'conversation-1'",
+    );
+    await assert.rejects(
+      client.execute(
+        "UPDATE support_conversations SET pending_transition_id = 'missing-transition' WHERE id = 'conversation-1'",
+      ),
+    );
   } finally {
     await client.close();
   }

@@ -76,6 +76,32 @@ test("support schema migration runs Drizzle and verifies a local database before
   assert.deepEqual(result, { schemaVerified: true });
 });
 
+test("atomic support migration rolls back schema and journal when verification fails", async () => {
+  const { migrateSupportSchemaAtomically } = await import(migrationModuleUrl);
+  const client = createClient({ url: ":memory:" });
+  try {
+    await assert.rejects(
+      migrateSupportSchemaAtomically(client, {
+        verificationStatements: [
+          "CREATE TEMP TABLE __forced_support_verification (valid INTEGER NOT NULL CHECK (valid = 1))",
+          "INSERT INTO __forced_support_verification (valid) VALUES (0)",
+        ],
+      }),
+      /constraint/i,
+    );
+    const supportTables = await client.execute(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'support_%'",
+    );
+    assert.deepEqual(supportTables.rows, []);
+    const migrationJournal = await client.execute(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '__drizzle_migrations'",
+    );
+    assert.deepEqual(migrationJournal.rows, []);
+  } finally {
+    await client.close();
+  }
+});
+
 test("support schema verifier checks all tables, named indexes, and duplicate active customers locally", async () => {
   const { verifySupportSchema } = await import(migrationModuleUrl);
   const migrationSql = await readFile(
@@ -101,6 +127,13 @@ test("support schema verifier checks all tables, named indexes, and duplicate ac
       "CREATE UNIQUE INDEX support_messages_idempotency_unique ON support_messages (idempotency_key)",
     );
 
+    await client.execute("DROP INDEX support_conversations_customer_unique");
+    await client.execute(`
+      CREATE UNIQUE INDEX support_conversations_customer_unique
+      ON support_conversations (platform_connection_id, customer_lookup_key)
+      WHERE status = 'ai_active'
+    `);
+    await assert.rejects(verifySupportSchema(client), /verification failed/i);
     await client.execute("DROP INDEX support_conversations_customer_unique");
     await client.execute(
       "CREATE INDEX support_conversations_customer_unique ON support_conversations (platform_connection_id, customer_lookup_key)",
@@ -129,6 +162,57 @@ test("support schema verifier checks all tables, named indexes, and duplicate ac
     await assert.rejects(verifySupportSchema(client), /verification failed/i);
   } finally {
     await client.close();
+  }
+});
+
+test("support schema verifier rejects malformed columns and missing foreign keys", async () => {
+  const { verifySupportSchema } = await import(migrationModuleUrl);
+  const migrationSql = await readFile(
+    new URL("../drizzle/0004_line_ai_customer_support.sql", import.meta.url),
+    "utf8",
+  );
+
+  const malformedColumnsClient = createClient({ url: ":memory:" });
+  try {
+    await malformedColumnsClient.executeMultiple(`
+      CREATE TABLE platform_connections (id TEXT PRIMARY KEY NOT NULL);
+      ${migrationSql.replaceAll("--> statement-breakpoint", "")}
+      PRAGMA foreign_keys=OFF;
+      DROP TABLE support_ai_decisions;
+      CREATE TABLE support_ai_decisions (id TEXT PRIMARY KEY NOT NULL);
+    `);
+    await assert.rejects(verifySupportSchema(malformedColumnsClient), /verification failed/i);
+  } finally {
+    await malformedColumnsClient.close();
+  }
+
+  const missingForeignKeyClient = createClient({ url: ":memory:" });
+  try {
+    await missingForeignKeyClient.executeMultiple(`
+      CREATE TABLE platform_connections (id TEXT PRIMARY KEY NOT NULL);
+      ${migrationSql.replaceAll("--> statement-breakpoint", "")}
+      PRAGMA foreign_keys=OFF;
+      DROP TABLE support_conversation_transitions;
+      CREATE TABLE support_conversation_transitions (
+        id TEXT PRIMARY KEY NOT NULL,
+        conversation_id TEXT NOT NULL,
+        requested_action TEXT NOT NULL,
+        from_status TEXT NOT NULL,
+        to_status TEXT NOT NULL,
+        requested_by_owner_email TEXT NOT NULL,
+        expected_version INTEGER NOT NULL,
+        requested_at INTEGER NOT NULL,
+        effective_at INTEGER NOT NULL,
+        cancelled_at INTEGER,
+        committed_at INTEGER,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX support_transitions_conversation_created_idx
+        ON support_conversation_transitions (conversation_id, created_at);
+    `);
+    await assert.rejects(verifySupportSchema(missingForeignKeyClient), /verification failed/i);
+  } finally {
+    await missingForeignKeyClient.close();
   }
 });
 

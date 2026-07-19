@@ -47,7 +47,7 @@ CREATE TABLE `support_conversations` (
   `status` text NOT NULL DEFAULT 'ai_active',
   `handoff_reason_code` text,
   `unread_count` integer NOT NULL DEFAULT 0,
-  `pending_transition_id` text,
+  `pending_transition_id` text REFERENCES `support_conversation_transitions`(`id`),
   `pending_action` text,
   `pending_action_effective_at` integer,
   `processing_claim_id` text,

@@ -142,7 +142,8 @@ export const supportConversations = sqliteTable("support_conversations", {
   status: text("status").notNull().default("ai_active"),
   handoffReasonCode: text("handoff_reason_code"),
   unreadCount: integer("unread_count").notNull().default(0),
-  pendingTransitionId: text("pending_transition_id"),
+  pendingTransitionId: text("pending_transition_id")
+    .references(() => supportConversationTransitions.id),
   pendingAction: text("pending_action"),
   pendingActionEffectiveAt: integer("pending_action_effective_at", { mode: "timestamp" }),
   processingClaimId: text("processing_claim_id"),

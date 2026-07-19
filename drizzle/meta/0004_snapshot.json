@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "e66d8109-ee83-4028-8020-7fe57f65f8fc",
+  "id": "d810ddd1-ef42-4512-80d7-133ff5a3f067",
   "prevId": "9f5b1ea3-4ccb-47df-b59b-bb40d90a86f0",
   "tables": {
     "audit_logs": {
@@ -1112,6 +1112,19 @@
           "tableTo": "platform_connections",
           "columnsFrom": [
             "platform_connection_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "support_conversations_pending_transition_id_support_conversation_transitions_id_fk": {
+          "name": "support_conversations_pending_transition_id_support_conversation_transitions_id_fk",
+          "tableFrom": "support_conversations",
+          "tableTo": "support_conversation_transitions",
+          "columnsFrom": [
+            "pending_transition_id"
           ],
           "columnsTo": [
             "id"
