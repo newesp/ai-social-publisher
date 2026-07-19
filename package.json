@@ -33,7 +33,8 @@
     "next-auth": "latest",
     "openai": "latest",
     "react": "latest",
-    "react-dom": "latest"
+    "react-dom": "latest",
+    "workflow": "^4.6.0"
   },
   "devDependencies": {
     "drizzle-kit": "latest"
