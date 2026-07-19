@@ -111,6 +111,17 @@ test("unexpected support failures return a generic 500 without owner or credenti
   assert.deepEqual(await response.json(), { error: "Request failed." });
 });
 
+test("support validation failures remain safe 400 responses", async () => {
+  const error = new Error("FAQ enabled must be a boolean.");
+  error.status = 400;
+  const response = routeErrorResponse(error, {
+    json: (body, init) => Response.json(body, init),
+  });
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "FAQ enabled must be a boolean." });
+});
+
 test("thin support routes use settings access, generic error responses, and lazy store creation", async () => {
   const sources = await Promise.all([
     routeSource("../src/app/api/support/configuration/route.js"),

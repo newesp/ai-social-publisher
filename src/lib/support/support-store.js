@@ -173,45 +173,51 @@ function validateFaq(input, { partial }) {
   const inputKeys = Object.keys(input);
   if (inputKeys.some((key) => !FAQ_KEYS.includes(key))) throw badRequest("FAQ contains unsupported fields.");
   if (partial && inputKeys.length === 0) throw badRequest("At least one FAQ field is required.");
+  const has = (key) => Object.hasOwn(input, key);
 
   const faq = {};
-  if (!partial || Object.hasOwn(input, "question")) {
+  if (!partial || has("question")) {
     faq.question = boundedRequiredText(input.question, "FAQ question", 500);
   }
-  if (!partial || Object.hasOwn(input, "answer")) {
+  if (!partial || has("answer")) {
     faq.answer = boundedRequiredText(input.answer, "FAQ answer", 4_000);
   }
-  if (!partial || Object.hasOwn(input, "category")) {
+  if (has("category")) {
     faq.category = boundedOptionalText(input.category, "FAQ category", 80);
+  } else if (!partial) {
+    faq.category = "";
   }
-  if (!partial || Object.hasOwn(input, "keywords")) {
+  if (has("keywords")) {
     faq.keywords = validateKeywords(input.keywords);
+  } else if (!partial) {
+    faq.keywords = [];
   }
-  if (!partial || Object.hasOwn(input, "enabled")) {
-    const enabled = input.enabled ?? true;
-    if (typeof enabled !== "boolean") throw badRequest("FAQ enabled must be a boolean.");
-    faq.enabled = enabled;
+  if (has("enabled")) {
+    if (typeof input.enabled !== "boolean") throw badRequest("FAQ enabled must be a boolean.");
+    faq.enabled = input.enabled;
+  } else if (!partial) {
+    faq.enabled = true;
   }
-  if (!partial || Object.hasOwn(input, "priority")) {
-    const priority = input.priority ?? 0;
-    if (!Number.isInteger(priority) || priority < -100 || priority > 100) {
+  if (has("priority")) {
+    if (!Number.isInteger(input.priority) || input.priority < -100 || input.priority > 100) {
       throw badRequest("FAQ priority must be an integer from -100 to 100.");
     }
-    faq.priority = priority;
+    faq.priority = input.priority;
+  } else if (!partial) {
+    faq.priority = 0;
   }
   return faq;
 }
 
 function validateKeywords(value) {
-  const keywords = value ?? [];
-  if (!Array.isArray(keywords) || keywords.length > 20) {
+  if (!Array.isArray(value)) {
     throw badRequest("FAQ keywords must contain at most 20 strings.");
   }
   const deduplicated = [];
   const seen = new Set();
-  for (const value of keywords) {
-    if (typeof value !== "string") throw badRequest("FAQ keywords must be strings.");
-    const keyword = value.trim();
+  for (const candidate of value) {
+    if (typeof candidate !== "string") throw badRequest("FAQ keywords must be strings.");
+    const keyword = candidate.trim();
     if (!keyword || keyword.length > 80) throw badRequest("FAQ keywords must be 1 to 80 characters.");
     const normalized = keyword.toLowerCase();
     if (!seen.has(normalized)) {
@@ -219,6 +225,7 @@ function validateKeywords(value) {
       deduplicated.push(keyword);
     }
   }
+  if (deduplicated.length > 20) throw badRequest("FAQ keywords must contain at most 20 strings.");
   return deduplicated;
 }
 
@@ -298,7 +305,8 @@ function boundedRequiredText(value, label, maxLength) {
 }
 
 function boundedOptionalText(value, label, maxLength) {
-  const text = String(value ?? "").trim();
+  if (typeof value !== "string") throw badRequest(`${label} must be a string.`);
+  const text = value.trim();
   if (text.length > maxLength) throw badRequest(`${label} must be at most ${maxLength} characters.`);
   return text;
 }

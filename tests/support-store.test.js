@@ -148,6 +148,84 @@ test("FAQ validation enforces content, keyword, and priority bounds", async () =
   await rejectsStatus(store.createFaq("owner@example.com", { question: "Q", answer: "A", extra: true }), 400);
 });
 
+test("FAQ create defaults only absent optional fields and rejects explicit invalid values", async () => {
+  const store = createStore();
+  const faq = await store.createFaq("owner@example.com", { question: "Q", answer: "A" });
+
+  assert.equal(faq.category, "");
+  assert.deepEqual(faq.keywords, []);
+  assert.equal(faq.enabled, true);
+  assert.equal(faq.priority, 0);
+
+  for (const invalid of [
+    { category: null },
+    { category: 123 },
+    { category: {} },
+    { keywords: null },
+    { keywords: "keyword" },
+    { enabled: null },
+    { enabled: "true" },
+    { priority: null },
+    { priority: "0" },
+  ]) {
+    await rejectsStatus(store.createFaq("owner@example.com", {
+      question: "Q",
+      answer: "A",
+      ...invalid,
+    }), 400);
+  }
+});
+
+test("FAQ update preserves absent optional fields and rejects explicit invalid values", async () => {
+  const store = createStore();
+  const faq = await store.createFaq("owner@example.com", {
+    question: "Q",
+    answer: "A",
+    category: "billing",
+    keywords: ["invoice"],
+    enabled: false,
+    priority: 7,
+  });
+  const updated = await store.updateFaq("owner@example.com", faq.id, { answer: "Updated" });
+
+  assert.equal(updated.category, "billing");
+  assert.deepEqual(updated.keywords, ["invoice"]);
+  assert.equal(updated.enabled, false);
+  assert.equal(updated.priority, 7);
+
+  for (const invalid of [
+    { category: null },
+    { category: 123 },
+    { keywords: null },
+    { keywords: {} },
+    { enabled: null },
+    { enabled: 1 },
+    { priority: null },
+    { priority: "7" },
+  ]) {
+    await rejectsStatus(store.updateFaq("owner@example.com", faq.id, invalid), 400);
+  }
+});
+
+test("FAQ keyword limits apply after trimming and deduplication", async () => {
+  const store = createStore();
+  const duplicateKeywords = Array.from({ length: 21 }, (_, index) => (
+    index % 2 === 0 ? " repeated " : "REPEATED"
+  ));
+  const faq = await store.createFaq("owner@example.com", {
+    question: "Q",
+    answer: "A",
+    keywords: duplicateKeywords,
+  });
+
+  assert.deepEqual(faq.keywords, ["repeated"]);
+  await rejectsStatus(store.createFaq("owner@example.com", {
+    question: "Q",
+    answer: "A",
+    keywords: Array.from({ length: 21 }, (_, index) => `keyword-${index}`),
+  }), 400);
+});
+
 function createStore(repository = createMemoryRepository()) {
   return createSupportStore({
     repository,
