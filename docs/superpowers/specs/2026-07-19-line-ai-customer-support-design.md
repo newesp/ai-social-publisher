@@ -340,8 +340,8 @@ Vercel Workflow is the asynchronous execution layer. The public route performs o
 For text messages:
 
 1. Acquire a per-conversation processing claim.
-2. Record a batching cutoff and wait for the three-second batching window.
-3. Atomically claim all eligible unprocessed text messages received by that cutoff for the next turn; later messages belong to the next turn.
+2. Record the batching-window start, wait three seconds, and set a fixed cutoff at the end of that window.
+3. Atomically claim all eligible unprocessed text messages received by that cutoff for the next turn; messages received after the cutoff belong to the next turn.
 4. Load the last ten user/assistant turns.
 5. Retrieve relevant FAQ entries.
 6. Load the owner's configured provider, model, and support settings.
