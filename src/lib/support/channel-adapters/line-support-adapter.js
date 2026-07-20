@@ -84,11 +84,12 @@ export function createLineSupportAdapter({
     async pushCanonical({ accessToken, canonicalBody, retryKey }) {
       const headers = providerHeaders(accessToken);
       headers["X-Line-Retry-Key"] = requireRetryKey(retryKey);
+      const body = requireCanonicalPushBody(canonicalBody);
       try {
         return await fetchWithDeadline(
           fetchImpl,
           `${LINE_API_BASE}/v2/bot/message/push`,
-          { method: "POST", headers, body: requireCanonicalPushBody(canonicalBody) },
+          { method: "POST", headers, body },
           requestTimeoutMs,
           async (response) => {
             try {

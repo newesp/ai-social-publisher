@@ -15,7 +15,9 @@ test("timeout and 5xx retry the identical persisted LINE Push body and UUID retr
     outboxStore: store,
     sendPush: async (request) => {
       calls.push(request);
-      if (calls.length === 1) throw new Error("private network timeout");
+      if (calls.length === 1) {
+        throw Object.assign(new Error("private network timeout"), { retryable: true });
+      }
       return { status: 503, headers: {} };
     },
     baseRetryDelayMs: 1_000,
@@ -31,6 +33,25 @@ test("timeout and 5xx retry the identical persisted LINE Push body and UUID retr
     { retryKey: RETRY_KEY, body: BODY },
   ]);
   assert.equal(store.attempts.every(({ retryKey, body }) => retryKey === RETRY_KEY && body === BODY), true);
+});
+
+test("only explicitly retryable transport failures retry; deterministic and unknown failures terminate safely", async () => {
+  for (const failure of [
+    Object.assign(new Error("private deterministic failure"), { retryable: false }),
+    new Error("private unclassified failure"),
+  ]) {
+    const store = createDeliveryStore();
+    const service = createLineOutboundDeliveryService({
+      outboxStore: store,
+      sendPush: async () => { throw failure; },
+    });
+
+    assert.deepEqual(await service.attemptDelivery({ deliveryId: DELIVERY_ID, now: NOW }), { status: "failed" });
+    assert.equal(store.status, "failed");
+    assert.equal(store.retryableWrites, 0);
+    assert.deepEqual(store.failedErrorCodes, ["line_push_unclassified_failure"]);
+    assert.equal(JSON.stringify(store.failedErrorCodes).includes("private"), false);
+  }
 });
 
 test("2xx and 409 with LINE accepted request ID are terminal sent outcomes", async () => {
@@ -87,6 +108,7 @@ function createDeliveryStore({ firstAttemptAt = null } = {}) {
     retryKey: RETRY_KEY,
     attempts: [],
     retryableWrites: 0,
+    failedErrorCodes: [],
     async claimDelivery({ deliveryId, now }) {
       assert.equal(deliveryId, DELIVERY_ID);
       if (firstAttemptAt && now.getTime() - firstAttemptAt.getTime() > 24 * 60 * 60 * 1_000) {
@@ -111,9 +133,10 @@ function createDeliveryStore({ firstAttemptAt = null } = {}) {
       this.retryableWrites += 1;
       return true;
     },
-    async markDeliveryFailed({ claimId: suppliedClaimId }) {
+    async markDeliveryFailed({ claimId: suppliedClaimId, safeErrorCode }) {
       assert.equal(suppliedClaimId, claimId);
       this.status = "failed";
+      this.failedErrorCodes.push(safeErrorCode);
       return true;
     },
   };

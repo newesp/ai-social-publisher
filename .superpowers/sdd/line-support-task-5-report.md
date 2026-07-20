@@ -158,3 +158,11 @@ The approved delivery-reliability prerequisite is implemented as the smallest re
 - Production build: `npm.cmd run build` with command-scoped disposable `AUTH_MODE=demo`, Turso, encryption, and blob values
   - Exit 0; optimized build passed.
 - `git diff --check` passed. Repository scans found only documented placeholder/example credential names; no newly added secret was found. No remote migration, live LINE/LLM/database call, deployment, or delivery action was performed.
+
+## Safe delivery-failure classification follow-up
+
+A review found that the delivery seam previously classified every thrown sender error as a timeout. The retry path now requires the adapter to explicitly set `error.retryable === true`; the adapter does this only for wrapped transport/deadline failures. Deterministic (`retryable: false`) and unclassified errors now persist terminal `line_push_unclassified_failure`, do not schedule a retry, and never expose raw error text. Canonical-body input validation runs outside the transport wrapper so input failures cannot be relabeled as retryable transport failures.
+
+- RED: `node --test tests/support-outbox-delivery.test.js` failed because a deterministic sender error returned `retryable` rather than terminal `failed`.
+- GREEN focused verification: `node --test tests/support-outbox-delivery.test.js tests/line-support-adapter.test.js tests/support-repository.test.js`
+  - Exit 0; 22 tests passed, 0 failed.

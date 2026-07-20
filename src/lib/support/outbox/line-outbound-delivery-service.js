@@ -24,16 +24,25 @@ export function createLineOutboundDeliveryService({
       let response;
       try {
         response = await sendPush({ retryKey: claim.retryKey, body: claim.canonicalBody });
-      } catch {
-        return recordRetryable({
-          outboxStore,
-          claim,
+      } catch (error) {
+        if (error?.retryable === true) {
+          return recordRetryable({
+            outboxStore,
+            claim,
+            deliveryId,
+            attemptedAt,
+            baseRetryDelayMs,
+            maxRetryDelayMs,
+            safeErrorCode: "line_push_transport",
+          });
+        }
+        await outboxStore.markDeliveryFailed({
           deliveryId,
-          attemptedAt,
-          baseRetryDelayMs,
-          maxRetryDelayMs,
-          safeErrorCode: "line_push_timeout",
+          claimId: claim.claimId,
+          safeErrorCode: "line_push_unclassified_failure",
+          now: attemptedAt,
         });
+        return { status: "failed" };
       }
 
       const status = Number(response?.status);
