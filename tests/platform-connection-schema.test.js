@@ -11,7 +11,10 @@ test("migration adds renewal leases and enforces one active connection per owner
   assert.match(sql, /renewal_lease_id/i);
   assert.match(sql, /renewal_lease_expires_at/i);
   assert.match(sql, /unique index.*owner.*platform/i);
-  assert.equal(journal.entries.at(-1).tag, "0003_renewal_leases_active_default");
+  assert.equal(
+    journal.entries.some((entry) => entry.idx === 3 && entry.tag === "0003_renewal_leases_active_default"),
+    true,
+  );
   assert.equal(snapshot.tables["platform_connections"].columns.renewal_lease_id.notNull, false);
 
   const client = createClient({ url: ":memory:" });

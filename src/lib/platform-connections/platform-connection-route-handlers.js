@@ -1,4 +1,12 @@
 import { createDbClient } from "../db/index.js";
+import { generateText } from "../ai/llm-service.js";
+import { getUserSettingsStore } from "../settings/settings-store.js";
+import { createLineSupportAdapter } from "../support/channel-adapters/line-support-adapter.js";
+import {
+  createSupportOnboardingService,
+  toSafeSupportReadiness,
+} from "../support/support-onboarding-service.js";
+import { getSupportStore } from "../support/support-store.js";
 
 import { createMetaOAuthService } from "./meta-oauth-service.js";
 import { createLineChannelService } from "./line-channel-service.js";
@@ -6,6 +14,9 @@ import { createOAuthTransactionStore } from "./oauth-transaction-store.js";
 import { createPlatformConnectionStore } from "./platform-connection-store.js";
 import { createPlatformConnectionsRepository } from "./platform-connections-repository.js";
 import { fetchWithDeadline } from "./connection-lifecycle.js";
+
+const supportProviderTestFlights = new Map();
+const supportWebhookProvisionFlights = new Map();
 
 export function createPlatformConnectionRouteHandlers({ requireOwner, getServices = () => getPlatformConnectionServices(), fetchImpl = fetch, requestTimeoutMs = 10_000, respond = (body, init) => Response.json(body, init), redirect = (url, status = 302) => Response.redirect(url, status) }) {
   return {
@@ -53,9 +64,37 @@ export function createPlatformConnectionRouteHandlers({ requireOwner, getService
     async connectLine(request) {
       const ownerEmail = await requireOwner();
       requireSameOrigin(request);
-      const { line } = await getServices();
+      const { line, connections, onboarding } = await getServices();
       const body = requireLineConnectBody(request, await jsonBody(request));
-      return respond({ connection: toAvailability(await line.connect(ownerEmail, body)) }, { status: 201 });
+      const connection = await line.connect(ownerEmail, body);
+      let internalConnection = null;
+      try {
+        internalConnection = await connections.getDefault(ownerEmail, "line");
+        if (!internalConnection?.id) throw new Error("LINE connection lookup failed.");
+        const setup = await onboarding.provisionLineWebhook(ownerEmail, internalConnection.id);
+        return respond({
+          connection: toAvailability(connection),
+          supportSetup: {
+            status: setup?.setupStatus === "verified" ? "verified" : "needs_action",
+            retryable: setup?.setupStatus !== "verified",
+          },
+          readiness: toSafeSupportReadiness(setup?.readiness),
+        }, { status: 201 });
+      } catch (setupError) {
+        let readiness = unavailableReadiness(connection);
+        if (internalConnection?.id) {
+          try {
+            readiness = await onboarding.getReadiness(ownerEmail, internalConnection.id);
+          } catch {
+            // Return a bounded fallback rather than provider or storage details.
+          }
+        }
+        return respond({
+          connection: toAvailability(connection),
+          supportSetup: { status: "retryable", retryable: true },
+          readiness: toSafeSupportReadiness(readiness),
+        }, { status: 201 });
+      }
     },
     async getMetaPending(request) {
       const ownerEmail = await requireOwner();
@@ -103,7 +142,28 @@ export function getPlatformConnectionServices(env = process.env) {
   const options = { repository, encryptionKey: env.SETTINGS_ENCRYPTION_KEY };
   const connections = createPlatformConnectionStore(options);
   const transactions = createOAuthTransactionStore(options);
-  return { connections, transactions, meta: createMetaOAuthService({ env, transactions, connections }), line: createLineChannelService({ connections }) };
+  const supportStore = getSupportStore(env);
+  const settingsStore = getUserSettingsStore(env);
+  const lineAdapter = createLineSupportAdapter({});
+  const onboarding = createSupportOnboardingService({
+    connections,
+    supportStore,
+    settingsStore,
+    lineAdapter,
+    generateTextImpl: generateText,
+    env,
+    providerTestFlights: supportProviderTestFlights,
+    webhookProvisionFlights: supportWebhookProvisionFlights,
+  });
+  return {
+    connections,
+    transactions,
+    supportStore,
+    settingsStore,
+    onboarding,
+    meta: createMetaOAuthService({ env, transactions, connections }),
+    line: createLineChannelService({ connections }),
+  };
 }
 
 export function requireSameOrigin(request) {
@@ -142,6 +202,28 @@ function toCallbackRedirect(requestUrl, result) {
 }
 
 function toAvailability(connection) { return { platform: connection.platform, state: connection.state, displayName: connection.displayName, expiresAt: connection.expiresAt ?? null }; }
+function unavailableReadiness(connection) {
+  return {
+    status: "needs_attention",
+    ready: false,
+    supportEnabled: false,
+    state: "disabled",
+    connection: {
+      connected: Boolean(connection),
+      active: connection?.platform === "line" && connection?.state === "active",
+      displayName: typeof connection?.displayName === "string" ? connection.displayName : "",
+    },
+    checks: {
+      lineActive: connection?.platform === "line" && connection?.state === "active",
+      providerConfigured: false,
+      providerTested: false,
+      enabledFaq: false,
+      webhookVerified: false,
+      redeliveryAcknowledged: false,
+      nativeRepliesDisabledAcknowledged: false,
+    },
+  };
+}
 function toSafePage(page) { return { id: String(page?.id ?? ""), name: String(page?.name ?? "") }; }
 function toSettingsPath(value) { const path = String(value ?? "").trim(); return path === "/settings" || path.startsWith("/settings?") || path.startsWith("/settings/") ? path : "/settings"; }
 function requireManagedPlatform(value) { const platform = String(value ?? "").trim().toLowerCase(); if (platform !== "meta" && platform !== "line") throw routeError("Publishing platform not found.", 404); return platform; }

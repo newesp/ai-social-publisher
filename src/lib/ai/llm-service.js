@@ -1,6 +1,8 @@
 import { getLLMModel } from "./model-config.js";
 import { filterActivePlatforms } from "../platforms/platform-config.js";
 
+const PROVIDER_TIMEOUT_MS = 15_000;
+
 export async function generatePlatformTargets({
   llmProvider = "google",
   llmModel,
@@ -38,10 +40,12 @@ export function generateText({
   systemPrompt,
   prompt,
   fetchImpl = fetch,
+  signal,
 }) {
+  const boundedSignal = signal ?? AbortSignal.timeout(PROVIDER_TIMEOUT_MS);
   return llmProvider === "openai"
-    ? generateWithOpenAI(prompt, llmModel, settings, fetchImpl, systemPrompt)
-    : generateWithGemini(prompt, llmModel, settings, fetchImpl, systemPrompt);
+    ? generateWithOpenAI(prompt, llmModel, settings, fetchImpl, systemPrompt, boundedSignal)
+    : generateWithGemini(prompt, llmModel, settings, fetchImpl, systemPrompt, boundedSignal);
 }
 
 export function buildPlatformPrompt(platform, input) {
@@ -59,7 +63,7 @@ export function buildPlatformPrompt(platform, input) {
   ].join("\n");
 }
 
-async function generateWithOpenAI(prompt, llmModel, settings, fetchImpl, systemPrompt) {
+async function generateWithOpenAI(prompt, llmModel, settings, fetchImpl, systemPrompt, signal) {
   if (!settings.openAiApiKey) {
     throw new Error("OPENAI_API_KEY is required.");
   }
@@ -71,6 +75,7 @@ async function generateWithOpenAI(prompt, llmModel, settings, fetchImpl, systemP
         "Content-Type": "application/json",
         Authorization: `Bearer ${settings.openAiApiKey}`,
       },
+      signal,
       body: JSON.stringify({
         model: getLLMModel("openai", llmModel),
         ...(systemPrompt ? { instructions: systemPrompt } : {}),
@@ -83,7 +88,7 @@ async function generateWithOpenAI(prompt, llmModel, settings, fetchImpl, systemP
   return extractOpenAIText(body);
 }
 
-async function generateWithGemini(prompt, llmModel, settings, fetchImpl, systemPrompt) {
+async function generateWithGemini(prompt, llmModel, settings, fetchImpl, systemPrompt, signal) {
   if (!settings.googleAiApiKey) {
     throw new Error("GOOGLE_AI_API_KEY is required.");
   }
@@ -96,6 +101,7 @@ async function generateWithGemini(prompt, llmModel, settings, fetchImpl, systemP
         "Content-Type": "application/json",
         "x-goog-api-key": settings.googleAiApiKey,
       },
+      signal,
       body: JSON.stringify({
         model,
         ...(systemPrompt ? { system_instruction: systemPrompt } : {}),
@@ -111,7 +117,10 @@ async function generateWithGemini(prompt, llmModel, settings, fetchImpl, systemP
 async function readJsonResponse(response, fallbackMessage) {
   const body = await response.json().catch(async () => ({ raw: await response.text() }));
   if (!response.ok) {
-    throw new Error(body.error?.message ?? body.message ?? fallbackMessage);
+    void body;
+    const error = new Error(fallbackMessage);
+    error.retryable = response.status === 408 || response.status === 429 || response.status >= 500;
+    throw error;
   }
   return body;
 }
@@ -152,6 +161,11 @@ async function requestProvider(providerName, request) {
   try {
     return await request();
   } catch (error) {
-    throw new Error(`${providerName} API request failed: ${error.message}`);
+    const wrapped = new Error(`${providerName} API request failed: ${error.message}`);
+    wrapped.retryable = error?.retryable === true
+      || error?.name === "AbortError"
+      || error?.name === "TimeoutError"
+      || error instanceof TypeError;
+    throw wrapped;
   }
 }

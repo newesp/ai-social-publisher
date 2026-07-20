@@ -23,5 +23,5 @@ export default function middleware(request) {
 }
 
 export const config = {
-  matcher: ["/((?!api/auth|api/cron|_next/static|_next/image|favicon.ico).*)"],
+  matcher: ["/((?!api/auth|api/cron|api/webhooks/line(?:/|$)|.well-known/workflow/|_next/static|_next/image|favicon.ico).*)"],
 };

@@ -89,3 +89,207 @@ export const auditLogs = sqliteTable("audit_logs", {
   metadataJson: text("metadata_json").notNull().default("{}"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
 });
+
+export const supportConfigurations = sqliteTable("support_configurations", {
+  id: text("id").primaryKey(),
+  ownerEmail: text("owner_email").notNull(),
+  platformConnectionId: text("platform_connection_id")
+    .notNull()
+    .references(() => platformConnections.id),
+  brandName: text("brand_name").notNull().default(""),
+  assistantName: text("assistant_name").notNull().default(""),
+  replyTone: text("reply_tone").notNull().default("friendly"),
+  llmProvider: text("llm_provider"),
+  llmModel: text("llm_model"),
+  supportState: text("support_state").notNull().default("disabled"),
+  webhookKeyHash: text("webhook_key_hash"),
+  webhookVerifiedAt: integer("webhook_verified_at", { mode: "timestamp" }),
+  redeliveryAcknowledgedAt: integer("redelivery_acknowledged_at", { mode: "timestamp" }),
+  nativeRepliesDisabledAcknowledgedAt: integer("native_replies_disabled_acknowledged_at", { mode: "timestamp" }),
+  providerTestedAt: integer("provider_tested_at", { mode: "timestamp" }),
+  version: integer("version").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  uniqueIndex("support_configurations_connection_unique").on(table.platformConnectionId),
+  uniqueIndex("support_configurations_webhook_key_unique").on(table.webhookKeyHash),
+]);
+
+export const supportFaqs = sqliteTable("support_faqs", {
+  id: text("id").primaryKey(),
+  ownerEmail: text("owner_email").notNull(),
+  question: text("question").notNull(),
+  answer: text("answer").notNull(),
+  category: text("category").notNull(),
+  keywordsJson: text("keywords_json").notNull().default("[]"),
+  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  priority: integer("priority").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  index("support_faqs_owner_enabled_idx").on(table.ownerEmail, table.enabled, table.priority),
+]);
+
+export const supportConversations = sqliteTable("support_conversations", {
+  id: text("id").primaryKey(),
+  ownerEmail: text("owner_email").notNull(),
+  platformConnectionId: text("platform_connection_id")
+    .notNull()
+    .references(() => platformConnections.id),
+  platform: text("platform").notNull(),
+  customerLookupKey: text("customer_lookup_key").notNull(),
+  encryptedCustomerExternalId: text("encrypted_customer_external_id").notNull(),
+  status: text("status").notNull().default("ai_active"),
+  handoffReasonCode: text("handoff_reason_code"),
+  unreadCount: integer("unread_count").notNull().default(0),
+  pendingTransitionId: text("pending_transition_id")
+    .references(() => supportConversationTransitions.id),
+  pendingAction: text("pending_action"),
+  pendingActionEffectiveAt: integer("pending_action_effective_at", { mode: "timestamp" }),
+  processingClaimId: text("processing_claim_id"),
+  processingClaimExpiresAt: integer("processing_claim_expires_at", { mode: "timestamp" }),
+  version: integer("version").notNull().default(0),
+  lastInboundAt: integer("last_inbound_at", { mode: "timestamp" }),
+  lastOutboundAt: integer("last_outbound_at", { mode: "timestamp" }),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  index("support_conversations_owner_status_updated_idx").on(table.ownerEmail, table.status, table.updatedAt),
+  index("support_conversations_inbox_covering_idx").on(
+    table.ownerEmail,
+    sql`${table.updatedAt} desc`,
+    sql`${table.id} desc`,
+    table.status,
+    table.unreadCount,
+    table.handoffReasonCode,
+    table.lastInboundAt,
+    table.lastOutboundAt,
+    table.pendingTransitionId,
+  ),
+  uniqueIndex("support_conversations_customer_unique").on(table.platformConnectionId, table.customerLookupKey),
+]);
+
+export const supportMessages = sqliteTable("support_messages", {
+  id: text("id").primaryKey(),
+  conversationId: text("conversation_id")
+    .notNull()
+    .references(() => supportConversations.id),
+  direction: text("direction").notNull(),
+  senderType: text("sender_type").notNull(),
+  messageType: text("message_type").notNull(),
+  textContent: text("text_content"),
+  safeMetadataJson: text("safe_metadata_json").notNull().default("{}"),
+  providerMessageId: text("provider_message_id"),
+  deliveryStatus: text("delivery_status").notNull(),
+  idempotencyKey: text("idempotency_key").notNull(),
+  sentAt: integer("sent_at", { mode: "timestamp" }),
+  failedAt: integer("failed_at", { mode: "timestamp" }),
+  safeErrorCode: text("safe_error_code"),
+  processedAt: integer("processed_at", { mode: "timestamp" }),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  index("support_messages_conversation_created_idx").on(table.conversationId, table.createdAt),
+  index("support_messages_retention_created_idx").on(table.createdAt, table.id)
+    .where(sql`${table.textContent} IS NOT NULL`),
+  uniqueIndex("support_messages_idempotency_unique").on(table.idempotencyKey),
+]);
+
+export const supportAiDecisions = sqliteTable("support_ai_decisions", {
+  id: text("id").primaryKey(),
+  conversationId: text("conversation_id")
+    .notNull()
+    .references(() => supportConversations.id),
+  inboundMessageId: text("inbound_message_id")
+    .notNull()
+    .references(() => supportMessages.id),
+  action: text("action").notNull(),
+  category: text("category"),
+  reasonCode: text("reason_code"),
+  answerMessageId: text("answer_message_id").references(() => supportMessages.id),
+  faqIdsJson: text("faq_ids_json").notNull().default("[]"),
+  llmProvider: text("llm_provider"),
+  llmModel: text("llm_model"),
+  promptVersion: text("prompt_version").notNull(),
+  inputTokens: integer("input_tokens"),
+  outputTokens: integer("output_tokens"),
+  latencyMs: integer("latency_ms"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  index("support_ai_decisions_conversation_created_id_idx").on(table.conversationId, table.createdAt, table.id),
+]);
+
+export const supportWebhookEvents = sqliteTable("support_webhook_events", {
+  id: text("id").primaryKey(),
+  platformConnectionId: text("platform_connection_id")
+    .notNull()
+    .references(() => platformConnections.id),
+  webhookEventId: text("webhook_event_id").notNull(),
+  sourceType: text("source_type").notNull(),
+  processingStatus: text("processing_status").notNull(),
+  encryptedReplyToken: text("encrypted_reply_token"),
+  replyTokenExpiresAt: integer("reply_token_expires_at", { mode: "timestamp" }),
+  safeErrorCode: text("safe_error_code"),
+  receivedAt: integer("received_at", { mode: "timestamp" }).notNull(),
+  processedAt: integer("processed_at", { mode: "timestamp" }),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  uniqueIndex("support_webhook_events_connection_event_unique")
+    .on(table.platformConnectionId, table.webhookEventId),
+  index("support_webhook_events_retention_reply_token_idx").on(table.replyTokenExpiresAt, table.id)
+    .where(sql`${table.encryptedReplyToken} IS NOT NULL`),
+]);
+
+export const supportOutboundDeliveries = sqliteTable("support_outbound_deliveries", {
+  id: text("id").primaryKey(),
+  webhookEventId: text("webhook_event_id")
+    .notNull()
+    .references(() => supportWebhookEvents.id),
+  conversationId: text("conversation_id")
+    .notNull()
+    .references(() => supportConversations.id),
+  encryptedRecipient: text("encrypted_recipient").notNull(),
+  encryptedCanonicalBody: text("encrypted_canonical_body").notNull(),
+  retryKey: text("retry_key").notNull(),
+  deliveryStatus: text("delivery_status").notNull(),
+  deliveryClaimId: text("delivery_claim_id"),
+  deliveryClaimExpiresAt: integer("delivery_claim_expires_at", { mode: "timestamp" }),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  firstAttemptAt: integer("first_attempt_at", { mode: "timestamp" }),
+  lastAttemptAt: integer("last_attempt_at", { mode: "timestamp" }),
+  nextAttemptAt: integer("next_attempt_at", { mode: "timestamp" }),
+  acceptedRequestId: text("accepted_request_id"),
+  safeErrorCode: text("safe_error_code"),
+  sentAt: integer("sent_at", { mode: "timestamp" }),
+  failedAt: integer("failed_at", { mode: "timestamp" }),
+  humanReviewAt: integer("human_review_at", { mode: "timestamp" }),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  uniqueIndex("support_outbound_deliveries_event_unique").on(table.webhookEventId),
+  uniqueIndex("support_outbound_deliveries_retry_key_unique").on(table.retryKey),
+  index("support_outbound_deliveries_status_next_attempt_idx")
+    .on(table.deliveryStatus, table.nextAttemptAt),
+  index("support_outbound_deliveries_conversation_status_idx")
+    .on(table.conversationId, table.deliveryStatus),
+  index("support_outbound_deliveries_retention_status_created_idx")
+    .on(table.deliveryStatus, table.createdAt, table.id)
+    .where(sql`${table.encryptedCanonicalBody} <> ''`),
+]);
+
+export const supportConversationTransitions = sqliteTable("support_conversation_transitions", {
+  id: text("id").primaryKey(),
+  conversationId: text("conversation_id")
+    .notNull()
+    .references(() => supportConversations.id),
+  requestedAction: text("requested_action").notNull(),
+  fromStatus: text("from_status").notNull(),
+  toStatus: text("to_status").notNull(),
+  requestedByOwnerEmail: text("requested_by_owner_email").notNull(),
+  expectedVersion: integer("expected_version").notNull(),
+  requestedAt: integer("requested_at", { mode: "timestamp" }).notNull(),
+  effectiveAt: integer("effective_at", { mode: "timestamp" }).notNull(),
+  cancelledAt: integer("cancelled_at", { mode: "timestamp" }),
+  committedAt: integer("committed_at", { mode: "timestamp" }),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  index("support_transitions_conversation_created_idx").on(table.conversationId, table.createdAt),
+]);

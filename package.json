@@ -13,6 +13,7 @@
     "start": "next start",
     "migrate:platform-connections": "node scripts/migrate-platform-connections.mjs",
     "migrate:platform-schema": "node scripts/apply-platform-schema.mjs",
+    "migrate:support-schema": "node scripts/apply-support-schema.mjs",
     "cleanup:legacy-platform-credentials": "node scripts/remove-legacy-platform-credentials.mjs",
     "test": "node --test"
   },
@@ -33,7 +34,8 @@
     "next-auth": "latest",
     "openai": "latest",
     "react": "latest",
-    "react-dom": "latest"
+    "react-dom": "latest",
+    "workflow": "^4.6.0"
   },
   "devDependencies": {
     "drizzle-kit": "latest"

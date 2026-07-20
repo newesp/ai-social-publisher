@@ -11,11 +11,12 @@ import {
   UnstyledButton,
 } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
-import { IconCalendarStats, IconLogout, IconPencilPlus, IconSettings } from "@tabler/icons-react";
+import { IconCalendarStats, IconLogout, IconMessages, IconPencilPlus, IconSettings } from "@tabler/icons-react";
 import { useEffect, useState } from "react";
 import { clearWizardDraft } from "../lib/wizard/wizard-draft-storage.js";
 
 const navItems = [
+  { href: "/support", label: "Support inbox", icon: IconMessages, value: "support" },
   { href: "/", label: "新增貼文", icon: IconPencilPlus, value: "create" },
   { href: "/history", label: "歷史與排程", icon: IconCalendarStats, value: "history" },
   { href: "/settings", label: "系統設定", icon: IconSettings, value: "settings" },
@@ -24,6 +25,7 @@ const navItems = [
 export function AppShellFrame({ active, children }) {
   const [opened, { toggle }] = useDisclosure();
   const [user, setUser] = useState(null);
+  const [supportCount, setSupportCount] = useState(0);
 
   useEffect(() => {
     let current = true;
@@ -34,6 +36,28 @@ export function AppShellFrame({ active, children }) {
       })
       .catch(() => {});
     return () => { current = false; };
+  }, []);
+
+  useEffect(() => {
+    let current = true;
+    let controller = null;
+    const refreshSupportCount = async () => {
+      if (document.visibilityState !== "visible") return;
+      controller?.abort();
+      controller = new AbortController();
+      try {
+        const response = await fetch("/api/support/conversations", { signal: controller.signal });
+        const data = response.ok ? await response.json() : null;
+        if (current && Number.isSafeInteger(data?.attentionCount) && data.attentionCount >= 0) {
+          setSupportCount(data.attentionCount);
+        }
+      } catch {}
+    };
+    const refreshWhenVisible = () => { if (document.visibilityState === "visible") refreshSupportCount(); };
+    refreshSupportCount();
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    const timer = window.setInterval(refreshWhenVisible, 15000);
+    return () => { current = false; controller?.abort(); document.removeEventListener("visibilitychange", refreshWhenVisible); window.clearInterval(timer); };
   }, []);
 
   return (
@@ -76,6 +100,7 @@ export function AppShellFrame({ active, children }) {
               label={item.label}
               active={active === item.value}
               leftSection={<Icon size={18} />}
+              rightSection={item.value === "support" && supportCount > 0 ? <Text size="xs">{supportCount}</Text> : null}
             />
           );
         })}

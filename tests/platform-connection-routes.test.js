@@ -208,12 +208,68 @@ test("Meta pending Page route obtains choices only for the authenticated owner a
 
 test("LINE connect is owner-scoped, same-origin protected, and returns only safe availability", async () => {
   const calls = [];
+  const readiness = {
+    status: "ready",
+    ready: true,
+    supportEnabled: false,
+    state: "disabled",
+    connection: { connected: true, active: true, displayName: "Owner OA" },
+    checks: {
+      lineActive: true,
+      providerConfigured: true,
+      providerTested: false,
+      enabledFaq: true,
+      webhookVerified: true,
+      redeliveryAcknowledged: true,
+      nativeRepliesDisabledAcknowledged: true,
+    },
+  };
   const handlers = createPlatformConnectionRouteHandlers({
     requireOwner: async () => "owner@example.com",
-    getServices: async () => ({ line: { async connect(...args) { calls.push(args); return {
-      id: "connection-1", ownerEmail: "owner@example.com", platform: "line", state: "active", displayName: "Owner OA",
-      expiresAt: new Date("2026-08-12T00:00:00.000Z"), credentials: { channelSecret: "secret", accessToken: "token" },
-    }; } } }),
+    getServices: async () => ({
+      line: {
+        async connect(...args) {
+          calls.push(["connect", ...args]);
+          return {
+            platform: "line",
+            state: "active",
+            displayName: "Owner OA",
+            expiresAt: new Date("2026-08-12T00:00:00.000Z"),
+          };
+        },
+      },
+      connections: {
+        async getDefault(...args) {
+          calls.push(["getDefault", ...args]);
+          return {
+            id: "connection-1",
+            ownerEmail: "owner@example.com",
+            platform: "line",
+            state: "active",
+            displayName: "Owner OA",
+            credentials: { channelSecret: "secret", accessToken: "token" },
+          };
+        },
+      },
+      onboarding: {
+        async provisionLineWebhook(...args) {
+          calls.push(["provision", ...args]);
+          return {
+            webhookUrl: "https://publisher.example/api/webhooks/line/private-webhook-key",
+            setupStatus: "verified",
+            readiness: {
+              ...readiness,
+              webhookKeyHash: "private-webhook-hash",
+              connection: {
+                ...readiness.connection,
+                id: "connection-1",
+                credentials: { accessToken: "token" },
+              },
+            },
+          };
+        },
+      },
+    }),
   });
 
   const response = await handlers.connectLine(new Request("https://publisher.example/api/platform-connections/line", {
@@ -221,10 +277,184 @@ test("LINE connect is owner-scoped, same-origin protected, and returns only safe
   }));
   const body = await response.json();
 
-  assert.deepEqual(calls, [["owner@example.com", { channelId: "channel-id", channelSecret: "channel-secret" }]]);
-  assert.deepEqual(body, { connection: { platform: "line", state: "active", displayName: "Owner OA", expiresAt: "2026-08-12T00:00:00.000Z" } });
+  assert.deepEqual(calls, [
+    ["connect", "owner@example.com", { channelId: "channel-id", channelSecret: "channel-secret" }],
+    ["getDefault", "owner@example.com", "line"],
+    ["provision", "owner@example.com", "connection-1"],
+  ]);
+  assert.deepEqual(body, {
+    connection: {
+      platform: "line",
+      state: "active",
+      displayName: "Owner OA",
+      expiresAt: "2026-08-12T00:00:00.000Z",
+    },
+    supportSetup: { status: "verified", retryable: false },
+    readiness,
+  });
   assert.equal(JSON.stringify(body).includes("secret"), false);
   assert.equal(JSON.stringify(body).includes("token"), false);
+  assert.equal(JSON.stringify(body).includes("connection-1"), false);
+  assert.equal(JSON.stringify(body).includes("private-webhook-key"), false);
+});
+
+test("LINE connect retains the connection and returns a safe retry state when webhook setup fails", async () => {
+  const calls = [];
+  const readiness = {
+    status: "needs_attention",
+    ready: false,
+    supportEnabled: false,
+    state: "disabled",
+    connection: { connected: true, active: true, displayName: "Owner OA" },
+    checks: {
+      lineActive: true,
+      providerConfigured: false,
+      providerTested: false,
+      enabledFaq: false,
+      webhookVerified: false,
+      redeliveryAcknowledged: false,
+      nativeRepliesDisabledAcknowledged: false,
+    },
+  };
+  const handlers = createPlatformConnectionRouteHandlers({
+    requireOwner: async () => "owner@example.com",
+    getServices: async () => ({
+      line: {
+        async connect() {
+          return {
+            platform: "line",
+            state: "active",
+            displayName: "Owner OA",
+            expiresAt: null,
+          };
+        },
+      },
+      connections: {
+        async getDefault() {
+          return {
+            id: "connection-1",
+            platform: "line",
+            state: "active",
+            credentials: { accessToken: "line-access-token" },
+          };
+        },
+      },
+      onboarding: {
+        async provisionLineWebhook() {
+          throw new Error("private LINE provider body with line-access-token");
+        },
+        async setSupportEnabled(...args) {
+          calls.push(["disable", ...args]);
+          return { supportEnabled: false, state: "disabled" };
+        },
+        async getReadiness(...args) {
+          calls.push(["readiness", ...args]);
+          return readiness;
+        },
+      },
+    }),
+  });
+
+  const response = await handlers.connectLine(new Request("https://publisher.example/api/platform-connections/line", {
+    method: "POST",
+    headers: { origin: "https://publisher.example", "content-type": "application/json" },
+    body: JSON.stringify({ channelId: "channel-id", channelSecret: "channel-secret" }),
+  }));
+  const body = await response.json();
+
+  assert.equal(response.status, 201);
+  assert.deepEqual(calls, [
+    ["readiness", "owner@example.com", "connection-1"],
+  ]);
+  assert.deepEqual(body, {
+    connection: {
+      platform: "line",
+      state: "active",
+      displayName: "Owner OA",
+      expiresAt: null,
+    },
+    supportSetup: { status: "retryable", retryable: true },
+    readiness,
+  });
+  assert.equal(JSON.stringify(body).includes("private LINE provider body"), false);
+  assert.equal(JSON.stringify(body).includes("line-access-token"), false);
+  assert.equal(JSON.stringify(body).includes("connection-1"), false);
+});
+
+test("LINE connect does not disable a newer webhook attempt when provisioning is already in flight", async () => {
+  let disableCalls = 0;
+  const handlers = createPlatformConnectionRouteHandlers({
+    requireOwner: async () => "owner@example.com",
+    getServices: async () => ({
+      line: {
+        async connect() {
+          return {
+            platform: "line",
+            state: "active",
+            displayName: "Owner OA",
+            expiresAt: null,
+          };
+        },
+      },
+      connections: {
+        async getDefault() {
+          return {
+            id: "connection-1",
+            platform: "line",
+            state: "active",
+          };
+        },
+      },
+      onboarding: {
+        async provisionLineWebhook() {
+          const error = new Error("LINE support setup is already in progress.");
+          error.status = 409;
+          error.setupRetryable = true;
+          throw error;
+        },
+        async setSupportEnabled() {
+          disableCalls += 1;
+        },
+        async getReadiness() {
+          return {
+            status: "needs_attention",
+            ready: false,
+            supportEnabled: false,
+            state: "disabled",
+            connection: { connected: true, active: true, displayName: "Owner OA" },
+            checks: {
+              lineActive: true,
+              providerConfigured: false,
+              providerTested: false,
+              enabledFaq: false,
+              webhookVerified: false,
+              redeliveryAcknowledged: false,
+              nativeRepliesDisabledAcknowledged: false,
+            },
+          };
+        },
+      },
+    }),
+  });
+
+  const response = await handlers.connectLine(new Request(
+    "https://publisher.example/api/platform-connections/line",
+    {
+      method: "POST",
+      headers: {
+        origin: "https://publisher.example",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        channelId: "channel-id",
+        channelSecret: "channel-secret",
+      }),
+    },
+  ));
+
+  assert.equal(response.status, 201);
+  assert.equal(disableCalls, 0);
+  assert.equal((await response.json()).supportSetup.status, "retryable");
 });
 
 test("LINE connect rejects cross-origin requests before initializing platform stores", async () => {

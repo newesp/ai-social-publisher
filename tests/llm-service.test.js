@@ -102,6 +102,26 @@ test("uses the requested LLM model in provider requests", async () => {
   assert.equal(JSON.parse(calls[0].body).model, "gemini-3.5-flash");
 });
 
+test("forwards an abort signal to the provider request", async () => {
+  const controller = new AbortController();
+  let observedSignal;
+
+  await generateText({
+    llmProvider: "openai",
+    llmModel: "gpt-4o",
+    settings: { openAiApiKey: "test-openai-key" },
+    systemPrompt: "Return exactly OK.",
+    prompt: "OK",
+    signal: controller.signal,
+    fetchImpl: async (_url, options) => {
+      observedSignal = options.signal;
+      return { ok: true, json: async () => ({ output_text: "OK" }), text: async () => "" };
+    },
+  });
+
+  assert.equal(observedSignal, controller.signal);
+});
+
 test("fails fast when provider credentials are missing", async () => {
   await assert.rejects(
     () =>
@@ -128,8 +148,57 @@ test("wraps provider network failures with an actionable message", async () => {
           throw new TypeError("fetch failed");
         },
       }),
-    /Gemini API request failed: fetch failed/,
+    (error) => error.message.includes("Gemini API request failed") && error.retryable === true,
   );
+});
+
+test("classifies transient provider responses as retryable without exposing provider bodies", async () => {
+  for (const status of [408, 429, 500, 503]) {
+    await assert.rejects(
+      generateText({
+        llmProvider: "openai",
+        settings: { openAiApiKey: "openai-key" },
+        prompt: "test",
+        fetchImpl: async () => ({
+          ok: false,
+          status,
+          json: async () => ({ error: { message: "private provider body" } }),
+          text: async () => "private provider body",
+        }),
+      }),
+      (error) => error.retryable === true && !error.message.includes("private provider body"),
+    );
+  }
+
+  await assert.rejects(
+    generateText({
+      llmProvider: "openai",
+      settings: { openAiApiKey: "openai-key" },
+      prompt: "test",
+      fetchImpl: async () => ({
+        ok: false,
+        status: 400,
+        json: async () => ({ error: { message: "private provider body" } }),
+        text: async () => "private provider body",
+      }),
+    }),
+    (error) => error.retryable !== true && !error.message.includes("private provider body"),
+  );
+});
+
+test("normal provider calls receive a bounded abort signal", async () => {
+  let observedSignal;
+  await generateText({
+    llmProvider: "openai",
+    settings: { openAiApiKey: "openai-key" },
+    prompt: "test",
+    fetchImpl: async (_url, options) => {
+      observedSignal = options.signal;
+      return { ok: true, json: async () => ({ output_text: "ok" }), text: async () => "" };
+    },
+  });
+
+  assert.ok(observedSignal instanceof AbortSignal);
 });
 
 test("reads Gemini interactions text from model output steps", async () => {

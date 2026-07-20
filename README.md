@@ -91,6 +91,12 @@ Authorization: Bearer <CRON_SECRET>
 
 將此請求設定在部署平台的排程服務中。端點會處理到期的已排程貼文；可重試的供應商錯誤會保留為排程狀態，其他錯誤則標示為失敗。
 
+## LINE AI 客服維運
+
+LINE AI 客服的完整設定、就緒檢查、事故復原、資料保留與專用測試帳戶驗收程序位於 [docs/line-support-runbook.md](docs/line-support-runbook.md)。
+
+部署時同一個 `CRON_SECRET` 會保護兩個排程端點：每日 01:00 UTC 的貼文排程 `/api/cron`，以及每日 01:30 UTC 的客服內容保留清理 `/api/cron/support-retention`。後者只清除超過 30 天的訊息文字、已過期的 LINE reply token 密文，以及已結案（sent／failed／human_review）的原始推播內容；可重試推播內容、安全狀態與稽核欄位會保留。
+
 ## 資料庫 migration 注意事項
 
 在 production 執行 `migrate:platform-connections` 前，請先停止舊 worker／cron、建立並驗證可還原的 Turso 備份，並設定：
