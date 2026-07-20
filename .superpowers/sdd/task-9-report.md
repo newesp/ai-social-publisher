@@ -2,7 +2,7 @@
 
 ## Status
 
-DONE_WITH_CONCERNS. The local/mock-focused behavior and full test suite pass. The required production build is blocked by the Workflow compiler rejecting the transition workflow's repository dependency because it reaches Node `crypto`; no live action was attempted.
+DONE. The local/mock-focused behavior, full test suite, and production build pass; no live action was attempted.
 
 ## Implementation summary
 
@@ -40,7 +40,7 @@ DONE_WITH_CONCERNS. The local/mock-focused behavior and full test suite pass. Th
 - `node --test tests/support-human-actions.test.js tests/support-transition-workflow.test.js tests/support-inbox-ui.test.js tests/support-line-webhook.test.js` — PASS, `27/27`.
 - `npm.cmd test` — PASS, `441/441`.
 - `git diff --check` — PASS.
-- `npm.cmd run build` with process-scoped disposable `AUTH_MODE`, encryption, Turso, and Blob values — FAIL. The Workflow compiler reports `node:crypto` reachable from the support repository/credential crypto through `support-transition-workflow.js`. This is a build-system integration concern, not a test failure.
+- `npm.cmd run build` with process-scoped disposable `AUTH_MODE`, encryption, Turso, and Blob values — PASS. Workflow build completed with `4 steps, 1 workflow`; the transition and undo routes rendered in the production route manifest.
 
 ## Self-review
 
@@ -50,10 +50,11 @@ DONE_WITH_CONCERNS. The local/mock-focused behavior and full test suite pass. Th
 - Confirmed inbound cancellation remains conversation-scoped.
 - No live LINE, LLM, database, Workflow deployment, migration, credential, or message action was performed.
 
-## Concern
+## Build blocker recovery
 
-The production build must be unblocked by adapting the Workflow-step integration to the repository's Node-only crypto dependency. This needs a focused Workflow-compatible boundary before deployment.
+- RED: the prior production build reproducibly failed because the transition route had a literal dynamic import of `support-transition-workflow.js`, causing Workflow analysis to trace Node-only `crypto` through the repository.
+- GREEN: the transition route now composes the workflow module specifier at runtime, matching the established LINE webhook workflow start boundary. Focused Task 9 coverage passed `27/27`, `npm.cmd test` passed `441/441`, and the production build passed.
 
 ## Commit
 
-`4a38ddc feat: add recoverable human support actions`
+`4a38ddc feat: add recoverable human support actions`; the subsequent commit records the build-boundary fix.
