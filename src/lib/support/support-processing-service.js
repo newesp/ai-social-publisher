@@ -3,7 +3,7 @@ import { retrieveFaqs } from "./knowledge/faq-retrieval.js";
 const MAX_AI_TURNS_PER_WINDOW = 10;
 const MAX_DECISION_ATTEMPTS = 3;
 
-export function createSupportProcessingService({ repository, decisionService, deliveryService } = {}) {
+export function createSupportProcessingService({ repository, decisionService, deliveryService, now = () => new Date() } = {}) {
   return {
     async acquireClaim(input) {
       return repository.acquireConversationClaim(input);
@@ -26,7 +26,7 @@ export function createSupportProcessingService({ repository, decisionService, de
       if (Number(context.aiTurnsInLastFiveMinutes) >= MAX_AI_TURNS_PER_WINDOW) {
         return persistHandoff(repository, input, "rate_limit");
       }
-      if (!context.configuration || !context.settings || !context.recipient) {
+      if (context.configurationReady === false || !context.configuration || !context.settings || !context.recipient) {
         return persistHandoff(repository, input, "configuration_unready");
       }
 
@@ -43,10 +43,10 @@ export function createSupportProcessingService({ repository, decisionService, de
           faqs,
         });
       } catch (error) {
-        return persistHandoff(repository, input, error?.retryable ? "provider_unavailable" : "invalid_ai_decision");
+        return persistHandoff(repository, { ...input, now: currentDate(now) }, error?.retryable ? "provider_unavailable" : "invalid_ai_decision");
       }
       if (!decision || decision.action !== "reply") {
-        return persistHandoff(repository, input, decision?.handoffReasonCode ?? "invalid_ai_decision");
+        return persistHandoff(repository, { ...input, now: currentDate(now) }, decision?.handoffReasonCode ?? "invalid_ai_decision");
       }
 
       const canonicalBody = JSON.stringify({
@@ -57,7 +57,7 @@ export function createSupportProcessingService({ repository, decisionService, de
         ...input,
         decision,
         canonicalBody,
-        now: input.now,
+        now: currentDate(now),
       });
       return { status: "pending_delivery", deliveryId: persisted.deliveryId };
     },
@@ -104,6 +104,7 @@ function stateFailure(context) {
 async function persistHandoff(repository, input, reasonCode) {
   await repository.persistHandoff({
     eventId: input.eventId,
+    ...(input.eventClaimId ? { eventClaimId: input.eventClaimId } : {}),
     connectionId: input.connectionId,
     conversationId: input.conversationId,
     claimId: input.claimId,
@@ -112,4 +113,11 @@ async function persistHandoff(repository, input, reasonCode) {
     now: input.now,
   });
   return { status: "waiting_human", handoffReasonCode: reasonCode };
+}
+
+function currentDate(now) {
+  const value = now();
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) throw new Error("Processing clock returned an invalid time.");
+  return date;
 }

@@ -50,3 +50,31 @@ Implemented durable LINE support processing with a three-second conversation bat
 - Focused GREEN: `node --test tests/support-message-workflow.test.js tests/support-processing-service.test.js tests/support-repository.test.js tests/support-outbox-delivery.test.js tests/line-support-adapter.test.js tests/support-line-webhook.test.js` exited 0: 53 passed, 0 failed.
 - Full suite: `npm.cmd test` exited 0: 417 passed, 0 failed.
 - `git diff --check` exited 0. No live LINE/LLM calls, deployments, remote database migrations, secret writes, or real messages were performed.
+
+## Second Combined Fix Wave (2026-07-20)
+
+### Root-cause trace and implementation
+
+- The workflow renewed its event and conversation leases immediately before `decideAndPersist`, but the processing service persisted with that pre-provider timestamp. The event predicate in `persistDecisionAndOutbound` also did not require an unexpired event lease. A provider call lasting beyond the 30-second lease could therefore write a decision/outbox after the event fence expired.
+- The batch builder also marked messages processed before provider work. The fix moves that state transition into the same fenced transaction that creates the decision/outbox, so a stale or lost provider call leaves the turn available for later recovery rather than silently finalizing it.
+- `persistDecisionAndOutbound` and `persistHandoff` now require both the named, unexpired event fence and the named, unexpired conversation fence. Decision outcomes take a fresh processing timestamp after provider work; workflow completion renews both fences at the post-decision/post-delivery boundary.
+- `resolveLineEventAfterConversationLoss` owns completion when it returns truthy. The workflow no longer calls `completeEvent` a second time. A repository-backed test confirms the event is processed once and a second completion is rejected.
+- Current processing context now verifies that the selected LINE connection remains active and that the selected provider/model/key remain ready. A false readiness result persists the safe `configuration_unready` handoff before an LLM decision; existing credential-rejection delivery behavior remains unchanged.
+- The orchestration is a durable `"use workflow"` with individually durable `"use step"` claim, fence, turn, decision/persistence, delivery, finalization, release, and follow-up boundaries. The three-second durable sleep and internal-ID-only workflow interface remain unchanged.
+
+### RED evidence
+
+- `node --test tests/support-message-workflow.test.js tests/support-processing-service.test.js tests/support-repository.test.js tests/support-outbox-delivery.test.js tests/support-decision-service.test.js tests/line-support-adapter.test.js tests/support-line-webhook.test.js` exited 1 before the fixes: 65 passed, 3 failed. The expected failures were duplicate competing-event completion, absent post-decision fence renewal, and acceptance of decision/outbox persistence after the event lease expired.
+- `node --test tests/support-repository.test.js` exited 1 before moving batch consumption into the fenced persistence transaction: 14 passed, 1 failed because the inbound message had already been marked processed (`2026-07-19T00:00:03.000Z`) rather than remaining `null` while provider work was outstanding.
+
+### GREEN evidence
+
+- `node --test tests/support-message-workflow.test.js tests/support-processing-service.test.js tests/support-repository.test.js tests/support-outbox-delivery.test.js tests/support-decision-service.test.js tests/line-support-adapter.test.js tests/support-line-webhook.test.js` exited 0: 68 passed, 0 failed.
+- `git diff --check` exited 0.
+
+### Self-review
+
+- Rechecked all writes after protected provider work: decision/outbox, handoff, and event completion are fenced by current lease state; stale work cannot create an outbound message or mark an event complete.
+- Rechecked ownership of the competing-event path: repository resolution is terminal and its workflow caller only releases an unresolved event.
+- Rechecked Task 7 invariants: exact `windowStart + 3s` cutoff, owner-scoped current configuration, Push-only immutable outbox/retry path, credential-rejection handoff, 30-day context filter, follow-up discovery, and the Task 5 test seam remain in place.
+- No providers, LINE endpoints, migrations, deployments, secrets, or external messages were invoked.

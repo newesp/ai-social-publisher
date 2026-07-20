@@ -390,14 +390,6 @@ export function createSupportRepository(db = createDbClient(), {
           eq(supportMessages.idempotencyKey, `${turn.connectionId}:${turn.eventId}`),
         )).limit(1);
         if (!inbound || !messages.some((message) => message.id === inbound.id)) return null;
-        await tx.update(supportMessages).set({ processedAt: turn.cutoff }).where(and(
-          eq(supportMessages.conversationId, turn.conversationId),
-          eq(supportMessages.direction, "inbound"),
-          eq(supportMessages.senderType, "customer"),
-          eq(supportMessages.messageType, "text"),
-          isNull(supportMessages.processedAt),
-          lte(supportMessages.createdAt, turn.cutoff),
-        ));
         return { inboundMessageId: inbound.id, customerTexts: messages.map(({ text }) => text) };
       }));
     },
@@ -410,13 +402,19 @@ export function createSupportRepository(db = createDbClient(), {
         eq(supportConversations.processingClaimId, current.claimId),
       )).limit(1);
       if (!conversation) return null;
-      const [[configuration], [storedSettings], faqs, messages, [turnCount]] = await Promise.all([
+      const [[configuration], [storedSettings], [activeConnection], faqs, messages, [turnCount]] = await Promise.all([
         db.select().from(supportConfigurations).where(and(
           eq(supportConfigurations.ownerEmail, conversation.ownerEmail),
           eq(supportConfigurations.platformConnectionId, current.connectionId),
         )).limit(1),
         db.select({ encryptedSettings: userSettings.encryptedSettings }).from(userSettings)
           .where(eq(userSettings.ownerEmail, conversation.ownerEmail)).limit(1),
+        db.select({ id: platformConnections.id }).from(platformConnections).where(and(
+          eq(platformConnections.id, current.connectionId),
+          eq(platformConnections.ownerEmail, conversation.ownerEmail),
+          eq(platformConnections.platform, "line"),
+          eq(platformConnections.state, "active"),
+        )).limit(1),
         db.select().from(supportFaqs).where(and(
           eq(supportFaqs.ownerEmail, conversation.ownerEmail), eq(supportFaqs.enabled, true),
         )).orderBy(desc(supportFaqs.priority), desc(supportFaqs.updatedAt)),
@@ -444,6 +442,7 @@ export function createSupportRepository(db = createDbClient(), {
         supportState: configuration?.supportState ?? "disabled",
         conversationStatus: conversation.status,
         configuration: configuration ?? null,
+        configurationReady: Boolean(activeConnection && configuration && hasConfiguredProvider(configuration, settings, modelOptions)),
         settings,
         recipient,
         aiTurnsInLastFiveMinutes: Number(turnCount?.count ?? 0),
@@ -460,6 +459,7 @@ export function createSupportRepository(db = createDbClient(), {
           eq(supportWebhookEvents.webhookEventId, decision.eventId),
           eq(supportWebhookEvents.processingStatus, "processing"),
           eq(supportWebhookEvents.safeErrorCode, decision.eventClaimId),
+          gt(supportWebhookEvents.processedAt, decision.now),
         )).limit(1);
         const [conversation] = await tx.select().from(supportConversations).where(and(
           eq(supportConversations.id, decision.conversationId),
@@ -476,6 +476,14 @@ export function createSupportRepository(db = createDbClient(), {
           eq(supportMessages.id, decision.inboundMessageId), eq(supportMessages.conversationId, decision.conversationId),
         )).limit(1);
         if (!inbound) throw unavailablePersistenceError();
+        await tx.update(supportMessages).set({ processedAt: decision.cutoff }).where(and(
+          eq(supportMessages.conversationId, decision.conversationId),
+          eq(supportMessages.direction, "inbound"),
+          eq(supportMessages.senderType, "customer"),
+          eq(supportMessages.messageType, "text"),
+          isNull(supportMessages.processedAt),
+          lte(supportMessages.createdAt, decision.cutoff),
+        ));
         const answerMessageId = randomUUID();
         await tx.insert(supportMessages).values({
           id: answerMessageId, conversationId: decision.conversationId, direction: "outbound", senderType: "ai",
@@ -504,8 +512,15 @@ export function createSupportRepository(db = createDbClient(), {
       }));
     },
 
-    async persistHandoff({ connectionId, conversationId, claimId, reasonCode, now = new Date() }) {
+    async persistHandoff({ connectionId, eventId, eventClaimId, conversationId, claimId, reasonCode, now = new Date() }) {
       const claim = validateConversationClaimInput({ connectionId, conversationId, claimId, now });
+      const eventPredicate = eventId && eventClaimId ? exists(db.select({ one: sql`1` }).from(supportWebhookEvents).where(and(
+        eq(supportWebhookEvents.platformConnectionId, claim.connectionId),
+        eq(supportWebhookEvents.webhookEventId, requiredBoundedText(eventId, "Webhook event ID", 256)),
+        eq(supportWebhookEvents.processingStatus, "processing"),
+        eq(supportWebhookEvents.safeErrorCode, requiredBoundedText(eventClaimId, "Event processing claim", 100)),
+        gt(supportWebhookEvents.processedAt, claim.now),
+      ))) : undefined;
       const [updated] = await retryBusyOperation(() => db.update(supportConversations).set({
         status: "waiting_human", handoffReasonCode: requiredBoundedText(reasonCode, "Handoff reason", 100),
         processingClaimId: null, processingClaimExpiresAt: null, updatedAt: claim.now,
@@ -513,6 +528,7 @@ export function createSupportRepository(db = createDbClient(), {
         eq(supportConversations.id, claim.conversationId), eq(supportConversations.platformConnectionId, claim.connectionId),
         eq(supportConversations.processingClaimId, claim.claimId),
         gt(supportConversations.processingClaimExpiresAt, claim.now),
+        ...(eventPredicate ? [eventPredicate] : []),
       )).returning({ id: supportConversations.id }));
       return Boolean(updated);
     },
@@ -1188,6 +1204,7 @@ function validatePersistDecisionInput(input = {}) {
     recipient,
     llmProvider: input?.decision?.llmProvider ?? null,
     llmModel: input?.decision?.llmModel ?? null,
+    cutoff: validDate(input.cutoff),
     now: validDate(input.now),
   };
 }

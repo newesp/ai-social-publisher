@@ -78,6 +78,29 @@ test("decision persistence loads current protected context and atomically create
   assert.deepEqual(persisted[0].decision, { action: "reply", answer: "Use reset.", category: "account", handoffReasonCode: null, knowledgeSourceIds: ["faq-1"] });
 });
 
+test("configuration that becomes unready hands off before any provider decision", async () => {
+  let decisionCalls = 0;
+  const handoffs = [];
+  const service = createSupportProcessingService({
+    repository: {
+      loadCurrentProcessingContext: async () => ({
+        supportState: "enabled", conversationStatus: "ai_active", configurationReady: false,
+        aiTurnsInLastFiveMinutes: 0,
+        configuration: { llmProvider: "openai", llmModel: "gpt-test" }, settings: { openAiApiKey: "private-key" },
+        recipient: "U-private", faqs: [], messages: [],
+      }),
+      persistHandoff: async (input) => handoffs.push(input),
+    },
+    decisionService: { decide: async () => { decisionCalls += 1; } },
+  });
+
+  const result = await service.decideAndPersist({ ...IDS, claimId: "claim-1", inboundMessageId: "message-1", customerTexts: ["question"], now: NOW });
+
+  assert.deepEqual(result, { status: "waiting_human", handoffReasonCode: "configuration_unready" });
+  assert.equal(decisionCalls, 0);
+  assert.equal(handoffs[0].reasonCode, "configuration_unready");
+});
+
 test("retryable decision failures are bounded at three attempts and then fail closed", async () => {
   let attempts = 0;
   const handoffs = [];

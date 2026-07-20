@@ -615,12 +615,6 @@ test("processing claims batch current protected data and atomically persist one 
       cutoff: new Date(NOW.getTime() + 3_000),
     });
     assert.deepEqual(turn.customerTexts, ["Question", "Second question"]);
-    assert.equal(await repository.resolveProcessedCompetingEvents({
-      connectionId, eventId: "evt-turn-1", conversationId: ingested.conversationId, cutoff: new Date(NOW.getTime() + 3_000),
-    }), 1);
-    assert.equal(await repository.markLineEventProcessed({
-      connectionId, eventId: "evt-turn-2", claimId: competingEventClaim.claimId, now: NOW,
-    }), false);
     const context = await repository.loadCurrentProcessingContext({
       connectionId, eventId: "evt-turn-1", conversationId: ingested.conversationId, claimId: conversationClaim.claimId,
     });
@@ -642,12 +636,19 @@ test("processing claims batch current protected data and atomically persist one 
       connectionId, eventId: "evt-turn-1", conversationId: ingested.conversationId, claimId: conversationClaim.claimId,
       eventClaimId: eventClaim.claimId,
       inboundMessageId: turn.inboundMessageId,
+      cutoff: new Date(NOW.getTime() + 3_000),
       decision: { action: "reply", answer: "Answer", category: "general", handoffReasonCode: null, knowledgeSourceIds: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"] },
       canonicalBody: "{\"to\":\"U-private\",\"messages\":[{\"type\":\"text\",\"text\":\"Answer\"}]}", now: NOW,
     });
     assert.ok(persisted.deliveryId);
     assert.equal((await db.select().from(supportAiDecisions)).length, 1);
     assert.equal((await db.select().from(supportOutboundDeliveries)).length, 1);
+    assert.equal(await repository.resolveProcessedCompetingEvents({
+      connectionId, eventId: "evt-turn-1", conversationId: ingested.conversationId, cutoff: new Date(NOW.getTime() + 3_000),
+    }), 1);
+    assert.equal(await repository.markLineEventProcessed({
+      connectionId, eventId: "evt-turn-2", claimId: competingEventClaim.claimId, now: NOW,
+    }), false);
     assert.equal(await repository.loadLineAccessToken(connectionId), "private-line-token");
     assert.equal(await repository.handleLineCredentialRejected({
       connectionId, conversationId: ingested.conversationId, now: NOW,
@@ -660,6 +661,80 @@ test("processing claims batch current protected data and atomically persist one 
       connectionId, conversationId: ingested.conversationId, now: NOW,
     }), false);
     assert.equal(await repository.markLineEventProcessed({ connectionId, eventId: "evt-turn-1", claimId: eventClaim.claimId, now: NOW }), true);
+  });
+});
+
+test("a consumed losing event is completed once by its repository resolution", async () => {
+  await withDatabase(async (db) => {
+    const connectionId = "22222222-2222-4222-8222-222222222222";
+    await db.insert(platformConnections).values(connection(connectionId, "owner@example.com"));
+    const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });
+    const ingested = await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com", connectionId, eventId: "evt-loser", externalUserId: "U-private",
+      replyToken: "reply-token", message: { type: "text", text: "Question", safeMetadata: {} }, receivedAt: NOW,
+    });
+    const dispatch = await repository.claimLineWorkflowDispatch({ connectionId, eventId: "evt-loser", now: NOW });
+    await repository.markLineWorkflowDispatched({ ...dispatch, now: NOW });
+    const eventClaim = await repository.claimLineEventProcessing({ connectionId, eventId: "evt-loser", now: NOW });
+    const conversationClaim = await repository.acquireConversationClaim({ connectionId, conversationId: ingested.conversationId, now: NOW });
+    await repository.buildClaimedTurn({
+      connectionId, eventId: "evt-loser", conversationId: ingested.conversationId, claimId: conversationClaim.claimId,
+      cutoff: new Date(NOW.getTime() + 3_000),
+    });
+    await db.update(supportMessages).set({ processedAt: new Date(NOW.getTime() + 3_000) }).where(eq(
+      supportMessages.idempotencyKey,
+      `${connectionId}:evt-loser`,
+    ));
+
+    assert.equal(await repository.resolveLineEventAfterConversationLoss({
+      connectionId, eventId: "evt-loser", conversationId: ingested.conversationId, claimId: eventClaim.claimId, now: NOW,
+    }), true);
+    assert.equal(await repository.markLineEventProcessed({
+      connectionId, eventId: "evt-loser", claimId: eventClaim.claimId, now: NOW,
+    }), false);
+    const [event] = await db.select().from(supportWebhookEvents).where(eq(supportWebhookEvents.webhookEventId, "evt-loser"));
+    assert.equal(event.processingStatus, "processed");
+  });
+});
+
+test("an expired event fence blocks decision and outbox persistence even if the conversation lease was renewed", async () => {
+  await withDatabase(async (db) => {
+    const connectionId = "33333333-3333-4333-8333-333333333333";
+    await db.insert(platformConnections).values({
+      ...connection(connectionId, "owner@example.com"),
+      encryptedCredentials: encryptJson({ accessToken: "private-line-token" }, SETTINGS_ENCRYPTION_KEY),
+    });
+    await db.insert(supportConfigurations).values({ ...configurationRecord(), platformConnectionId: connectionId, supportState: "enabled" });
+    const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });
+    const ingested = await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com", connectionId, eventId: "evt-expired-event", externalUserId: "U-private",
+      replyToken: "reply-token", message: { type: "text", text: "Question", safeMetadata: {} }, receivedAt: NOW,
+    });
+    const dispatch = await repository.claimLineWorkflowDispatch({ connectionId, eventId: "evt-expired-event", now: NOW });
+    await repository.markLineWorkflowDispatched({ ...dispatch, now: NOW });
+    const eventClaim = await repository.claimLineEventProcessing({ connectionId, eventId: "evt-expired-event", now: NOW });
+    const conversationClaim = await repository.acquireConversationClaim({ connectionId, conversationId: ingested.conversationId, now: NOW });
+    const turn = await repository.buildClaimedTurn({
+      connectionId, eventId: "evt-expired-event", conversationId: ingested.conversationId, claimId: conversationClaim.claimId,
+      cutoff: new Date(NOW.getTime() + 3_000),
+    });
+    const [uncommittedInbound] = await db.select().from(supportMessages).where(eq(supportMessages.id, turn.inboundMessageId));
+    assert.equal(uncommittedInbound.processedAt, null);
+    const renewedAt = new Date(NOW.getTime() + 20_000);
+    assert.equal(await repository.renewConversationClaim({
+      connectionId, conversationId: ingested.conversationId, claimId: conversationClaim.claimId, now: renewedAt,
+    }), true);
+    const afterEventExpiry = new Date(NOW.getTime() + 31_000);
+
+    await assert.rejects(repository.persistDecisionAndOutbound({
+      connectionId, eventId: "evt-expired-event", conversationId: ingested.conversationId, claimId: conversationClaim.claimId,
+      eventClaimId: eventClaim.claimId, inboundMessageId: turn.inboundMessageId,
+      cutoff: new Date(NOW.getTime() + 3_000),
+      decision: { action: "reply", answer: "Answer", category: "general", knowledgeSourceIds: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"] },
+      canonicalBody: '{"to":"U-private","messages":[{"type":"text","text":"Answer"}]}', now: afterEventExpiry,
+    }), /Webhook persistence is unavailable/);
+    assert.equal((await db.select().from(supportAiDecisions)).length, 0);
+    assert.equal((await db.select().from(supportOutboundDeliveries)).length, 0);
   });
 });
 

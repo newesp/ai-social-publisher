@@ -51,7 +51,7 @@ test("a concurrent workflow relinquishes its event claim without creating a seco
   assert.deepEqual(await workflow(IDS), { status: "already_processing" });
   assert.deepEqual(resolved, [{ ...IDS, claimId: "event-claim", now: START }]);
   assert.equal(eventStore.released.length, 0);
-  assert.equal(eventStore.completed.length, 1);
+  assert.equal(eventStore.completed.length, 0);
 });
 
 test("the workflow renews both fences after batching and uses current attempt times after sleep", async () => {
@@ -81,6 +81,32 @@ test("the workflow renews both fences after batching and uses current attempt ti
   assert.deepEqual(calls, [{ name: "decide", now: afterBatch }, { name: "deliver", now: attemptAt }]);
 });
 
+test("the workflow renews both fences again after a long decision before it can finalize", async () => {
+  const eventStore = claimedEventStore();
+  const renewals = [];
+  const afterBatch = new Date(START.getTime() + 3_100);
+  const afterDecision = new Date(START.getTime() + 35_000);
+  const times = [START, afterBatch, afterBatch, afterDecision, afterDecision];
+  const workflow = createLineMessageWorkflow({
+    eventStore,
+    processingService: {
+      acquireClaim: async () => ({ acquired: true, claimId: "conversation-claim", windowStart: START }),
+      renewClaim: async (input) => { renewals.push(input); return true; },
+      buildTurn: async () => ({ inboundMessageId: "message-1", customerTexts: ["first"] }),
+      decideAndPersist: async () => ({ status: "pending_delivery", deliveryId: "delivery-1" }),
+      deliver: async () => ({ status: "sent" }),
+      releaseClaim: async () => {}, findFollowUp: async () => null,
+    },
+    sleepImpl: async () => {},
+    now: () => times.shift(),
+  });
+
+  assert.deepEqual(await workflow(IDS), { status: "sent" });
+  assert.equal(eventStore.renewed.some(({ now }) => now.getTime() === afterDecision.getTime()), true);
+  assert.equal(renewals.some(({ now }) => now.getTime() === afterDecision.getTime()), true);
+  assert.equal(eventStore.completed.at(-1).now.getTime(), afterDecision.getTime());
+});
+
 test("a remaining unprocessed message starts one durable follow-up after the conversation claim is released", async () => {
   const starts = [];
   const workflow = createLineMessageWorkflow({
@@ -107,13 +133,14 @@ test("the winning batch resolves every competing event it consumed before follow
       acquireClaim: async () => ({ acquired: true, claimId: "conversation-claim", windowStart: START }),
       buildTurn: async () => ({ inboundMessageId: "message-1", customerTexts: ["first", "second"] }),
       resolveBatchedEvents: async (input) => { resolved.push(input); },
-      decideAndPersist: async () => ({ status: "waiting_human" }),
+      decideAndPersist: async () => ({ status: "pending_delivery", deliveryId: "delivery-1" }),
+      deliver: async () => ({ status: "sent" }),
       releaseClaim: async () => {}, findFollowUp: async () => null,
     },
     sleepImpl: async () => {}, now: () => START,
   });
 
-  assert.deepEqual(await workflow(IDS), { status: "waiting_human" });
+  assert.deepEqual(await workflow(IDS), { status: "sent" });
   assert.deepEqual(resolved, [{ ...IDS, cutoff: new Date(START.getTime() + 3_000) }]);
 });
 
