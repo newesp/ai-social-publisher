@@ -77,6 +77,13 @@ const SUPPORT_INDEXES = {
     unique: false,
     columns: ["conversation_id", "created_at"],
   },
+  support_messages_retention_created_idx: {
+    table: "support_messages",
+    unique: false,
+    columns: ["created_at", "id"],
+    partial: true,
+    where: "WHERE text_content IS NOT NULL",
+  },
   support_messages_idempotency_unique: {
     table: "support_messages",
     unique: true,
@@ -86,6 +93,13 @@ const SUPPORT_INDEXES = {
     table: "support_webhook_events",
     unique: true,
     columns: ["platform_connection_id", "webhook_event_id"],
+  },
+  support_webhook_events_retention_reply_token_idx: {
+    table: "support_webhook_events",
+    unique: false,
+    columns: ["reply_token_expires_at", "id"],
+    partial: true,
+    where: "WHERE encrypted_reply_token IS NOT NULL",
   },
   support_outbound_deliveries_event_unique: {
     table: "support_outbound_deliveries",
@@ -101,6 +115,13 @@ const SUPPORT_INDEXES = {
     table: "support_outbound_deliveries",
     unique: false,
     columns: ["delivery_status", "next_attempt_at"],
+  },
+  support_outbound_deliveries_retention_status_created_idx: {
+    table: "support_outbound_deliveries",
+    unique: false,
+    columns: ["delivery_status", "created_at", "id"],
+    partial: true,
+    where: "WHERE encrypted_canonical_body <> ''",
   },
   support_transitions_conversation_created_idx: {
     table: "support_conversation_transitions",
@@ -157,7 +178,7 @@ export async function verifySupportSchema(client) {
     }
     const listed = await client.execute(`PRAGMA index_list('${expected.table}')`);
     const index = listed.rows.find((row) => row.name === name);
-    if (!index || Boolean(index.unique) !== expected.unique || Boolean(index.partial)) {
+    if (!index || Boolean(index.unique) !== expected.unique || Boolean(index.partial) !== (expected.partial === true)) {
       invalidIndexes.push(name);
       continue;
     }
@@ -170,7 +191,9 @@ export async function verifySupportSchema(client) {
       || columns.some((column, indexPosition) => column !== expected.columns[indexPosition])
     ) {
       invalidIndexes.push(name);
+      continue;
     }
+    if (expected.where && !await indexWhereMatches(client, name, expected.where)) invalidIndexes.push(name);
   }
   if (invalidTables.length || invalidIndexes.length) {
     throw new Error(
@@ -364,7 +387,7 @@ function buildAtomicSupportVerificationStatements() {
         SELECT 1 FROM pragma_index_list(${table})
         WHERE name = ${index}
           AND "unique" = ${expected.unique ? 1 : 0}
-          AND partial = 0
+          AND partial = ${expected.partial === true ? 1 : 0}
       )
       AND (SELECT COUNT(*) FROM pragma_index_info(${index})) = ${expected.columns.length}
     `));
@@ -376,6 +399,14 @@ function buildAtomicSupportVerificationStatements() {
         )
       `));
     });
+    if (expected.where) {
+      statements.push(guard(`
+        instr(
+          lower(replace(replace(replace((SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ${index}), char(10), ''), char(13), ''), ' ', '')),
+          ${sqlLiteral(normalizeIndexSql(expected.where))}
+        ) > 0
+      `));
+    }
   }
 
   statements.push(guard(`
@@ -393,6 +424,18 @@ function buildAtomicSupportVerificationStatements() {
 
 function sqlLiteral(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+async function indexWhereMatches(client, name, expectedWhere) {
+  const result = await client.execute({
+    sql: "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+    args: [name],
+  });
+  return normalizeIndexSql(result.rows[0]?.sql).includes(normalizeIndexSql(expectedWhere));
+}
+
+function normalizeIndexSql(value) {
+  return String(value ?? "").replace(/[\s`]/g, "").toLowerCase();
 }
 
 if (isDirectExecution(import.meta.url, process.argv[1])) {

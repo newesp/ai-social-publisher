@@ -64,18 +64,22 @@ const REQUIRED_INDEXES = [
   "support_conversations_owner_status_updated_idx",
   "support_conversations_customer_unique",
   "support_messages_conversation_created_idx",
+  "support_messages_retention_created_idx",
   "support_messages_idempotency_unique",
   "support_webhook_events_connection_event_unique",
+  "support_webhook_events_retention_reply_token_idx",
   "support_outbound_deliveries_event_unique",
   "support_outbound_deliveries_retry_key_unique",
   "support_outbound_deliveries_status_next_attempt_idx",
+  "support_outbound_deliveries_retention_status_created_idx",
   "support_transitions_conversation_created_idx",
 ];
 
 test("support migration creates tenant, idempotency, claim, and transition indexes", async () => {
   const sql = await readFile(new URL("../drizzle/0004_line_ai_customer_support.sql", import.meta.url), "utf8");
   const outboxSql = await readFile(new URL("../drizzle/0005_line_outbound_delivery_outbox.sql", import.meta.url), "utf8");
-  for (const name of REQUIRED_INDEXES) assert.match(`${sql}\n${outboxSql}`, new RegExp(name));
+  const retentionSql = await readFile(new URL("../drizzle/0006_support_retention_indexes.sql", import.meta.url), "utf8");
+  for (const name of REQUIRED_INDEXES) assert.match(`${sql}\n${outboxSql}\n${retentionSql}`, new RegExp(name));
 });
 
 test("support schema exports all eight UUID-backed tables with the required fields", () => {
@@ -117,13 +121,13 @@ test("pending transitions preserve the circular conversation foreign keys", asyn
   );
 });
 
-test("support migrations journal immutable outbound delivery and enforce idempotency", async () => {
+test("support migrations journal immutable outbound delivery, retention indexes, and enforce idempotency", async () => {
   const sql = await readFile(new URL("../drizzle/0004_line_ai_customer_support.sql", import.meta.url), "utf8");
   const outboxSql = await readFile(new URL("../drizzle/0005_line_outbound_delivery_outbox.sql", import.meta.url), "utf8");
   const journal = JSON.parse(await readFile(new URL("../drizzle/meta/_journal.json", import.meta.url), "utf8"));
   const snapshot = JSON.parse(await readFile(new URL("../drizzle/meta/0004_snapshot.json", import.meta.url), "utf8"));
-  assert.equal(journal.entries.at(-1).idx, 5);
-  assert.equal(journal.entries.at(-1).tag, "0005_line_outbound_delivery_outbox");
+  assert.equal(journal.entries.at(-1).idx, 6);
+  assert.equal(journal.entries.at(-1).tag, "0006_support_retention_indexes");
   for (const tableName of [
     "support_configurations",
     "support_faqs",

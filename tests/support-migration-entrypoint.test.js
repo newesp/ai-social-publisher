@@ -112,6 +112,10 @@ test("support schema verifier checks all tables, named indexes, and duplicate ac
     new URL("../drizzle/0005_line_outbound_delivery_outbox.sql", import.meta.url),
     "utf8",
   );
+  const retentionSql = await readFile(
+    new URL("../drizzle/0006_support_retention_indexes.sql", import.meta.url),
+    "utf8",
+  );
   const client = createClient({ url: ":memory:" });
   try {
     await client.executeMultiple(`
@@ -119,8 +123,28 @@ test("support schema verifier checks all tables, named indexes, and duplicate ac
       INSERT INTO platform_connections (id) VALUES ('line-1');
       ${migrationSql.replaceAll("--> statement-breakpoint", "")}
       ${outboxSql.replaceAll("--> statement-breakpoint", "")}
+      ${retentionSql.replaceAll("--> statement-breakpoint", "")}
     `);
     assert.deepEqual(await verifySupportSchema(client), { schemaVerified: true });
+
+    const retentionIndexes = await client.execute(`
+      SELECT name, sql FROM sqlite_master
+      WHERE type = 'index' AND name IN (
+        'support_messages_retention_created_idx',
+        'support_webhook_events_retention_reply_token_idx',
+        'support_outbound_deliveries_retention_status_created_idx'
+      )
+      ORDER BY name
+    `);
+    assert.deepEqual(retentionIndexes.rows.map((row) => row.name), [
+      "support_messages_retention_created_idx",
+      "support_outbound_deliveries_retention_status_created_idx",
+      "support_webhook_events_retention_reply_token_idx",
+    ]);
+    const retentionSqlByName = new Map(retentionIndexes.rows.map((row) => [row.name, row.sql]));
+    assert.match(retentionSqlByName.get("support_messages_retention_created_idx"), /\(created_at, id\)\s*WHERE text_content IS NOT NULL/i);
+    assert.match(retentionSqlByName.get("support_webhook_events_retention_reply_token_idx"), /\(reply_token_expires_at, id\)\s*WHERE encrypted_reply_token IS NOT NULL/i);
+    assert.match(retentionSqlByName.get("support_outbound_deliveries_retention_status_created_idx"), /\(delivery_status, created_at, id\)\s*WHERE encrypted_canonical_body <> ''/i);
 
     await client.execute("DROP INDEX support_messages_idempotency_unique");
     await client.execute(
@@ -165,6 +189,17 @@ test("support schema verifier checks all tables, named indexes, and duplicate ac
     await client.execute({ sql: insert, args: row("duplicate-1") });
     await client.execute({ sql: insert, args: row("duplicate-2") });
     await assert.rejects(verifySupportSchema(client), /verification failed/i);
+
+    for (const query of [
+      "SELECT id FROM support_messages WHERE created_at < 100 AND text_content IS NOT NULL ORDER BY created_at, id LIMIT 100",
+      "SELECT id FROM support_webhook_events WHERE reply_token_expires_at <= 100 AND encrypted_reply_token IS NOT NULL ORDER BY reply_token_expires_at, id LIMIT 100",
+      "SELECT id FROM support_outbound_deliveries WHERE created_at < 100 AND delivery_status = 'sent' AND encrypted_canonical_body <> '' ORDER BY created_at, id LIMIT 100",
+      "SELECT id FROM support_outbound_deliveries WHERE created_at < 100 AND delivery_status = 'failed' AND encrypted_canonical_body <> '' ORDER BY created_at, id LIMIT 100",
+      "SELECT id FROM support_outbound_deliveries WHERE created_at < 100 AND delivery_status = 'human_review' AND encrypted_canonical_body <> '' ORDER BY created_at, id LIMIT 100",
+    ]) {
+      const plan = await client.execute(`EXPLAIN QUERY PLAN ${query}`);
+      assert.doesNotMatch(JSON.stringify(plan.rows), /TEMP B-TREE/i);
+    }
   } finally {
     await client.close();
   }
@@ -180,6 +215,10 @@ test("support schema verifier rejects malformed columns and missing foreign keys
     new URL("../drizzle/0005_line_outbound_delivery_outbox.sql", import.meta.url),
     "utf8",
   );
+  const retentionSql = await readFile(
+    new URL("../drizzle/0006_support_retention_indexes.sql", import.meta.url),
+    "utf8",
+  );
 
   const malformedColumnsClient = createClient({ url: ":memory:" });
   try {
@@ -187,6 +226,7 @@ test("support schema verifier rejects malformed columns and missing foreign keys
       CREATE TABLE platform_connections (id TEXT PRIMARY KEY NOT NULL);
       ${migrationSql.replaceAll("--> statement-breakpoint", "")}
       ${outboxSql.replaceAll("--> statement-breakpoint", "")}
+      ${retentionSql.replaceAll("--> statement-breakpoint", "")}
       PRAGMA foreign_keys=OFF;
       DROP TABLE support_ai_decisions;
       CREATE TABLE support_ai_decisions (id TEXT PRIMARY KEY NOT NULL);
@@ -202,6 +242,7 @@ test("support schema verifier rejects malformed columns and missing foreign keys
       CREATE TABLE platform_connections (id TEXT PRIMARY KEY NOT NULL);
       ${migrationSql.replaceAll("--> statement-breakpoint", "")}
       ${outboxSql.replaceAll("--> statement-breakpoint", "")}
+      ${retentionSql.replaceAll("--> statement-breakpoint", "")}
       PRAGMA foreign_keys=OFF;
       DROP TABLE support_conversation_transitions;
       CREATE TABLE support_conversation_transitions (

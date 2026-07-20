@@ -43,6 +43,13 @@
       "when": 1784512800000,
       "tag": "0005_line_outbound_delivery_outbox",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1784599200000,
+      "tag": "0006_support_retention_indexes",
+      "breakpoints": true
     }
   ]
 }

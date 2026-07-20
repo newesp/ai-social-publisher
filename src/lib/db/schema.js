@@ -178,6 +178,8 @@ export const supportMessages = sqliteTable("support_messages", {
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
 }, (table) => [
   index("support_messages_conversation_created_idx").on(table.conversationId, table.createdAt),
+  index("support_messages_retention_created_idx").on(table.createdAt, table.id)
+    .where(sql`${table.textContent} IS NOT NULL`),
   uniqueIndex("support_messages_idempotency_unique").on(table.idempotencyKey),
 ]);
 
@@ -220,6 +222,8 @@ export const supportWebhookEvents = sqliteTable("support_webhook_events", {
 }, (table) => [
   uniqueIndex("support_webhook_events_connection_event_unique")
     .on(table.platformConnectionId, table.webhookEventId),
+  index("support_webhook_events_retention_reply_token_idx").on(table.replyTokenExpiresAt, table.id)
+    .where(sql`${table.encryptedReplyToken} IS NOT NULL`),
 ]);
 
 export const supportOutboundDeliveries = sqliteTable("support_outbound_deliveries", {
@@ -251,6 +255,9 @@ export const supportOutboundDeliveries = sqliteTable("support_outbound_deliverie
   uniqueIndex("support_outbound_deliveries_retry_key_unique").on(table.retryKey),
   index("support_outbound_deliveries_status_next_attempt_idx")
     .on(table.deliveryStatus, table.nextAttemptAt),
+  index("support_outbound_deliveries_retention_status_created_idx")
+    .on(table.deliveryStatus, table.createdAt, table.id)
+    .where(sql`${table.encryptedCanonicalBody} <> ''`),
 ]);
 
 export const supportConversationTransitions = sqliteTable("support_conversation_transitions", {

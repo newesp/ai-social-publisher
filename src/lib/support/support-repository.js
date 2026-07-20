@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-import { and, asc, desc, eq, exists, gt, gte, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, exists, gt, gte, inArray, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 
 import { getLLMModelOptions } from "../ai/model-config.js";
 import { createDbClient } from "../db/index.js";
@@ -231,6 +231,59 @@ export function createSupportRepository(db = createDbClient(), {
         return transition ? { id: transition.id, conversationId: conversation.id, action: transition.requestedAction, effectiveAt: transition.effectiveAt, customerLabel: "Customer" } : null;
       }));
       return transitions.filter(Boolean).sort((left, right) => dateValue(left.effectiveAt) - dateValue(right.effectiveAt));
+    },
+
+    async clearExpiredSupportContent({ contentBefore, replyTokenBefore, batchSize }) {
+      const contentCutoff = validDate(contentBefore);
+      const replyTokenCutoff = validDate(replyTokenBefore);
+      const limit = validRetentionBatchSize(batchSize);
+      return db.transaction(async (tx) => {
+        const messages = await tx.select({ id: supportMessages.id }).from(supportMessages).where(and(
+          lt(supportMessages.createdAt, contentCutoff),
+          isNotNull(supportMessages.textContent),
+        )).orderBy(asc(supportMessages.createdAt), asc(supportMessages.id)).limit(limit);
+        const events = await tx.select({ id: supportWebhookEvents.id }).from(supportWebhookEvents).where(and(
+          lte(supportWebhookEvents.replyTokenExpiresAt, replyTokenCutoff),
+          isNotNull(supportWebhookEvents.encryptedReplyToken),
+        )).orderBy(asc(supportWebhookEvents.replyTokenExpiresAt), asc(supportWebhookEvents.id)).limit(limit);
+        const outboundBatches = await Promise.all(["sent", "failed", "human_review"].map((deliveryStatus) => (
+          tx.select({ id: supportOutboundDeliveries.id, createdAt: supportOutboundDeliveries.createdAt })
+            .from(supportOutboundDeliveries).where(and(
+              lt(supportOutboundDeliveries.createdAt, contentCutoff),
+              eq(supportOutboundDeliveries.deliveryStatus, deliveryStatus),
+              ne(supportOutboundDeliveries.encryptedCanonicalBody, ""),
+            )).orderBy(asc(supportOutboundDeliveries.createdAt), asc(supportOutboundDeliveries.id)).limit(limit)
+        )));
+        const outboundBodies = outboundBatches.flat().sort((left, right) => (
+          dateValue(left.createdAt) - dateValue(right.createdAt) || left.id.localeCompare(right.id)
+        )).slice(0, limit);
+        if (messages.length) {
+          await tx.update(supportMessages).set({ textContent: null }).where(inArray(
+            supportMessages.id,
+            messages.map(({ id }) => id),
+          ));
+        }
+        if (events.length) {
+          await tx.update(supportWebhookEvents).set({
+            encryptedReplyToken: null,
+            replyTokenExpiresAt: null,
+          }).where(inArray(
+            supportWebhookEvents.id,
+            events.map(({ id }) => id),
+          ));
+        }
+        if (outboundBodies.length) {
+          await tx.update(supportOutboundDeliveries).set({ encryptedCanonicalBody: "" }).where(inArray(
+            supportOutboundDeliveries.id,
+            outboundBodies.map(({ id }) => id),
+          ));
+        }
+        return {
+          messagesCleared: messages.length,
+          replyTokensCleared: events.length,
+          outboundBodiesCleared: outboundBodies.length,
+        };
+      });
     },
 
     async getInboxConversation(ownerEmail, conversationId) {
@@ -1558,6 +1611,11 @@ function validDate(value) {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) throw unavailablePersistenceError();
   return date;
+}
+
+function validRetentionBatchSize(value) {
+  if (!Number.isInteger(value) || value < 1 || value > 1_000) throw unavailablePersistenceError();
+  return value;
 }
 
 function unavailablePersistenceError() {
