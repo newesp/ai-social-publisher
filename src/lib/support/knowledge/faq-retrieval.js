@@ -5,14 +5,15 @@ const CATEGORY_SCORE = 50;
 
 export function retrieveFaqs({ query, faqs, limit = MAX_RESULTS } = {}) {
   const normalizedQuery = normalize(query);
-  const queryTokens = tokens(normalizedQuery);
+  const queryTokens = [...new Set(tokens(normalizedQuery))];
   if (!normalizedQuery || !Array.isArray(faqs)) return [];
 
   return faqs
     .filter((faq) => faq?.enabled === true && typeof faq.id === "string")
     .map((faq) => ({ faq, ...scoreFaq(faq, normalizedQuery, queryTokens) }))
     .filter(({ matched }) => matched)
-    .sort((left, right) => right.score - left.score
+    .sort((left, right) => right.tier - left.tier
+      || right.score - left.score
       || numericPriority(right.faq) - numericPriority(left.faq)
       || left.faq.id.localeCompare(right.faq.id))
     .slice(0, boundedLimit(limit))
@@ -44,6 +45,7 @@ function scoreFaq(faq, query, queryTokens) {
     + (categoryOverlap ? CATEGORY_SCORE : 0);
   return {
     matched: evidenceScore > 0,
+    tier: exactKeywordScore > 0 ? 1 : 0,
     score: evidenceScore + numericPriority(faq),
   };
 }

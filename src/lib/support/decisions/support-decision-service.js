@@ -53,29 +53,44 @@ function customerMessages(messages) {
     .filter((message) => message?.senderType === "customer")
     .map((message) => String(message.text ?? message.textContent ?? ""))
     .join("\n")
-    .toLowerCase();
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[\p{P}\p{S}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function automaticHandoffReason(text) {
-  if (includesAny(text, [
-    "ignore previous instructions",
-    "ignore all instructions",
-    "system prompt",
-    "hidden instructions",
-    "reveal credentials",
-    "show credentials",
-  ])) return "unsupported_request";
-  if (includesAny(text, ["human agent", "human", "live agent", "representative", "真人", "人工", "客服人員", "客服人员"])) {
+  if (hasPromptInjection(text)) return "unsupported_request";
+  if (hasExplicitHumanRequest(text)) {
     return "explicit_human_request";
   }
-  if (includesAny(text, ["refund", "refunds", "退款", "退費", "退货", "退貨"])) return "high_risk_refund";
+  if (includesAny(text, ["refund", "refunds", "退款", "退費", "退货", "退貨"])
+    || /\b(?:want|need|get|give me|request)\s+(?:my\s+)?money back\b/.test(text)) {
+    return "high_risk_refund";
+  }
   if (includesAny(text, ["payment", "charged", "charge", "billing", "付款", "支付", "扣款", "帳單", "账单"])) {
     return "high_risk_payment";
   }
-  if (includesAny(text, ["personal data", "personal information", "privacy", "個人資料", "个人资料", "身分證", "身份证"])) {
+  if (hasPersonalDataRequest(text)) {
     return "high_risk_personal_data";
   }
   return null;
+}
+
+function hasPromptInjection(text) {
+  return /\b(?:ignore|disregard|override|bypass|forget)\s+(?:all\s+)?(?:previous|prior|earlier)?\s*(?:system\s+)?instructions?\b/.test(text)
+    || /\b(?:reveal|show|expose)\s+(?:the\s+)?(?:hidden\s+instructions|system prompt|credentials)\b/.test(text);
+}
+
+function hasExplicitHumanRequest(text) {
+  return /\b(?:connect|transfer|speak|talk|chat)\s+(?:me\s+)?(?:with|to)\s+(?:a\s+)?(?:human(?:\s+agent)?|live agent|representative|support staff)\b/.test(text)
+    || includesAny(text, ["真人客服", "人工客服", "轉接客服", "转接客服"]);
+}
+
+function hasPersonalDataRequest(text) {
+  return /\b(?:delete|remove|erase|access|export|change|update)\b[\s\w]{0,60}\b(?:personal\s+(?:data|information)|(?:all\s+)?data\s+associated\s+with\s+(?:my\s+)?account|account\s+data)\b/.test(text)
+    || /(?:刪除|删除|查詢|查询|更新).{0,16}(?:個人資料|个人资料)/.test(text);
 }
 
 function includesAny(text, terms) {

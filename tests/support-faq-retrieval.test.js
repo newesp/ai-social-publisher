@@ -71,6 +71,18 @@ test("retrieval retains a matched FAQ with negative priority without admitting u
   assert.deepEqual(results.map((result) => result.id), ["negative-match"]);
 });
 
+test("an exact keyword tier outranks repeated token overlap regardless of priority", () => {
+  const results = retrieveFaqs({
+    query: ["shipping", ...Array.from({ length: 101 }, () => "returns")].join(" "),
+    faqs: [
+      faq({ id: "exact-shipping", keywords: ["shipping"], priority: -100 }),
+      faq({ id: "repeated-returns", question: "Returns policy", priority: 100 }),
+    ],
+  });
+
+  assert.deepEqual(results.map((result) => result.id), ["exact-shipping", "repeated-returns"]);
+});
+
 function faq({
   id,
   question = "General question",
