@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { getLLMModelOptions } from "../ai/model-config.js";
 import { normalizeEmail } from "../auth/policy.js";
 import { createDbClient } from "../db/index.js";
+import { createLineSupportAdapter } from "./channel-adapters/line-support-adapter.js";
 import { createSupportRepository } from "./support-repository.js";
 
 const CONFIGURATION_KEYS = Object.freeze([
@@ -23,7 +24,7 @@ const REPLY_TONES = new Set(["friendly", "professional", "concise"]);
 const LLM_PROVIDERS = new Set(["google", "openai"]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const WEBHOOK_HASH_PATTERN = /^[a-f0-9]{64}$/;
-const INBOX_STATUSES = new Set(["ai_active", "waiting_human", "human_active", "resolved"]);
+const INBOX_STATUSES = new Set(["ai_active", "waiting_human", "human_active", "resolved", "return_to_ai_pending", "resolve_pending"]);
 const INBOX_PAGE_SIZE = 30;
 
 export function createSupportStore({
@@ -32,6 +33,7 @@ export function createSupportStore({
   modelOptions = getLLMModelOptions,
   now = () => new Date(),
   randomUUID = () => crypto.randomUUID(),
+  lineAdapter = createLineSupportAdapter(),
 }) {
   requireText(encryptionKey, "SETTINGS_ENCRYPTION_KEY", 500);
 
@@ -304,6 +306,46 @@ export function createSupportStore({
     async markConversationRead(ownerEmail, id) {
       return repository.markInboxConversationRead(requireOwner(ownerEmail), requireText(id, "Conversation ID"));
     },
+
+    async takeOver(ownerEmail, id, expectedVersion) {
+      const result = await repository.takeOverSupportConversation(requireOwner(ownerEmail), requireText(id, "Conversation ID"), requiredConversationVersion(expectedVersion), now());
+      return result ? toActionConversation(result) : null;
+    },
+
+    async sendHumanMessage(ownerEmail, id, input) {
+      const owner = requireOwner(ownerEmail);
+      const conversationId = requireText(id, "Conversation ID");
+      const message = validateHumanMessage(input);
+      const prepared = await repository.prepareHumanMessage(owner, conversationId, message, now());
+      if (!prepared) return null;
+      if (prepared.deliveryStatus === "sent") return toHumanMessage(prepared);
+      let response;
+      try {
+        const accessToken = await repository.loadLineAccessToken(prepared.connectionId);
+        response = await lineAdapter.pushCanonical({ accessToken, canonicalBody: prepared.canonicalBody, retryKey: prepared.retryKey });
+      } catch {
+        return toHumanMessage(await repository.markHumanMessageDelivery(owner, prepared.id, "failed", "line_push_transport", now()));
+      }
+      const acceptedRequestId = response?.headers?.["x-line-accepted-request-id"] || "";
+      const accepted = (Number(response?.status) >= 200 && Number(response?.status) < 300)
+        || (Number(response?.status) === 409 && acceptedRequestId);
+      return toHumanMessage(await repository.markHumanMessageDelivery(
+        owner, prepared.id, accepted ? "sent" : "failed", accepted ? null : safePushFailure(Number(response?.status)), now(),
+      ));
+    },
+
+    async requestTransition(ownerEmail, id, action, expectedVersion) {
+      if (action !== "return_to_ai" && action !== "resolve") throw badRequest("Support transition action is invalid.");
+      const transition = await repository.requestSupportTransition(
+        requireOwner(ownerEmail), requireText(id, "Conversation ID"), action, requiredConversationVersion(expectedVersion), now(), randomUUID(),
+      );
+      return transition ? { id: transition.id, conversationId: transition.conversationId, action: transition.requestedAction, effectiveAt: transition.effectiveAt } : null;
+    },
+
+    async undoTransition(ownerEmail, id, transitionId) {
+      const result = await repository.undoSupportTransition(requireOwner(ownerEmail), requireText(id, "Conversation ID"), requireText(transitionId, "Transition ID"), now());
+      return result ? toActionConversation(result) : null;
+    },
   };
 }
 
@@ -472,6 +514,7 @@ function toInboxSummary(record) {
 function toInboxConversation(record) {
   return {
     ...toInboxSummary(record),
+    version: Number.isInteger(record.version) ? record.version : 0,
     messages: Array.isArray(record.messages) ? record.messages.map((message) => ({
       id: message.id, direction: message.direction, senderType: message.senderType, messageType: message.messageType,
       text: message.text, deliveryStatus: message.deliveryStatus, safeErrorCode: message.safeErrorCode,
@@ -485,6 +528,17 @@ function toInboxConversation(record) {
     pendingTransition: record.pendingTransition ? { id: record.pendingTransition.id, action: record.pendingTransition.action, effectiveAt: record.pendingTransition.effectiveAt } : null,
   };
 }
+
+function requiredConversationVersion(value) { if (!Number.isInteger(value) || value < 0) throw badRequest("Expected conversation version is required."); return value; }
+function validateHumanMessage(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw badRequest("Human reply is invalid.");
+  const text = boundedRequiredText(input.text, "Human reply", 5_000);
+  const idempotencyKey = boundedRequiredText(input.idempotencyKey, "Human reply key", 100);
+  return { text, idempotencyKey };
+}
+function safePushFailure(status) { return status >= 500 && status < 600 ? "line_push_5xx" : "line_push_4xx"; }
+function toActionConversation(value) { return { id: value.id, status: value.status, version: value.version }; }
+function toHumanMessage(value) { return { id: value?.id ?? "", deliveryStatus: value?.deliveryStatus ?? "failed", safeErrorCode: value?.safeErrorCode ?? "line_push_transport" }; }
 
 function encodeInboxCursor(record) {
   return Buffer.from(JSON.stringify({ id: record.id, updatedAt: dateCursorValue(record.updatedAt) }), "utf8").toString("base64url");

@@ -62,6 +62,7 @@ function toSummary(value) {
 function toConversation(value) {
   return {
     ...toSummary(value),
+    version: Number.isInteger(value?.version) && value.version >= 0 ? value.version : 0,
     messages: Array.isArray(value?.messages) ? value.messages.map((message) => ({
       id: safeText(message?.id), direction: safeText(message?.direction), senderType: safeText(message?.senderType),
       messageType: safeText(message?.messageType), text: nullableText(message?.text),

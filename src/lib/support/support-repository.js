@@ -112,10 +112,9 @@ export function createSupportRepository(db = createDbClient(), {
             ));
           }
           [conversation] = await tx.update(supportConversations).set({
-            ...(event.message.handoffReasonCode ? {
-              status: "waiting_human",
-              handoffReasonCode: event.message.handoffReasonCode,
-            } : {}),
+            status: event.message.handoffReasonCode ? "waiting_human"
+              : (existing.pendingTransitionId || existing.status === "resolved" ? "ai_active" : existing.status),
+            ...(event.message.handoffReasonCode ? { handoffReasonCode: event.message.handoffReasonCode } : {}),
             unreadCount: existing.unreadCount + 1,
             pendingTransitionId: null,
             pendingAction: null,
@@ -236,6 +235,7 @@ export function createSupportRepository(db = createDbClient(), {
       const [lastMessage] = messages.slice(-1);
       return {
         id: conversation.id, customerLabel: "Customer", status: conversation.status, unreadCount: conversation.unreadCount,
+        version: conversation.version,
         handoffReason: conversation.handoffReasonCode, lastMessagePreview: lastMessage?.textContent ?? null,
         deliveryFailed: Boolean(delivery[0]), lastInboundAt: conversation.lastInboundAt, lastOutboundAt: conversation.lastOutboundAt,
         updatedAt: conversation.updatedAt,
@@ -260,6 +260,86 @@ export function createSupportRepository(db = createDbClient(), {
         eq(supportConversations.id, id), eq(supportConversations.ownerEmail, owner),
       )).returning({ id: supportConversations.id }));
       return updated ? { id: updated.id, unreadCount: 0 } : null;
+    },
+
+    async takeOverSupportConversation(ownerEmail, conversationId, expectedVersion, now = new Date()) {
+      const owner = normalizeOwner(ownerEmail); const id = requiredBoundedText(conversationId, "Conversation ID", 100); const timestamp = validDate(now);
+      const [updated] = await retryBusyOperation(() => db.transaction(async (tx) => {
+        const [current] = await tx.select().from(supportConversations).where(and(eq(supportConversations.id, id), eq(supportConversations.ownerEmail, owner))).limit(1);
+        if (!current || current.version !== expectedVersion) return [];
+        if (current.pendingTransitionId) await tx.update(supportConversationTransitions).set({ cancelledAt: timestamp }).where(and(eq(supportConversationTransitions.id, current.pendingTransitionId), isNull(supportConversationTransitions.cancelledAt)));
+        return tx.update(supportConversations).set({ status: "human_active", pendingTransitionId: null, pendingAction: null, pendingActionEffectiveAt: null, processingClaimId: null, processingClaimExpiresAt: null, version: current.version + 1, updatedAt: timestamp }).where(and(eq(supportConversations.id, id), eq(supportConversations.ownerEmail, owner), eq(supportConversations.version, expectedVersion))).returning({ id: supportConversations.id, status: supportConversations.status, version: supportConversations.version });
+      }));
+      return updated ?? null;
+    },
+
+    async prepareHumanMessage(ownerEmail, conversationId, { text, idempotencyKey }, now = new Date()) {
+      const owner = normalizeOwner(ownerEmail); const id = requiredBoundedText(conversationId, "Conversation ID", 100); const messageText = boundedText(text, "Human reply", 5_000); const key = requiredBoundedText(idempotencyKey, "Human reply key", 100); const timestamp = validDate(now);
+      return retryBusyOperation(() => db.transaction(async (tx) => {
+        const [conversation] = await tx.select().from(supportConversations).where(and(eq(supportConversations.id, id), eq(supportConversations.ownerEmail, owner))).limit(1);
+        if (!conversation || conversation.status !== "human_active") return null;
+        const scopedKey = `human:${owner}:${id}:${key}`;
+        let [message] = await tx.select().from(supportMessages).where(eq(supportMessages.idempotencyKey, scopedKey)).limit(1);
+        if (message && (message.conversationId !== id || message.textContent !== messageText)) return null;
+        if (!message) {
+          const messageId = randomUUID();
+          [message] = await tx.insert(supportMessages).values({ id: messageId, conversationId: id, direction: "outbound", senderType: "human", messageType: "text", textContent: messageText, safeMetadataJson: "{}", providerMessageId: null, deliveryStatus: "pending", idempotencyKey: scopedKey, sentAt: null, failedAt: null, safeErrorCode: null, processedAt: null, createdAt: timestamp }).returning();
+        } else if (message.deliveryStatus !== "sent") {
+          [message] = await tx.update(supportMessages).set({ deliveryStatus: "pending", failedAt: null, safeErrorCode: null }).where(eq(supportMessages.id, message.id)).returning();
+        }
+        return { id: message.id, deliveryStatus: message.deliveryStatus, safeErrorCode: message.safeErrorCode, retryKey: message.id, connectionId: conversation.platformConnectionId, canonicalBody: JSON.stringify({ to: decryptExternalId(conversation.encryptedCustomerExternalId, encryptionKey), messages: [{ type: "text", text: message.textContent }] }) };
+      }));
+    },
+
+    async markHumanMessageDelivery(ownerEmail, messageId, status, safeErrorCode, now = new Date()) {
+      const owner = normalizeOwner(ownerEmail); const id = requiredBoundedText(messageId, "Human message ID", 100); const timestamp = validDate(now);
+      const [message] = await retryBusyOperation(() => db.transaction(async (tx) => {
+        const [updated] = await tx.update(supportMessages).set({ deliveryStatus: status, sentAt: status === "sent" ? timestamp : null, failedAt: status === "failed" ? timestamp : null, safeErrorCode: safeErrorCode == null ? null : safeOutboundErrorCode(safeErrorCode) }).where(and(eq(supportMessages.id, id), eq(supportMessages.senderType, "human"), exists(tx.select({ one: sql`1` }).from(supportConversations).where(and(eq(supportConversations.id, supportMessages.conversationId), eq(supportConversations.ownerEmail, owner)))))).returning();
+        if (updated?.deliveryStatus === "sent") await tx.update(supportConversations).set({ lastOutboundAt: timestamp, updatedAt: timestamp }).where(eq(supportConversations.id, updated.conversationId));
+        return updated ? [{ id: updated.id, deliveryStatus: updated.deliveryStatus, safeErrorCode: updated.safeErrorCode }] : [];
+      }));
+      return message ?? null;
+    },
+
+    async requestSupportTransition(ownerEmail, conversationId, action, expectedVersion, now = new Date(), transitionId = randomUUID()) {
+      const owner = normalizeOwner(ownerEmail); const id = requiredBoundedText(conversationId, "Conversation ID", 100); const timestamp = validDate(now); const transition = requiredBoundedText(transitionId, "Transition ID", 100);
+      const toStatus = action === "return_to_ai" ? "ai_active" : action === "resolve" ? "resolved" : null;
+      if (!toStatus || !Number.isInteger(expectedVersion) || expectedVersion < 0) throw unavailablePersistenceError();
+      return retryBusyOperation(() => db.transaction(async (tx) => {
+        const [current] = await tx.select().from(supportConversations).where(and(eq(supportConversations.id, id), eq(supportConversations.ownerEmail, owner))).limit(1);
+        if (!current || current.version !== expectedVersion || current.pendingTransitionId) return null;
+        const effectiveAt = new Date(timestamp.getTime() + 10_000);
+        await tx.insert(supportConversationTransitions).values({ id: transition, conversationId: id, requestedAction: action, fromStatus: current.status, toStatus, requestedByOwnerEmail: owner, expectedVersion, requestedAt: timestamp, effectiveAt, cancelledAt: null, committedAt: null, createdAt: timestamp });
+        const [updated] = await tx.update(supportConversations).set({ status: `${action}_pending`, pendingTransitionId: transition, pendingAction: action, pendingActionEffectiveAt: effectiveAt, version: current.version + 1, updatedAt: timestamp }).where(and(eq(supportConversations.id, id), eq(supportConversations.ownerEmail, owner), eq(supportConversations.version, expectedVersion), isNull(supportConversations.pendingTransitionId))).returning({ id: supportConversations.id });
+        if (!updated) throw unavailablePersistenceError();
+        return { id: transition, conversationId: id, requestedAction: action, effectiveAt };
+      }));
+    },
+
+    async commitSupportTransition({ transitionId, conversationId, now = new Date() }) {
+      const transitionIdValue = requiredBoundedText(transitionId, "Transition ID", 100); const conversationIdValue = requiredBoundedText(conversationId, "Conversation ID", 100); const timestamp = validDate(now);
+      return retryBusyOperation(() => db.transaction(async (tx) => {
+        const [transition] = await tx.select().from(supportConversationTransitions).where(and(eq(supportConversationTransitions.id, transitionIdValue), eq(supportConversationTransitions.conversationId, conversationIdValue))).limit(1);
+        if (!transition || transition.cancelledAt || transition.committedAt) return { status: "stale" };
+        const [conversation] = await tx.update(supportConversations).set({ status: transition.toStatus, pendingTransitionId: null, pendingAction: null, pendingActionEffectiveAt: null, version: transition.expectedVersion + 2, updatedAt: timestamp }).where(and(eq(supportConversations.id, conversationIdValue), eq(supportConversations.pendingTransitionId, transitionIdValue), eq(supportConversations.version, transition.expectedVersion + 1))).returning({ id: supportConversations.id });
+        if (!conversation) return { status: "stale" };
+        const [committed] = await tx.update(supportConversationTransitions).set({ committedAt: timestamp }).where(and(eq(supportConversationTransitions.id, transitionIdValue), isNull(supportConversationTransitions.cancelledAt), isNull(supportConversationTransitions.committedAt))).returning({ id: supportConversationTransitions.id });
+        if (!committed) throw unavailablePersistenceError();
+        return { status: "committed" };
+      }));
+    },
+
+    async undoSupportTransition(ownerEmail, conversationId, transitionId, now = new Date()) {
+      const owner = normalizeOwner(ownerEmail); const id = requiredBoundedText(conversationId, "Conversation ID", 100); const transitionIdValue = requiredBoundedText(transitionId, "Transition ID", 100); const timestamp = validDate(now);
+      return retryBusyOperation(() => db.transaction(async (tx) => {
+        const [transition] = await tx.select().from(supportConversationTransitions).where(and(eq(supportConversationTransitions.id, transitionIdValue), eq(supportConversationTransitions.conversationId, id), eq(supportConversationTransitions.requestedByOwnerEmail, owner), isNull(supportConversationTransitions.cancelledAt), isNull(supportConversationTransitions.committedAt))).limit(1);
+        if (!transition) return null;
+        const [conversation] = await tx.update(supportConversations).set({ status: transition.fromStatus, pendingTransitionId: null, pendingAction: null, pendingActionEffectiveAt: null, version: transition.expectedVersion + 2, updatedAt: timestamp }).where(and(eq(supportConversations.id, id), eq(supportConversations.ownerEmail, owner), eq(supportConversations.pendingTransitionId, transitionIdValue), eq(supportConversations.version, transition.expectedVersion + 1))).returning({ id: supportConversations.id, status: supportConversations.status, version: supportConversations.version });
+        if (!conversation) return null;
+        const [cancelled] = await tx.update(supportConversationTransitions).set({ cancelledAt: timestamp }).where(and(eq(supportConversationTransitions.id, transitionIdValue), isNull(supportConversationTransitions.cancelledAt), isNull(supportConversationTransitions.committedAt))).returning({ id: supportConversationTransitions.id });
+        if (!cancelled) throw unavailablePersistenceError();
+        return conversation;
+      }));
     },
 
     async claimLineWorkflowDispatch({ connectionId, eventId, now = new Date() }) {

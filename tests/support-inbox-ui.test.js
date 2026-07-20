@@ -31,10 +31,15 @@ test("inbox exposes stale and reconnect recovery states while the shell refreshe
   for (const marker of ["attentionCount", "setInterval", "15000"]) assert.equal(shell.includes(marker), true);
 });
 
-test("composer input is enabled only for server-confirmed human handling without adding send behavior", async () => {
+test("composer supports server-confirmed human Push replies and global undo remains outside the selected thread", async () => {
   const source = await readFile(new URL("../src/components/support/ConversationThread.js", import.meta.url), "utf8");
-  assert.match(source, /TextInput[^>]+disabled=\{!composerEnabled\}/);
-  assert.match(source, /Button disabled/);
-  assert.doesNotMatch(source, /fetch\(/);
-  assert.match(source, /<Button disabled>Sending unavailable<\/Button>/);
+  const [inbox, undo] = await Promise.all([
+    readFile(new URL("../src/components/support/SupportInbox.js", import.meta.url), "utf8"),
+    readFile(new URL("../src/components/support/GlobalTransitionUndo.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(source, /disabled=\{!composerEnabled\}/);
+  assert.match(inbox, /fetch\(/);
+  assert.match(source, /human_active/);
+  assert.match(inbox, /GlobalTransitionUndo/);
+  assert.match(undo, /Undo/);
 });
