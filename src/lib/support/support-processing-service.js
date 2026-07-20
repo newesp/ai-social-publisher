@@ -10,7 +10,19 @@ export function createSupportProcessingService({ repository, decisionService, de
 
     async buildTurn(input) {
       const turn = await repository.buildClaimedTurn(input);
-      return turn ? { inboundMessageId: turn.inboundMessageId } : null;
+      return turn ? {
+        inboundMessageId: turn.inboundMessageId,
+        ...(turn.handoffReasonCode ? { handoffReasonCode: turn.handoffReasonCode } : {}),
+      } : null;
+    },
+
+    async recoverDelivery(input) {
+      const recovered = await repository.recoverExistingDelivery(input);
+      return recovered ? {
+        status: "pending_delivery",
+        deliveryId: recovered.deliveryId,
+        ...(recovered.handoffAcknowledgement === true ? { handoffAcknowledgement: true } : {}),
+      } : null;
     },
 
     async renewClaim(input) {
@@ -20,6 +32,7 @@ export function createSupportProcessingService({ repository, decisionService, de
     },
 
     async decideAndPersist(input) {
+      if (input.handoffReasonCode) return persistHandoff(repository, input, input.handoffReasonCode);
       let context = await repository.loadCurrentProcessingContext(input);
       const failClosedReason = stateFailure(context);
       if (failClosedReason) return persistHandoff(repository, input, failClosedReason);

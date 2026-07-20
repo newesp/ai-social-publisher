@@ -28,8 +28,9 @@ export function createSupportInboxRouteHandlers({
     async listActivePendingTransitions() {
       const owner = await normalizedOwner(requireOwner);
       const supportStore = await getStore();
-      const transitions = await supportStore.listActivePendingTransitions(owner);
-      return respond({ transitions: Array.isArray(transitions) ? transitions.map(toPendingTransition) : [] });
+      const result = await supportStore.listActivePendingTransitions(owner);
+      const transitions = Array.isArray(result) ? result : result?.transitions;
+      return respond({ transitions: Array.isArray(transitions) ? transitions.map(toPendingTransition) : [], batchLimitExceeded: result?.batchLimitExceeded === true });
     },
 
     async getConversation(_request, id) {

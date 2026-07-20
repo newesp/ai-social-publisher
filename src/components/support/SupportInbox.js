@@ -13,6 +13,7 @@ const POLL_MS = 15000;
 export function SupportInbox() {
   const mobile = useMediaQuery("(max-width: 47.99em)");
   const [conversations, setConversations] = useState([]);
+  const [nextCursor, setNextCursor] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
   const [selected, setSelected] = useState(null);
   const [listState, setListState] = useState("loading");
@@ -52,17 +53,18 @@ export function SupportInbox() {
     }
   }, []);
 
-  const loadList = useCallback(async () => {
+  const loadList = useCallback(async ({ cursor = null, append = false } = {}) => {
     listAbort.current?.abort();
     const controller = new AbortController();
     listAbort.current = controller;
     if (!hasSummaries.current) setListState("loading");
     try {
-      const response = await fetch("/api/support/conversations", { signal: controller.signal });
+      const response = await fetch(`/api/support/conversations${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, { signal: controller.signal });
       const data = await safeJson(response);
       if (!response.ok || !Array.isArray(data.conversations)) throw new Error("list");
       hasSummaries.current = true;
-      setConversations(data.conversations);
+      setConversations((current) => append ? appendUniqueConversations(current, data.conversations) : data.conversations);
+      setNextCursor(typeof data.nextCursor === "string" ? data.nextCursor : null);
       await loadActivePendingTransitions(controller.signal);
       setListState("ready");
       setRecoveryState((current) => current === "reconnecting" || current === "recovery_failed" ? "recovered" : "idle");
@@ -74,6 +76,7 @@ export function SupportInbox() {
       }
     }
   }, [loadActivePendingTransitions, loadDetail, selectedId]);
+  const loadMore = useCallback(() => nextCursor && loadList({ cursor: nextCursor, append: true }), [loadList, nextCursor]);
 
   useEffect(() => { loadList(); }, [loadList]);
   useEffect(() => {
@@ -145,7 +148,7 @@ export function SupportInbox() {
   const showList = !mobile || !selectedId;
   const showThread = !mobile || Boolean(selectedId);
 
-  return <Stack gap="md" style={{ minWidth: 0 }}><Group justify="space-between"><div><Text fw={700} size="xl">Support inbox</Text><Text c="dimmed" size="sm">Polling pauses while this tab is hidden.</Text></div><Button variant="light" onClick={loadList} loading={listState === "loading"}>Refresh</Button></Group><GlobalTransitionUndo transitions={globalTransitions} onUndo={undoTransition} undoingTransitionId={undoingTransition} /><SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="md" style={{ minWidth: 0 }}>{showList ? <ConversationList conversations={conversations} selectedId={selectedId} loading={listState === "loading"} state={listState} recoveryState={recoveryState} onSelect={choose} onRefresh={loadList} /> : null}{showThread ? <ConversationThread conversation={selected} loading={detailState === "loading"} error={detailState === "error"} mobile={mobile} onBack={() => { setSelectedId(null); setSelected(null); }} onTakeOver={takeOver} onSendMessage={sendMessage} onRetryMessage={retryHumanMessage} onTransition={requestTransition} /> : null}{selected ? <ConversationDetailsDrawer conversation={selected} /> : null}</SimpleGrid></Stack>;
+  return <Stack gap="md" style={{ minWidth: 0 }}><Group justify="space-between"><div><Text fw={700} size="xl">Support inbox</Text><Text c="dimmed" size="sm">Polling pauses while this tab is hidden.</Text></div><Button variant="light" onClick={loadList} loading={listState === "loading"}>Refresh</Button></Group><GlobalTransitionUndo transitions={globalTransitions} onUndo={undoTransition} undoingTransitionId={undoingTransition} /><SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="md" style={{ minWidth: 0 }}>{showList ? <ConversationList conversations={conversations} selectedId={selectedId} loading={listState === "loading"} state={listState} recoveryState={recoveryState} onSelect={choose} onRefresh={loadList} onLoadMore={loadMore} hasMore={Boolean(nextCursor)} /> : null}{showThread ? <ConversationThread conversation={selected} loading={detailState === "loading"} error={detailState === "error"} mobile={mobile} onBack={() => { setSelectedId(null); setSelected(null); }} onTakeOver={takeOver} onSendMessage={sendMessage} onRetryMessage={retryHumanMessage} onTransition={requestTransition} /> : null}{selected ? <ConversationDetailsDrawer conversation={selected} /> : null}</SimpleGrid></Stack>;
 }
 
 async function safeJson(response) { try { return await response.json(); } catch { return {}; } }
@@ -157,3 +160,4 @@ function reconcileGlobalTransitions(transitions) {
   }
   return [...byId.values()].sort((left, right) => Date.parse(left.effectiveAt) - Date.parse(right.effectiveAt));
 }
+function appendUniqueConversations(current, next) { const byId = new Map((current ?? []).map((item) => [item.id, item])); for (const item of next ?? []) if (item?.id) byId.set(item.id, item); return [...byId.values()]; }

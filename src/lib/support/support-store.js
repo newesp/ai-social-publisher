@@ -344,11 +344,15 @@ export function createSupportStore({
     },
 
     async listActivePendingTransitions(ownerEmail) {
-      const transitions = await repository.listActivePendingSupportTransitions(requireOwner(ownerEmail));
-      return Array.isArray(transitions) ? transitions.map((transition) => ({
+      const result = await repository.listActivePendingSupportTransitions(requireOwner(ownerEmail));
+      const transitions = Array.isArray(result) ? result : result?.transitions;
+      return {
+        transitions: Array.isArray(transitions) ? transitions.map((transition) => ({
         id: transition.id, conversationId: transition.conversationId, action: transition.action,
         effectiveAt: transition.effectiveAt, customerLabel: "Customer",
-      })) : [];
+        })) : [],
+        batchLimitExceeded: result?.batchLimitExceeded === true,
+      };
     },
 
     async getConversation(ownerEmail, id) {

@@ -112,7 +112,7 @@ test("the raw body is read once and verified before any JSON parsing", async () 
   const response = await harness.handler(request, "opaque-key");
 
   assert.equal(response.status, 400);
-  assert.equal(reads, 1);
+  assert.equal(reads, 0);
   assert.equal(harness.verifiedBodies[0], rawBody);
   assert.equal(harness.store.userEvents.length, 0);
 });

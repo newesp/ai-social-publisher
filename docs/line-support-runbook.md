@@ -34,3 +34,17 @@ Vercel 每日 01:30 UTC 以 `GET /api/cron/support-retention` 執行清理，且
 在任何 live 動作前，請明確提供：專用測試 LINE Official Account、測試 LINE 使用者、部署 URL、選定 LLM provider/model，以及要送出的精確測試訊息。獲授權後才依序驗證：Workflow dashboard、webhook 設定、一對一 AI 回覆、明確要求人工的 handoff、人工 Push、非文字 handoff、return/resolve/undo、導覽與 refresh 的獨立性、資料庫/運行 log 遮罩，以及 Vercel 用量。
 
 LINE Official Account Manager 的人工回覆不會同步回本系統，不能作為驗收或正式人工回覆介面。
+# Final review verification note
+
+The post-0004 support migrations use a manual metadata policy: do not treat `drizzle-kit generate` as authoritative. Before applying any production migration, complete and record the existing verified backup prerequisite, set `SUPPORT_MIGRATION_BACKUP_CONFIRMED=YES` only for the approved run, and use the documented rollback/restore decision. No migration is applied by local automated verification.
+
+## Workflow replay recovery
+
+If a Workflow run fails after its database transaction commits but before LINE
+delivery begins, retry or replace the same workflow event; do not insert a new
+outbox row or invent a new retry key. Recovery is automatic only while the
+exact event and conversation ownership claims are current. A handoff
+acknowledgement can be recovered while the conversation is `waiting_human`
+only when the persisted event, handoff decision, and outbox all match. A
+terminal delivery or explicit human takeover must be investigated from the
+safe audit status and must never be forced back into automated delivery.

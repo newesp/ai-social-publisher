@@ -47,6 +47,8 @@ const SUPPORT_TABLES = Object.fromEntries([
   }];
 }));
 const SUPPORT_INDEXES = {
+  // Manual post-0004 migration metadata policy (including 0008_support_decision_timeline_index): do not use drizzle-kit generate as authority.
+  support_ai_decisions_conversation_created_id_idx: { table: "support_ai_decisions", unique: false, columns: ["conversation_id", "created_at", "id"] },
   support_configurations_connection_unique: {
     table: "support_configurations",
     unique: true,

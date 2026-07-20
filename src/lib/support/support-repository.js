@@ -43,6 +43,9 @@ const CONTEXT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 const INBOX_QUERY_LIMIT = 31;
 const INBOX_MESSAGE_LIMIT = 100;
 const INBOX_DECISION_LIMIT = 50;
+const ACTIVE_PENDING_TRANSITION_LIMIT = 100;
+const MAX_CLAIMED_BATCH_MESSAGES = 25;
+const AUTOMATED_DELIVERY_STATUSES = Object.freeze(["pending", "retryable"]);
 
 export function createSupportRepository(db = createDbClient(), {
   encryptionKey,
@@ -122,13 +125,13 @@ export function createSupportRepository(db = createDbClient(), {
             )).returning({ fromStatus: supportConversationTransitions.fromStatus });
           }
           const restoredStatus = cancelledTransition?.fromStatus ?? existing.status;
-          const nextStatus = event.message.handoffReasonCode
-            ? "waiting_human"
+          const nextStatus = restoredStatus === "human_active"
+            ? "human_active"
             : restoredStatus === "resolved" ? "ai_active" : restoredStatus;
           processWithAi = nextStatus === "ai_active";
           [conversation] = await tx.update(supportConversations).set({
             status: nextStatus,
-            ...(event.message.handoffReasonCode ? { handoffReasonCode: event.message.handoffReasonCode } : {}),
+            handoffReasonCode: nextStatus === "waiting_human" ? existing.handoffReasonCode : null,
             unreadCount: existing.unreadCount + 1,
             pendingTransitionId: null,
             pendingAction: null,
@@ -142,7 +145,7 @@ export function createSupportRepository(db = createDbClient(), {
             eq(supportConversations.platformConnectionId, event.connectionId),
           )).returning();
         } else {
-          processWithAi = !event.message.handoffReasonCode;
+          processWithAi = true;
           [conversation] = await tx.insert(supportConversations).values({
             id: randomUUID(),
             ownerEmail: event.ownerEmail,
@@ -150,8 +153,8 @@ export function createSupportRepository(db = createDbClient(), {
             platform: "line",
             customerLookupKey: event.customerLookupKey,
             encryptedCustomerExternalId: event.encryptedCustomerExternalId,
-            status: event.message.handoffReasonCode ? "waiting_human" : "ai_active",
-            handoffReasonCode: event.message.handoffReasonCode ?? null,
+            status: "ai_active",
+            handoffReasonCode: null,
             unreadCount: 1,
             pendingTransitionId: null,
             pendingAction: null,
@@ -277,22 +280,12 @@ export function createSupportRepository(db = createDbClient(), {
 
     async listActivePendingSupportTransitions(ownerEmail) {
       const owner = normalizeOwner(ownerEmail);
-      const conversations = await db.select().from(supportConversations).where(and(
+      const transitions = await db.select({ id: supportConversationTransitions.id, conversationId: supportConversationTransitions.conversationId, action: supportConversationTransitions.requestedAction, effectiveAt: supportConversationTransitions.effectiveAt }).from(supportConversationTransitions).innerJoin(supportConversations, and(eq(supportConversations.pendingTransitionId, supportConversationTransitions.id), eq(supportConversations.id, supportConversationTransitions.conversationId))).where(and(
         eq(supportConversations.ownerEmail, owner),
         or(eq(supportConversations.status, "return_to_ai_pending"), eq(supportConversations.status, "resolve_pending")),
-      ));
-      const transitions = await Promise.all(conversations.map(async (conversation) => {
-        if (!conversation.pendingTransitionId) return null;
-        const [transition] = await db.select().from(supportConversationTransitions).where(and(
-          eq(supportConversationTransitions.id, conversation.pendingTransitionId),
-          eq(supportConversationTransitions.conversationId, conversation.id),
-          eq(supportConversationTransitions.requestedByOwnerEmail, owner),
-          isNull(supportConversationTransitions.cancelledAt),
-          isNull(supportConversationTransitions.committedAt),
-        )).limit(1);
-        return transition ? { id: transition.id, conversationId: conversation.id, action: transition.requestedAction, effectiveAt: transition.effectiveAt, customerLabel: "Customer" } : null;
-      }));
-      return transitions.filter(Boolean).sort((left, right) => dateValue(left.effectiveAt) - dateValue(right.effectiveAt));
+        eq(supportConversationTransitions.requestedByOwnerEmail, owner), isNull(supportConversationTransitions.cancelledAt), isNull(supportConversationTransitions.committedAt),
+      )).orderBy(asc(supportConversationTransitions.effectiveAt), asc(supportConversationTransitions.id)).limit(ACTIVE_PENDING_TRANSITION_LIMIT + 1);
+      return { transitions: transitions.slice(0, ACTIVE_PENDING_TRANSITION_LIMIT).map((transition) => ({ ...transition, customerLabel: "Customer" })), batchLimitExceeded: transitions.length > ACTIVE_PENDING_TRANSITION_LIMIT };
     },
 
     async clearExpiredSupportContent({ contentBefore, replyTokenBefore, batchSize }) {
@@ -447,8 +440,11 @@ export function createSupportRepository(db = createDbClient(), {
       const [updated] = await retryBusyOperation(() => db.transaction(async (tx) => {
         const [current] = await tx.select().from(supportConversations).where(and(eq(supportConversations.id, id), eq(supportConversations.ownerEmail, owner))).limit(1);
         if (!current || current.version !== expectedVersion) return [];
+        const [sending] = await tx.select({ id: supportOutboundDeliveries.id }).from(supportOutboundDeliveries).where(and(eq(supportOutboundDeliveries.conversationId, id), eq(supportOutboundDeliveries.deliveryStatus, "sending"), gt(supportOutboundDeliveries.deliveryClaimExpiresAt, timestamp))).limit(1);
+        if (sending) return [];
+        await terminalizeAutomatedDeliveries(tx, id, timestamp);
         if (current.pendingTransitionId) await tx.update(supportConversationTransitions).set({ cancelledAt: timestamp }).where(and(eq(supportConversationTransitions.id, current.pendingTransitionId), isNull(supportConversationTransitions.cancelledAt)));
-        return tx.update(supportConversations).set({ status: "human_active", pendingTransitionId: null, pendingAction: null, pendingActionEffectiveAt: null, processingClaimId: null, processingClaimExpiresAt: null, version: current.version + 1, updatedAt: timestamp }).where(and(eq(supportConversations.id, id), eq(supportConversations.ownerEmail, owner), eq(supportConversations.version, expectedVersion))).returning({ id: supportConversations.id, status: supportConversations.status, version: supportConversations.version });
+        return tx.update(supportConversations).set({ status: "human_active", handoffReasonCode: null, pendingTransitionId: null, pendingAction: null, pendingActionEffectiveAt: null, processingClaimId: null, processingClaimExpiresAt: null, version: current.version + 1, updatedAt: timestamp }).where(and(eq(supportConversations.id, id), eq(supportConversations.ownerEmail, owner), eq(supportConversations.version, expectedVersion))).returning({ id: supportConversations.id, status: supportConversations.status, version: supportConversations.version });
       }));
       return updated ?? null;
     },
@@ -573,7 +569,7 @@ export function createSupportRepository(db = createDbClient(), {
       return retryBusyOperation(() => db.transaction(async (tx) => {
         const [transition] = await tx.select().from(supportConversationTransitions).where(and(eq(supportConversationTransitions.id, transitionIdValue), eq(supportConversationTransitions.conversationId, conversationIdValue))).limit(1);
         if (!transition || transition.cancelledAt || transition.committedAt) return { status: "stale" };
-        const [conversation] = await tx.update(supportConversations).set({ status: transition.toStatus, pendingTransitionId: null, pendingAction: null, pendingActionEffectiveAt: null, version: transition.expectedVersion + 2, updatedAt: timestamp }).where(and(eq(supportConversations.id, conversationIdValue), eq(supportConversations.pendingTransitionId, transitionIdValue), eq(supportConversations.version, transition.expectedVersion + 1))).returning({ id: supportConversations.id });
+        const [conversation] = await tx.update(supportConversations).set({ status: transition.toStatus, handoffReasonCode: null, pendingTransitionId: null, pendingAction: null, pendingActionEffectiveAt: null, version: transition.expectedVersion + 2, updatedAt: timestamp }).where(and(eq(supportConversations.id, conversationIdValue), eq(supportConversations.pendingTransitionId, transitionIdValue), eq(supportConversations.version, transition.expectedVersion + 1))).returning({ id: supportConversations.id });
         if (!conversation) return { status: "stale" };
         const [committed] = await tx.update(supportConversationTransitions).set({ committedAt: timestamp }).where(and(eq(supportConversationTransitions.id, transitionIdValue), isNull(supportConversationTransitions.cancelledAt), isNull(supportConversationTransitions.committedAt))).returning({ id: supportConversationTransitions.id });
         if (!committed) throw unavailablePersistenceError();
@@ -586,7 +582,7 @@ export function createSupportRepository(db = createDbClient(), {
       return retryBusyOperation(() => db.transaction(async (tx) => {
         const [transition] = await tx.select().from(supportConversationTransitions).where(and(eq(supportConversationTransitions.id, transitionIdValue), eq(supportConversationTransitions.conversationId, id), eq(supportConversationTransitions.requestedByOwnerEmail, owner), isNull(supportConversationTransitions.cancelledAt), isNull(supportConversationTransitions.committedAt))).limit(1);
         if (!transition) return null;
-        const [conversation] = await tx.update(supportConversations).set({ status: transition.fromStatus, pendingTransitionId: null, pendingAction: null, pendingActionEffectiveAt: null, version: transition.expectedVersion + 2, updatedAt: timestamp }).where(and(eq(supportConversations.id, id), eq(supportConversations.ownerEmail, owner), eq(supportConversations.pendingTransitionId, transitionIdValue), eq(supportConversations.version, transition.expectedVersion + 1))).returning({ id: supportConversations.id, status: supportConversations.status, version: supportConversations.version });
+        const [conversation] = await tx.update(supportConversations).set({ status: transition.fromStatus, handoffReasonCode: null, pendingTransitionId: null, pendingAction: null, pendingActionEffectiveAt: null, version: transition.expectedVersion + 2, updatedAt: timestamp }).where(and(eq(supportConversations.id, id), eq(supportConversations.ownerEmail, owner), eq(supportConversations.pendingTransitionId, transitionIdValue), eq(supportConversations.version, transition.expectedVersion + 1))).returning({ id: supportConversations.id, status: supportConversations.status, version: supportConversations.version });
         if (!conversation) return null;
         const [cancelled] = await tx.update(supportConversationTransitions).set({ cancelledAt: timestamp }).where(and(eq(supportConversationTransitions.id, transitionIdValue), isNull(supportConversationTransitions.cancelledAt), isNull(supportConversationTransitions.committedAt))).returning({ id: supportConversationTransitions.id });
         if (!cancelled) throw unavailablePersistenceError();
@@ -759,8 +755,42 @@ export function createSupportRepository(db = createDbClient(), {
       return Boolean(released);
     },
 
-    async acquireConversationClaim({ connectionId, conversationId, now = new Date() }) {
+    async acquireConversationClaim({
+      connectionId, eventId, eventClaimId, conversationId, now = new Date(),
+    }) {
       const claim = validateConversationClaimInput({ connectionId, conversationId, now });
+      const recoveryEventId = eventId == null
+        ? null
+        : requiredBoundedText(eventId, "Webhook event ID", 256);
+      const recoveryEventClaimId = eventClaimId == null
+        ? null
+        : requiredBoundedText(eventClaimId, "Event processing claim", 100);
+      if ((recoveryEventId == null) !== (recoveryEventClaimId == null)) throw unavailablePersistenceError();
+      const recoverableHandoff = recoveryEventId == null
+        ? sql`0`
+        : exists(db.select({ one: sql`1` }).from(supportOutboundDeliveries)
+          .innerJoin(supportWebhookEvents, eq(
+            supportWebhookEvents.id,
+            supportOutboundDeliveries.webhookEventId,
+          ))
+          .innerJoin(supportMessages, and(
+            eq(supportMessages.conversationId, supportOutboundDeliveries.conversationId),
+            eq(supportMessages.idempotencyKey, `${claim.connectionId}:${recoveryEventId}`),
+            eq(supportMessages.direction, "inbound"),
+          ))
+          .innerJoin(supportAiDecisions, and(
+            eq(supportAiDecisions.conversationId, supportOutboundDeliveries.conversationId),
+            eq(supportAiDecisions.inboundMessageId, supportMessages.id),
+            eq(supportAiDecisions.action, "handoff"),
+          ))
+          .where(and(
+            eq(supportOutboundDeliveries.conversationId, claim.conversationId),
+            eq(supportWebhookEvents.platformConnectionId, claim.connectionId),
+            eq(supportWebhookEvents.webhookEventId, recoveryEventId),
+            eq(supportWebhookEvents.processingStatus, "processing"),
+            eq(supportWebhookEvents.safeErrorCode, recoveryEventClaimId),
+            gt(supportWebhookEvents.processedAt, claim.now),
+          )));
       const claimId = randomUUID();
       const [claimed] = await retryBusyOperation(() => db.update(supportConversations).set({
         processingClaimId: claimId,
@@ -769,7 +799,10 @@ export function createSupportRepository(db = createDbClient(), {
       }).where(and(
         eq(supportConversations.id, claim.conversationId),
         eq(supportConversations.platformConnectionId, claim.connectionId),
-        eq(supportConversations.status, "ai_active"),
+        or(
+          eq(supportConversations.status, "ai_active"),
+          and(eq(supportConversations.status, "waiting_human"), recoverableHandoff),
+        ),
         or(
           isNull(supportConversations.processingClaimId),
           isNull(supportConversations.processingClaimExpiresAt),
@@ -779,12 +812,77 @@ export function createSupportRepository(db = createDbClient(), {
       return claimed ? { acquired: true, claimId, windowStart: claim.now } : { acquired: false };
     },
 
-    async renewConversationClaim({ connectionId, eventId, conversationId, claimId, now = new Date() }) {
+    async recoverExistingDelivery({
+      connectionId, eventId, eventClaimId, conversationId, conversationClaimId, now = new Date(),
+    }) {
+      const input = {
+        ...validateConversationClaimInput({
+          connectionId,
+          conversationId,
+          claimId: conversationClaimId,
+          now,
+        }),
+        eventId: requiredBoundedText(eventId, "Webhook event ID", 256),
+        eventClaimId: requiredBoundedText(eventClaimId, "Event processing claim", 100),
+      };
+      const [recovered] = await db.select({
+        deliveryId: supportOutboundDeliveries.id,
+        action: supportAiDecisions.action,
+      }).from(supportOutboundDeliveries)
+        .innerJoin(supportWebhookEvents, eq(
+          supportWebhookEvents.id,
+          supportOutboundDeliveries.webhookEventId,
+        ))
+        .innerJoin(supportMessages, and(
+          eq(supportMessages.conversationId, supportOutboundDeliveries.conversationId),
+          eq(supportMessages.idempotencyKey, `${input.connectionId}:${input.eventId}`),
+          eq(supportMessages.direction, "inbound"),
+        ))
+        .innerJoin(supportAiDecisions, and(
+          eq(supportAiDecisions.conversationId, supportOutboundDeliveries.conversationId),
+          eq(supportAiDecisions.inboundMessageId, supportMessages.id),
+        ))
+        .innerJoin(supportConversations, and(
+          eq(supportConversations.id, supportOutboundDeliveries.conversationId),
+          eq(supportConversations.platformConnectionId, input.connectionId),
+          eq(supportConversations.processingClaimId, input.claimId),
+          gt(supportConversations.processingClaimExpiresAt, input.now),
+          or(
+            and(
+              eq(supportConversations.status, "ai_active"),
+              inArray(supportAiDecisions.action, ["reply", "clarify"]),
+            ),
+            and(
+              eq(supportConversations.status, "waiting_human"),
+              eq(supportAiDecisions.action, "handoff"),
+            ),
+          ),
+        ))
+        .where(and(
+          eq(supportOutboundDeliveries.conversationId, input.conversationId),
+          eq(supportWebhookEvents.platformConnectionId, input.connectionId),
+          eq(supportWebhookEvents.webhookEventId, input.eventId),
+          eq(supportWebhookEvents.processingStatus, "processing"),
+          eq(supportWebhookEvents.safeErrorCode, input.eventClaimId),
+          gt(supportWebhookEvents.processedAt, input.now),
+        )).limit(1);
+      return recovered ? {
+        deliveryId: recovered.deliveryId,
+        ...(recovered.action === "handoff" ? { handoffAcknowledgement: true } : {}),
+      } : null;
+    },
+
+    async renewConversationClaim({
+      connectionId, eventId, eventClaimId, conversationId, claimId, now = new Date(),
+    }) {
       const claim = validateConversationClaimInput({ connectionId, conversationId, claimId, now });
       const activeHandoffEventId = eventId == null
         ? null
         : requiredBoundedText(eventId, "Webhook event ID", 256);
-      const activeHandoff = activeHandoffEventId == null
+      const activeHandoffEventClaimId = eventClaimId == null
+        ? null
+        : requiredBoundedText(eventClaimId, "Event processing claim", 100);
+      const activeHandoff = activeHandoffEventId == null || activeHandoffEventClaimId == null
         ? sql`0`
         : exists(db.select({ one: sql`1` }).from(supportOutboundDeliveries)
           .innerJoin(supportWebhookEvents, eq(
@@ -794,7 +892,9 @@ export function createSupportRepository(db = createDbClient(), {
             eq(supportOutboundDeliveries.conversationId, claim.conversationId),
             eq(supportWebhookEvents.platformConnectionId, claim.connectionId),
             eq(supportWebhookEvents.webhookEventId, activeHandoffEventId),
-            inArray(supportOutboundDeliveries.deliveryStatus, ["pending", "sending", "retryable"]),
+            eq(supportWebhookEvents.processingStatus, "processing"),
+            eq(supportWebhookEvents.safeErrorCode, activeHandoffEventClaimId),
+            gt(supportWebhookEvents.processedAt, claim.now),
           )));
       const [renewed] = await retryBusyOperation(() => db.update(supportConversations).set({
         processingClaimExpiresAt: new Date(claim.now.getTime() + EVENT_PROCESSING_LEASE_MS),
@@ -823,22 +923,24 @@ export function createSupportRepository(db = createDbClient(), {
           gt(supportConversations.processingClaimExpiresAt, turn.cutoff),
         )).limit(1);
         if (!conversation) return null;
-        const messages = await tx.select({ id: supportMessages.id }).from(supportMessages)
+        const messages = await tx.select({ id: supportMessages.id, messageType: supportMessages.messageType }).from(supportMessages)
           .where(and(
             eq(supportMessages.conversationId, turn.conversationId),
             eq(supportMessages.direction, "inbound"),
             eq(supportMessages.senderType, "customer"),
-            eq(supportMessages.messageType, "text"),
             isNull(supportMessages.processedAt),
             lte(supportMessages.createdAt, turn.cutoff),
-          )).orderBy(asc(supportMessages.createdAt));
+          )).orderBy(asc(supportMessages.createdAt), asc(supportMessages.id))
+          .limit(MAX_CLAIMED_BATCH_MESSAGES);
         if (!messages.length) return null;
-        const [inbound] = await tx.select({ id: supportMessages.id }).from(supportMessages).where(and(
+        const [inbound] = await tx.select({ id: supportMessages.id, messageType: supportMessages.messageType }).from(supportMessages).where(and(
           eq(supportMessages.conversationId, turn.conversationId),
           eq(supportMessages.idempotencyKey, `${turn.connectionId}:${turn.eventId}`),
         )).limit(1);
         if (!inbound || !messages.some((message) => message.id === inbound.id)) return null;
-        return { inboundMessageId: inbound.id };
+        return messages.every(({ messageType }) => messageType === "text")
+          ? { inboundMessageId: inbound.id }
+          : { inboundMessageId: inbound.id, handoffReasonCode: "non_text" };
       }));
     },
 
@@ -881,7 +983,8 @@ export function createSupportRepository(db = createDbClient(), {
           eq(supportMessages.messageType, "text"),
           isNull(supportMessages.processedAt),
           lte(supportMessages.createdAt, batchCutoff),
-        )).orderBy(asc(supportMessages.createdAt)),
+        )).orderBy(asc(supportMessages.createdAt), asc(supportMessages.id))
+          .limit(MAX_CLAIMED_BATCH_MESSAGES),
         db.select({ count: sql`count(*)` }).from(supportAiDecisions).where(and(
           eq(supportAiDecisions.conversationId, current.conversationId),
           eq(supportAiDecisions.action, "reply"),
@@ -936,11 +1039,8 @@ export function createSupportRepository(db = createDbClient(), {
         if (!inbound) throw unavailablePersistenceError();
         await tx.update(supportMessages).set({ processedAt: decision.cutoff }).where(and(
           eq(supportMessages.conversationId, decision.conversationId),
-          eq(supportMessages.direction, "inbound"),
-          eq(supportMessages.senderType, "customer"),
-          eq(supportMessages.messageType, "text"),
+          inArray(supportMessages.id, batchMessages.map(({ id }) => id)),
           isNull(supportMessages.processedAt),
-          lte(supportMessages.createdAt, decision.cutoff),
         ));
         await completeDispatchedBatchEvents(tx, decision, batchMessages);
         const answerMessageId = randomUUID();
@@ -950,10 +1050,11 @@ export function createSupportRepository(db = createDbClient(), {
           deliveryStatus: "pending", idempotencyKey: `ai:${decision.connectionId}:${decision.eventId}`,
           sentAt: null, failedAt: null, safeErrorCode: null, processedAt: decision.now, createdAt: decision.now,
         });
+        const [configuration] = await tx.select({ llmProvider: supportConfigurations.llmProvider, llmModel: supportConfigurations.llmModel }).from(supportConfigurations).where(and(eq(supportConfigurations.ownerEmail, conversation.ownerEmail), eq(supportConfigurations.platformConnectionId, decision.connectionId))).limit(1);
         await tx.insert(supportAiDecisions).values({
-          id: randomUUID(), conversationId: decision.conversationId, inboundMessageId: inbound.id, action: "reply",
+          id: randomUUID(), conversationId: decision.conversationId, inboundMessageId: inbound.id, action: decision.action,
           category: decision.category, reasonCode: null, answerMessageId, faqIdsJson: JSON.stringify(decision.knowledgeSourceIds),
-          llmProvider: decision.llmProvider, llmModel: decision.llmModel, promptVersion: "support-v1",
+          llmProvider: configuration?.llmProvider ?? null, llmModel: configuration?.llmModel ?? null, promptVersion: "support-v1",
           inputTokens: null, outputTokens: null, latencyMs: null, createdAt: decision.now,
         });
         const [created] = await tx.insert(supportOutboundDeliveries).values({
@@ -1036,15 +1137,12 @@ export function createSupportRepository(db = createDbClient(), {
           )).limit(1);
           if (!primaryEvent) return false;
           const batch = { ...claim, eventId: primaryEventId, cutoff: batchCutoff };
-          batchMessages = await selectClaimedBatchMessages(tx, batch);
+          batchMessages = await selectClaimedBatchMessages(tx, { ...batch, includeNonText: true });
           if (!batchMessages.some(({ id }) => id === triggeringMessageId)) return false;
           await tx.update(supportMessages).set({ processedAt: batchCutoff }).where(and(
             eq(supportMessages.conversationId, claim.conversationId),
-            eq(supportMessages.direction, "inbound"),
-            eq(supportMessages.senderType, "customer"),
-            eq(supportMessages.messageType, "text"),
+            inArray(supportMessages.id, batchMessages.map(({ id }) => id)),
             isNull(supportMessages.processedAt),
-            lte(supportMessages.createdAt, batchCutoff),
           ));
           await completeDispatchedBatchEvents(tx, batch, batchMessages);
         }
@@ -1465,12 +1563,48 @@ export function createSupportRepository(db = createDbClient(), {
       }));
     },
 
-    async claimLineOutboundDelivery({ deliveryId, now = new Date() }) {
-      const delivery = { deliveryId: requiredBoundedText(deliveryId, "Outbound delivery ID", 100), now: validDate(now) };
+    async claimLineOutboundDelivery({
+      deliveryId,
+      connectionId,
+      eventId,
+      eventClaimId,
+      conversationId,
+      conversationClaimId,
+      now = new Date(),
+    }) {
+      const delivery = {
+        deliveryId: requiredBoundedText(deliveryId, "Outbound delivery ID", 100),
+        connectionId: requiredBoundedText(connectionId, "Connection ID", 100),
+        eventId: requiredBoundedText(eventId, "Webhook event ID", 256),
+        eventClaimId: requiredBoundedText(eventClaimId, "Event processing claim", 100),
+        conversationId: requiredBoundedText(conversationId, "Conversation ID", 100),
+        conversationClaimId: requiredBoundedText(conversationClaimId, "Conversation claim", 100),
+        now: validDate(now),
+      };
       return retryBusyOperation(() => db.transaction(async (tx) => {
         const [existing] = await tx.select().from(supportOutboundDeliveries)
           .where(eq(supportOutboundDeliveries.id, delivery.deliveryId)).limit(1);
         if (!existing) return { claimed: false, status: "duplicate" };
+        if (existing.conversationId !== delivery.conversationId) {
+          return { claimed: false, status: existing.deliveryStatus };
+        }
+        const [owned] = await tx.select({ id: supportWebhookEvents.id }).from(supportWebhookEvents)
+          .innerJoin(supportConversations, and(
+            eq(supportConversations.id, delivery.conversationId),
+            eq(supportConversations.platformConnectionId, delivery.connectionId),
+            eq(supportConversations.processingClaimId, delivery.conversationClaimId),
+            gt(supportConversations.processingClaimExpiresAt, delivery.now),
+            inArray(supportConversations.status, ["ai_active", "waiting_human"]),
+          ))
+          .where(and(
+            eq(supportWebhookEvents.id, existing.webhookEventId),
+            eq(supportWebhookEvents.platformConnectionId, delivery.connectionId),
+            eq(supportWebhookEvents.webhookEventId, delivery.eventId),
+            eq(supportWebhookEvents.processingStatus, "processing"),
+            eq(supportWebhookEvents.safeErrorCode, delivery.eventClaimId),
+            gt(supportWebhookEvents.processedAt, delivery.now),
+          )).limit(1);
+        if (!owned) return { claimed: false, status: existing.deliveryStatus };
         if (["sent", "failed", "human_review"].includes(existing.deliveryStatus)) {
           return { claimed: false, status: existing.deliveryStatus };
         }
@@ -2000,7 +2134,9 @@ function validateConversationClaimInput({ connectionId, conversationId, claimId,
   };
 }
 
-async function selectClaimedBatchMessages(tx, { connectionId, conversationId, cutoff }) {
+async function selectClaimedBatchMessages(tx, {
+  connectionId, conversationId, cutoff, includeNonText = false,
+}) {
   return tx.select({
     id: supportMessages.id,
     idempotencyKey: supportMessages.idempotencyKey,
@@ -2008,10 +2144,20 @@ async function selectClaimedBatchMessages(tx, { connectionId, conversationId, cu
     eq(supportMessages.conversationId, conversationId),
     eq(supportMessages.direction, "inbound"),
     eq(supportMessages.senderType, "customer"),
-    eq(supportMessages.messageType, "text"),
+    ...(includeNonText ? [] : [eq(supportMessages.messageType, "text")]),
     isNull(supportMessages.processedAt),
     lte(supportMessages.createdAt, cutoff),
-  )).orderBy(asc(supportMessages.createdAt));
+  )).orderBy(asc(supportMessages.createdAt), asc(supportMessages.id)).limit(MAX_CLAIMED_BATCH_MESSAGES);
+}
+
+async function terminalizeAutomatedDeliveries(tx, conversationId, now) {
+  await tx.update(supportOutboundDeliveries).set({
+    deliveryStatus: "human_review", deliveryClaimId: null, deliveryClaimExpiresAt: null,
+    nextAttemptAt: null, humanReviewAt: now, safeErrorCode: "human_takeover",
+  }).where(and(
+    eq(supportOutboundDeliveries.conversationId, conversationId),
+    inArray(supportOutboundDeliveries.deliveryStatus, AUTOMATED_DELIVERY_STATUSES),
+  ));
 }
 
 async function completeDispatchedBatchEvents(tx, { connectionId, eventId, cutoff }, messages) {
@@ -2019,14 +2165,14 @@ async function completeDispatchedBatchEvents(tx, { connectionId, eventId, cutoff
   const companionEventIds = [...new Set(messages.map(({ idempotencyKey }) => (
     idempotencyKey?.startsWith(prefix) ? idempotencyKey.slice(prefix.length) : null
   )).filter((candidate) => candidate && candidate !== eventId))];
-  for (const companionEventId of companionEventIds) {
+  if (companionEventIds.length) {
     await tx.update(supportWebhookEvents).set({
       processingStatus: "processed",
       safeErrorCode: null,
       processedAt: cutoff,
     }).where(and(
       eq(supportWebhookEvents.platformConnectionId, connectionId),
-      eq(supportWebhookEvents.webhookEventId, companionEventId),
+      inArray(supportWebhookEvents.webhookEventId, companionEventIds),
       eq(supportWebhookEvents.sourceType, "user"),
       eq(supportWebhookEvents.processingStatus, "dispatched"),
     ));
@@ -2042,6 +2188,7 @@ function validateClaimedTurnInput({ connectionId, eventId, conversationId, claim
 }
 
 function validatePersistDecisionInput(input = {}) {
+  const decision = input?.decision;
   const claim = {
     ...validateConversationClaimInput({
       connectionId: input.connectionId,
@@ -2052,6 +2199,7 @@ function validatePersistDecisionInput(input = {}) {
     eventId: requiredBoundedText(input.eventId, "Webhook event ID", 256),
     eventClaimId: requiredBoundedText(input.eventClaimId, "Event processing claim", 100),
   };
+  if (decision.action !== "reply" && decision.action !== "clarify") throw unavailablePersistenceError();
   const answer = requiredBoundedText(input?.decision?.answer, "AI answer", 2_000);
   const category = input?.decision?.category == null ? null : requiredBoundedText(input.decision.category, "AI category", 80);
   const knowledgeSourceIds = Array.isArray(input?.decision?.knowledgeSourceIds)
@@ -2066,6 +2214,7 @@ function validatePersistDecisionInput(input = {}) {
     || payload.messages[0]?.text !== answer) throw unavailablePersistenceError();
   return {
     ...claim,
+    action: decision.action,
     inboundMessageId: requiredBoundedText(input.inboundMessageId, "Inbound message ID", 100),
     answer,
     category,

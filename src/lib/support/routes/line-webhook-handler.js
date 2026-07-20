@@ -36,8 +36,9 @@ export function createLineWebhookHandler({
 
     let rawBody;
     try {
-      rawBody = await request.text();
-    } catch {
+      rawBody = await readBodyWithinLimit(request);
+    } catch (error) {
+      if (error instanceof RangeError) return safeResponse(respond, RESPONSES.tooLarge, 413);
       return safeResponse(respond, RESPONSES.malformed, 400);
     }
     if (Buffer.byteLength(rawBody, "utf8") > MAX_BODY_BYTES) {
@@ -181,4 +182,20 @@ function validConnection(connection) {
 
 function safeResponse(respond, body, status) {
   return respond(body, { status });
+}
+
+async function readBodyWithinLimit(request) {
+  if (!request?.body?.getReader) throw new Error("Invalid body.");
+  const reader = request.body.getReader(); const chunks = []; let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read(); if (done) break;
+      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+      size += chunk.byteLength; if (size > MAX_BODY_BYTES) throw new RangeError("too large");
+      chunks.push(chunk);
+    }
+  } finally { reader.releaseLock(); }
+  const bytes = new Uint8Array(size); let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 }

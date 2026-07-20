@@ -214,7 +214,9 @@ export const supportAiDecisions = sqliteTable("support_ai_decisions", {
   outputTokens: integer("output_tokens"),
   latencyMs: integer("latency_ms"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
-});
+}, (table) => [
+  index("support_ai_decisions_conversation_created_id_idx").on(table.conversationId, table.createdAt, table.id),
+]);
 
 export const supportWebhookEvents = sqliteTable("support_webhook_events", {
   id: text("id").primaryKey(),

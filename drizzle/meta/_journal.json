@@ -57,6 +57,13 @@
       "when": 1784685600000,
       "tag": "0007_support_inbox_pagination",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1784772000000,
+      "tag": "0008_support_decision_timeline_index",
+      "breakpoints": true
     }
   ]
 }

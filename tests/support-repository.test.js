@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { createClient } from "@libsql/client";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/libsql";
 
 import {
@@ -23,7 +23,10 @@ import {
 } from "../src/lib/db/schema.js";
 import { decryptJson, encryptJson } from "../src/lib/settings/credential-crypto.js";
 import { encryptExternalId, encryptOutboundCanonicalBody } from "../src/lib/support/identity-crypto.js";
+import { createLineOutboundDeliveryService } from "../src/lib/support/outbox/line-outbound-delivery-service.js";
+import { createSupportProcessingService } from "../src/lib/support/support-processing-service.js";
 import { createSupportRepository } from "../src/lib/support/support-repository.js";
+import { createLineMessageWorkflow } from "../src/lib/support/workflows/line-message-workflow.js";
 
 const NOW = new Date("2026-07-19T00:00:00.000Z");
 const LATER = new Date("2026-07-19T00:01:00.000Z");
@@ -356,7 +359,7 @@ test("LINE ingress persists encrypted identities atomically and cancels only the
     assert.equal((await db.select().from(supportConversationTransitions))[0].cancelledAt.toISOString(), LATER.toISOString());
     const updated = (await db.select().from(supportConversations))[0];
     assert.equal(updated.pendingTransitionId, null);
-    assert.equal(updated.status, "waiting_human");
+    assert.equal(updated.status, "ai_active");
     assert.equal(updated.version, 1);
 
     const otherConnection = await repository.ingestLineUserEvent({
@@ -658,13 +661,33 @@ test("an expired duplicate workflow reuses one immutable UUID outbound delivery 
     assert.equal(stored.encryptedRecipient.includes("private-user-id"), false);
     assert.equal(stored.encryptedCanonicalBody.includes("first decision"), false);
 
-    const delivery = await repository.claimLineOutboundDelivery({ deliveryId: first.deliveryId, now: NOW });
+    const conversationClaim = await repository.acquireConversationClaim({
+      connectionId,
+      eventId,
+      eventClaimId: resumedProcessing.claimId,
+      conversationId: ingested.conversationId,
+      now: resumedAt,
+    });
+    const reviewAt = new Date(resumedAt.getTime() + (24 * 60 * 60 * 1_000) + 1);
+    await db.update(supportWebhookEvents).set({ processedAt: new Date(reviewAt.getTime() + 30_000) })
+      .where(eq(supportWebhookEvents.webhookEventId, eventId));
+    await db.update(supportConversations).set({ processingClaimExpiresAt: new Date(reviewAt.getTime() + 30_000) })
+      .where(eq(supportConversations.id, ingested.conversationId));
+    const ownership = automatedDeliveryOwnership({
+      connectionId,
+      eventId,
+      eventClaimId: resumedProcessing.claimId,
+      conversationId: ingested.conversationId,
+      conversationClaimId: conversationClaim.claimId,
+    });
+    const delivery = await repository.claimLineOutboundDelivery({
+      ...ownership, deliveryId: first.deliveryId, now: resumedAt,
+    });
     assert.equal(delivery.claimed, true);
     assert.equal(delivery.retryKey, first.retryKey);
     assert.equal(delivery.canonicalBody, body);
     assert.equal((await repository.claimLineOutboundDelivery({
-      deliveryId: first.deliveryId,
-      now: new Date(NOW.getTime() + (24 * 60 * 60 * 1_000) + 1),
+      ...ownership, deliveryId: first.deliveryId, now: reviewAt,
     })).status, "human_review");
     assert.equal((await db.select().from(supportOutboundDeliveries))[0].retryKey, first.retryKey);
   });
@@ -1078,7 +1101,17 @@ test("AI delivery terminal state is transactionally mirrored to its message and 
       .where(eq(supportConversations.id, ingested.conversationId));
     assert.equal(conversation.lastOutboundAt, null);
 
-    const claim = await repository.claimLineOutboundDelivery({ deliveryId: persisted.deliveryId, now: NOW });
+    const claim = await repository.claimLineOutboundDelivery({
+      ...automatedDeliveryOwnership({
+        connectionId,
+        eventId,
+        eventClaimId: eventClaim.claimId,
+        conversationId: ingested.conversationId,
+        conversationClaimId: conversationClaim.claimId,
+      }),
+      deliveryId: persisted.deliveryId,
+      now: NOW,
+    });
     const acceptedAt = new Date(NOW.getTime() + 1_000);
     assert.equal(await repository.markLineOutboundDeliverySent({
       deliveryId: persisted.deliveryId, claimId: claim.claimId, acceptedRequestId: "accepted-1", now: acceptedAt,
@@ -1105,11 +1138,13 @@ test("an expired outbound claim cannot report success and a newer terminal claim
     await db.insert(supportConversations).values({
       id: "conversation-stale-delivery", ownerEmail: "owner@example.com", platformConnectionId: connectionId,
       platform: "line", customerLookupKey: "stale", encryptedCustomerExternalId: "encrypted",
-      status: "ai_active", createdAt: NOW, updatedAt: NOW,
+      status: "ai_active", processingClaimId: "conversation-claim",
+      processingClaimExpiresAt: new Date(NOW.getTime() + 120_000), createdAt: NOW, updatedAt: NOW,
     });
     await db.insert(supportWebhookEvents).values({
       id: "event-stale-delivery", platformConnectionId: connectionId, webhookEventId: "evt-stale-delivery",
-      sourceType: "user", processingStatus: "processed", receivedAt: NOW, createdAt: NOW,
+      sourceType: "user", processingStatus: "processing", safeErrorCode: "event-claim",
+      processedAt: new Date(NOW.getTime() + 120_000), receivedAt: NOW, createdAt: NOW,
     });
     await db.insert(supportMessages).values({
       id: "message-stale-delivery", conversationId: "conversation-stale-delivery", direction: "outbound",
@@ -1124,9 +1159,20 @@ test("an expired outbound claim cannot report success and a newer terminal claim
       deliveryStatus: "pending", createdAt: NOW,
     });
     const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });
-    const stale = await repository.claimLineOutboundDelivery({ deliveryId: "delivery-stale", now: NOW });
+    const ownership = automatedDeliveryOwnership({
+      connectionId,
+      eventId: "evt-stale-delivery",
+      eventClaimId: "event-claim",
+      conversationId: "conversation-stale-delivery",
+      conversationClaimId: "conversation-claim",
+    });
+    const stale = await repository.claimLineOutboundDelivery({
+      ...ownership, deliveryId: "delivery-stale", now: NOW,
+    });
     const reclaimedAt = new Date(NOW.getTime() + 31_000);
-    const current = await repository.claimLineOutboundDelivery({ deliveryId: "delivery-stale", now: reclaimedAt });
+    const current = await repository.claimLineOutboundDelivery({
+      ...ownership, deliveryId: "delivery-stale", now: reclaimedAt,
+    });
 
     assert.equal(await repository.markLineOutboundDeliverySent({
       deliveryId: "delivery-stale", claimId: stale.claimId, now: reclaimedAt,
@@ -1151,11 +1197,14 @@ test("the 24-hour review threshold cannot terminalize another worker's unexpired
     await db.insert(supportConversations).values({
       id: "conversation-review-fence", ownerEmail: "owner@example.com", platformConnectionId: connectionId,
       platform: "line", customerLookupKey: "review-fence", encryptedCustomerExternalId: "encrypted",
-      status: "ai_active", createdAt: NOW, updatedAt: NOW,
+      status: "ai_active", processingClaimId: "conversation-claim",
+      processingClaimExpiresAt: new Date(NOW.getTime() + (25 * 60 * 60 * 1_000)),
+      createdAt: NOW, updatedAt: NOW,
     });
     await db.insert(supportWebhookEvents).values({
       id: "event-review-fence", platformConnectionId: connectionId, webhookEventId: "evt-review-fence",
-      sourceType: "user", processingStatus: "processed", receivedAt: NOW, createdAt: NOW,
+      sourceType: "user", processingStatus: "processing", safeErrorCode: "event-claim",
+      processedAt: new Date(NOW.getTime() + (25 * 60 * 60 * 1_000)), receivedAt: NOW, createdAt: NOW,
     });
     await db.insert(supportOutboundDeliveries).values({
       id: "delivery-review-fence", webhookEventId: "event-review-fence",
@@ -1165,16 +1214,25 @@ test("the 24-hour review threshold cannot terminalize another worker's unexpired
       retryKey: "review-fence-key", deliveryStatus: "pending", createdAt: NOW,
     });
     const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });
-    await repository.claimLineOutboundDelivery({ deliveryId: "delivery-review-fence", now: NOW });
+    const ownership = automatedDeliveryOwnership({
+      connectionId,
+      eventId: "evt-review-fence",
+      eventClaimId: "event-claim",
+      conversationId: "conversation-review-fence",
+      conversationClaimId: "conversation-claim",
+    });
+    await repository.claimLineOutboundDelivery({
+      ...ownership, deliveryId: "delivery-review-fence", now: NOW,
+    });
     const nearThreshold = new Date(NOW.getTime() + (24 * 60 * 60 * 1_000) - 1_000);
     const active = await repository.claimLineOutboundDelivery({
-      deliveryId: "delivery-review-fence",
+      ...ownership, deliveryId: "delivery-review-fence",
       now: nearThreshold,
     });
     assert.equal(active.claimed, true);
 
     const reviewAttempt = await repository.claimLineOutboundDelivery({
-      deliveryId: "delivery-review-fence",
+      ...ownership, deliveryId: "delivery-review-fence",
       now: new Date(NOW.getTime() + (24 * 60 * 60 * 1_000) + 1),
     });
     assert.equal(reviewAttempt.status, "sending");
@@ -1255,11 +1313,21 @@ test("automatic handoff records audit and fixed acknowledgement while retaining 
       connectionId, eventId: "evt-after-handoff", now: NOW,
     })).claimed, false);
     assert.equal(await repository.renewConversationClaim({
-      connectionId, eventId, conversationId: ingested.conversationId,
+      connectionId, eventId, eventClaimId: eventClaim.claimId, conversationId: ingested.conversationId,
       claimId: conversationClaim.claimId, now: new Date(NOW.getTime() + 1_000),
     }), true);
 
-    const deliveryClaim = await repository.claimLineOutboundDelivery({ deliveryId: handoff.deliveryId, now: NOW });
+    const deliveryClaim = await repository.claimLineOutboundDelivery({
+      ...automatedDeliveryOwnership({
+        connectionId,
+        eventId,
+        eventClaimId: eventClaim.claimId,
+        conversationId: ingested.conversationId,
+        conversationClaimId: conversationClaim.claimId,
+      }),
+      deliveryId: handoff.deliveryId,
+      now: NOW,
+    });
     const terminalAt = new Date(NOW.getTime() + 2_000);
     await repository.markLineOutboundDeliverySent({
       deliveryId: handoff.deliveryId, claimId: deliveryClaim.claimId, now: terminalAt,
@@ -1369,6 +1437,430 @@ test("an expired event fence blocks decision and outbox persistence even if the 
     assert.equal((await db.select().from(supportOutboundDeliveries)).length, 0);
   });
 });
+
+test("reply and clarify workflows recover one exact persisted outbox after a post-commit crash", async () => {
+  for (const action of ["reply", "clarify"]) {
+    await withDatabase(async (db) => {
+      const fixture = await createReplayWorkflowFixture(db, {
+        connectionId: action === "reply"
+          ? "11111111-aaaa-4111-8111-111111111111"
+          : "22222222-aaaa-4222-8222-222222222222",
+        eventId: `evt-replay-${action}`,
+        message: { type: "text", text: "Question", safeMetadata: {} },
+        decision: {
+          action,
+          answer: action === "reply" ? "Answer" : "Which order?",
+          category: "general",
+          knowledgeSourceIds: ["faq-1"],
+        },
+      });
+
+      await assert.rejects(
+        fixture.crashingWorkflow({
+          eventId: fixture.eventId,
+          connectionId: fixture.connectionId,
+          conversationId: fixture.conversationId,
+        }),
+        /crash after persistence before delivery/,
+      );
+
+      const beforeReplay = await replayPersistenceSnapshot(db, fixture.connectionId, fixture.eventId);
+      assert.deepEqual(beforeReplay.counts, { decisions: 1, outboundMessages: 1, deliveries: 1 });
+      assert.equal(beforeReplay.delivery.deliveryStatus, "pending");
+
+      assert.deepEqual(await fixture.replacementWorkflow({
+        eventId: fixture.eventId,
+        connectionId: fixture.connectionId,
+        conversationId: fixture.conversationId,
+      }), { status: "sent" });
+
+      const afterReplay = await replayPersistenceSnapshot(db, fixture.connectionId, fixture.eventId);
+      assert.deepEqual(afterReplay.counts, beforeReplay.counts);
+      assert.equal(afterReplay.delivery.id, beforeReplay.delivery.id);
+      assert.equal(afterReplay.delivery.retryKey, beforeReplay.delivery.retryKey);
+      assert.equal(afterReplay.delivery.deliveryStatus, "sent");
+      assert.equal(afterReplay.event.processingStatus, "processed");
+      assert.equal(fixture.pushes.length, 1);
+
+      assert.deepEqual(await fixture.replacementWorkflow({
+        eventId: fixture.eventId,
+        connectionId: fixture.connectionId,
+        conversationId: fixture.conversationId,
+      }), { status: "duplicate" });
+      assert.equal(fixture.pushes.length, 1);
+    });
+  }
+});
+
+test("automatic non-text handoff recovers its exact acknowledgement after a post-commit crash", async () => {
+  await withDatabase(async (db) => {
+    const fixture = await createReplayWorkflowFixture(db, {
+      connectionId: "33333333-aaaa-4333-8333-333333333333",
+      eventId: "evt-replay-non-text-handoff",
+      message: {
+        type: "image",
+        text: null,
+        safeMetadata: { type: "image" },
+        handoffReasonCode: "non_text",
+      },
+      decision: null,
+    });
+
+    await assert.rejects(
+      fixture.crashingWorkflow({
+        eventId: fixture.eventId,
+        connectionId: fixture.connectionId,
+        conversationId: fixture.conversationId,
+      }),
+      /crash after persistence before delivery/,
+    );
+
+    const beforeReplay = await replayPersistenceSnapshot(db, fixture.connectionId, fixture.eventId);
+    assert.deepEqual(beforeReplay.counts, { decisions: 1, outboundMessages: 1, deliveries: 1 });
+    assert.equal(beforeReplay.decision.action, "handoff");
+    assert.equal(beforeReplay.decision.reasonCode, "non_text");
+    assert.equal(beforeReplay.conversation.status, "waiting_human");
+
+    assert.deepEqual(await fixture.replacementWorkflow({
+      eventId: fixture.eventId,
+      connectionId: fixture.connectionId,
+      conversationId: fixture.conversationId,
+    }), { status: "sent" });
+
+    const afterReplay = await replayPersistenceSnapshot(db, fixture.connectionId, fixture.eventId);
+    assert.deepEqual(afterReplay.counts, beforeReplay.counts);
+    assert.equal(afterReplay.delivery.id, beforeReplay.delivery.id);
+    assert.equal(afterReplay.delivery.retryKey, beforeReplay.delivery.retryKey);
+    assert.equal(afterReplay.delivery.deliveryStatus, "sent");
+    assert.equal(afterReplay.event.processingStatus, "processed");
+    assert.equal(afterReplay.conversation.status, "waiting_human");
+    assert.equal(afterReplay.conversation.processingClaimId, null);
+    assert.equal(fixture.pushes.length, 1);
+  });
+});
+
+test("a terminal handoff acknowledgement replay finalizes without sending again", async () => {
+  await withDatabase(async (db) => {
+    const fixture = await createReplayWorkflowFixture(db, {
+      connectionId: "66666666-aaaa-4666-8666-666666666666",
+      eventId: "evt-replay-terminal-handoff",
+      message: {
+        type: "image",
+        text: null,
+        safeMetadata: { type: "image" },
+        handoffReasonCode: "non_text",
+      },
+      decision: null,
+    });
+    const input = {
+      eventId: fixture.eventId,
+      connectionId: fixture.connectionId,
+      conversationId: fixture.conversationId,
+    };
+
+    await assert.rejects(
+      fixture.finalizeCrashingWorkflow(input),
+      /crash after terminal delivery before handoff finalization/,
+    );
+    const terminal = await replayPersistenceSnapshot(db, fixture.connectionId, fixture.eventId);
+    assert.equal(terminal.delivery.deliveryStatus, "sent");
+    assert.equal(terminal.event.processingStatus, "dispatched");
+    assert.equal(fixture.pushes.length, 1);
+
+    assert.deepEqual(await fixture.replacementWorkflow(input), { status: "sent" });
+    const finalized = await replayPersistenceSnapshot(db, fixture.connectionId, fixture.eventId);
+    assert.deepEqual(finalized.counts, terminal.counts);
+    assert.equal(finalized.delivery.id, terminal.delivery.id);
+    assert.equal(finalized.delivery.retryKey, terminal.delivery.retryKey);
+    assert.equal(finalized.event.processingStatus, "processed");
+    assert.equal(finalized.conversation.processingClaimId, null);
+    assert.equal(fixture.pushes.length, 1);
+  });
+});
+
+test("claimed AI batches process only the bounded selected message and companion-event set", async () => {
+  await withDatabase(async (db) => {
+    const connectionId = "44444444-aaaa-4444-8444-444444444444";
+    await db.insert(platformConnections).values(connection(connectionId, "owner@example.com"));
+    let nextId = 9_999;
+    const repository = createSupportRepository(db, {
+      encryptionKey: SETTINGS_ENCRYPTION_KEY,
+      randomUUID: () => `id-${String(nextId--).padStart(4, "0")}`,
+    });
+    let conversationId;
+    for (let index = 0; index < 30; index += 1) {
+      const eventId = `evt-bounded-${String(index).padStart(2, "0")}`;
+      const ingested = await repository.ingestLineUserEvent({
+        ownerEmail: "owner@example.com",
+        connectionId,
+        eventId,
+        externalUserId: "U-private",
+        replyToken: `reply-${index}`,
+        message: { type: "text", text: `Message ${index}`, safeMetadata: {} },
+        receivedAt: NOW,
+      });
+      conversationId ??= ingested.conversationId;
+      const dispatch = await repository.claimLineWorkflowDispatch({ connectionId, eventId, now: NOW });
+      assert.equal(await repository.markLineWorkflowDispatched({ ...dispatch, now: NOW }), true);
+    }
+    const eventId = "evt-bounded-29";
+    const eventClaim = await repository.claimLineEventProcessing({ connectionId, eventId, now: NOW });
+    const conversationClaim = await repository.acquireConversationClaim({
+      connectionId,
+      eventId,
+      eventClaimId: eventClaim.claimId,
+      conversationId,
+      now: NOW,
+    });
+    const cutoff = new Date(NOW.getTime() + 1_000);
+    const turn = await repository.buildClaimedTurn({
+      connectionId, eventId, conversationId, claimId: conversationClaim.claimId, cutoff,
+    });
+    const context = await repository.loadCurrentProcessingContext({
+      connectionId,
+      conversationId,
+      claimId: conversationClaim.claimId,
+      cutoff,
+      now: NOW,
+    });
+    assert.equal(context.customerTexts.length, 25);
+    assert.equal(context.customerTexts[0], "Message 29");
+    assert.equal(context.customerTexts.at(-1), "Message 5");
+    await repository.persistDecisionAndOutbound({
+      connectionId,
+      eventId,
+      eventClaimId: eventClaim.claimId,
+      conversationId,
+      claimId: conversationClaim.claimId,
+      inboundMessageId: turn.inboundMessageId,
+      cutoff,
+      decision: {
+        action: "reply",
+        answer: "Answer",
+        category: "general",
+        knowledgeSourceIds: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+      },
+      canonicalBody: '{"to":"U-private","messages":[{"type":"text","text":"Answer"}]}',
+      now: NOW,
+    });
+
+    const inbound = await db.select().from(supportMessages)
+      .where(eq(supportMessages.direction, "inbound"));
+    const events = await db.select().from(supportWebhookEvents);
+    assert.equal(inbound.filter(({ processedAt }) => processedAt != null).length, 25);
+    assert.equal(inbound.filter(({ processedAt }) => processedAt == null).length, 5);
+    assert.equal(events.filter(({ processingStatus }) => processingStatus === "processed").length, 24);
+    assert.equal(events.filter(({ processingStatus }) => processingStatus === "processing").length, 1);
+    assert.equal(events.filter(({ processingStatus }) => processingStatus === "dispatched").length, 5);
+  });
+});
+
+test("automated outbox claiming requires the exact live event and conversation ownership fences", async () => {
+  await withDatabase(async (db) => {
+    const connectionId = "55555555-aaaa-4555-8555-555555555555";
+    const eventId = "evt-delivery-ownership";
+    await db.insert(platformConnections).values(connection(connectionId, "owner@example.com"));
+    const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });
+    const ingested = await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com",
+      connectionId,
+      eventId,
+      externalUserId: "U-private",
+      replyToken: "reply-token",
+      message: { type: "text", text: "Question", safeMetadata: {} },
+      receivedAt: NOW,
+    });
+    const dispatch = await repository.claimLineWorkflowDispatch({ connectionId, eventId, now: NOW });
+    await repository.markLineWorkflowDispatched({ ...dispatch, now: NOW });
+    const eventClaim = await repository.claimLineEventProcessing({ connectionId, eventId, now: NOW });
+    const conversationClaim = await repository.acquireConversationClaim({
+      connectionId,
+      eventId,
+      eventClaimId: eventClaim.claimId,
+      conversationId: ingested.conversationId,
+      now: NOW,
+    });
+    const cutoff = new Date(NOW.getTime() + 3_000);
+    const turn = await repository.buildClaimedTurn({
+      connectionId,
+      eventId,
+      conversationId: ingested.conversationId,
+      claimId: conversationClaim.claimId,
+      cutoff,
+    });
+    const persisted = await repository.persistDecisionAndOutbound({
+      connectionId,
+      eventId,
+      eventClaimId: eventClaim.claimId,
+      conversationId: ingested.conversationId,
+      claimId: conversationClaim.claimId,
+      inboundMessageId: turn.inboundMessageId,
+      cutoff,
+      decision: {
+        action: "reply",
+        answer: "Answer",
+        category: "general",
+        knowledgeSourceIds: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+      },
+      canonicalBody: '{"to":"U-private","messages":[{"type":"text","text":"Answer"}]}',
+      now: NOW,
+    });
+    const ownership = {
+      deliveryId: persisted.deliveryId,
+      connectionId,
+      eventId,
+      eventClaimId: eventClaim.claimId,
+      conversationId: ingested.conversationId,
+      conversationClaimId: conversationClaim.claimId,
+      now: NOW,
+    };
+
+    assert.deepEqual(await repository.claimLineOutboundDelivery({
+      ...ownership,
+      eventClaimId: "wrong-event-claim",
+    }), { claimed: false, status: "pending" });
+    assert.deepEqual(await repository.claimLineOutboundDelivery({
+      ...ownership,
+      conversationClaimId: "wrong-conversation-claim",
+    }), { claimed: false, status: "pending" });
+    assert.equal((await repository.claimLineOutboundDelivery(ownership)).claimed, true);
+    assert.equal(await repository.takeOverSupportConversation(
+      "owner@example.com",
+      ingested.conversationId,
+      0,
+      new Date(NOW.getTime() + 1),
+    ), null);
+    assert.equal((await db.select().from(supportConversations)
+      .where(eq(supportConversations.id, ingested.conversationId)))[0].status, "ai_active");
+    assert.equal((await db.select().from(supportOutboundDeliveries)
+      .where(eq(supportOutboundDeliveries.id, persisted.deliveryId)))[0].deliveryStatus, "sending");
+  });
+});
+
+async function createReplayWorkflowFixture(db, { connectionId, eventId, message, decision }) {
+  await db.insert(platformConnections).values({
+    ...connection(connectionId, "owner@example.com"),
+    encryptedCredentials: encryptJson({ accessToken: "line-test-token" }, SETTINGS_ENCRYPTION_KEY),
+  });
+  await db.insert(supportConfigurations).values({
+    ...configurationRecord(),
+    id: `config-${eventId}`,
+    platformConnectionId: connectionId,
+    supportState: "enabled",
+  });
+  await db.insert(userSettings).values({
+    ownerEmail: "owner@example.com",
+    encryptedSettings: encryptJson({ googleAiApiKey: "test-provider-key" }, SETTINGS_ENCRYPTION_KEY),
+    updatedAt: NOW,
+  });
+  const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });
+  const ingested = await repository.ingestLineUserEvent({
+    ownerEmail: "owner@example.com",
+    connectionId,
+    eventId,
+    externalUserId: "U-private",
+    replyToken: "reply-token",
+    message,
+    receivedAt: NOW,
+  });
+  const dispatch = await repository.claimLineWorkflowDispatch({ connectionId, eventId, now: NOW });
+  assert.equal(dispatch.claimed, true);
+  assert.equal(await repository.markLineWorkflowDispatched({ ...dispatch, now: NOW }), true);
+
+  const pushes = [];
+  const deliveryService = createLineOutboundDeliveryService({
+    outboxStore: {
+      claimDelivery: (input) => repository.claimLineOutboundDelivery(input),
+      markDeliverySent: (input) => repository.markLineOutboundDeliverySent(input),
+      markDeliveryRetryable: (input) => repository.markLineOutboundDeliveryRetryable(input),
+      markDeliveryFailed: (input) => repository.markLineOutboundDeliveryFailed(input),
+      getDeliveryStatus: (deliveryId) => repository.getLineOutboundDeliveryStatus(deliveryId),
+    },
+    sendPush: async (request) => {
+      pushes.push(request);
+      return { status: 200, headers: {} };
+    },
+  });
+  const processingService = createSupportProcessingService({
+    repository,
+    decisionService: {
+      async decide() {
+        if (!decision) throw new Error("provider must not run for automatic non-text handoff");
+        return decision;
+      },
+    },
+    deliveryService,
+    now: () => NOW,
+  });
+  const eventStore = {
+    claimEventProcessing: (input) => repository.claimLineEventProcessing(input),
+    renewEventProcessing: (input) => repository.renewLineEventProcessing(input),
+    markEventProcessed: (input) => repository.markLineEventProcessed(input),
+    releaseEventProcessing: (input) => repository.releaseLineEventProcessing(input),
+  };
+  const workflowOptions = {
+    eventStore,
+    sleepImpl: async () => {},
+    startWorkflow: async () => {},
+    now: () => NOW,
+  };
+  return {
+    connectionId,
+    eventId,
+    conversationId: ingested.conversationId,
+    pushes,
+    crashingWorkflow: createLineMessageWorkflow({
+      ...workflowOptions,
+      processingService: {
+        ...processingService,
+        async deliver() {
+          throw new Error("crash after persistence before delivery");
+        },
+      },
+    }),
+    finalizeCrashingWorkflow: createLineMessageWorkflow({
+      ...workflowOptions,
+      processingService: {
+        ...processingService,
+        async finalizeHandoff() {
+          throw new Error("crash after terminal delivery before handoff finalization");
+        },
+      },
+    }),
+    replacementWorkflow: createLineMessageWorkflow({
+      ...workflowOptions,
+      processingService,
+    }),
+  };
+}
+
+async function replayPersistenceSnapshot(db, connectionId, eventId) {
+  const [event] = await db.select().from(supportWebhookEvents).where(and(
+    eq(supportWebhookEvents.platformConnectionId, connectionId),
+    eq(supportWebhookEvents.webhookEventId, eventId),
+  ));
+  const [delivery] = await db.select().from(supportOutboundDeliveries)
+    .where(eq(supportOutboundDeliveries.webhookEventId, event.id));
+  const [conversation] = await db.select().from(supportConversations)
+    .where(eq(supportConversations.id, delivery.conversationId));
+  const decisions = await db.select().from(supportAiDecisions)
+    .where(eq(supportAiDecisions.conversationId, conversation.id));
+  const outboundMessages = await db.select().from(supportMessages).where(and(
+    eq(supportMessages.conversationId, conversation.id),
+    eq(supportMessages.idempotencyKey, `ai:${connectionId}:${eventId}`),
+  ));
+  return {
+    event,
+    delivery,
+    conversation,
+    decision: decisions[0],
+    counts: {
+      decisions: decisions.length,
+      outboundMessages: outboundMessages.length,
+      deliveries: delivery ? 1 : 0,
+    },
+  };
+}
 
 async function withDatabase(run) {
   const directory = await mkdtemp(join(tmpdir(), "support-repository-"));
@@ -1587,4 +2079,14 @@ function messageRecord(id, conversationId, createdAt, textContent) {
     idempotencyKey: `idempotency-${id}`,
     createdAt,
   };
+}
+
+function automatedDeliveryOwnership({
+  connectionId,
+  eventId,
+  eventClaimId,
+  conversationId,
+  conversationClaimId,
+}) {
+  return { connectionId, eventId, eventClaimId, conversationId, conversationClaimId };
 }

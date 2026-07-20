@@ -35,7 +35,7 @@ test("messages inside one three-second workflow window become one AI turn withou
     claimId: "conversation-claim",
     eventClaimId: "event-claim",
     cutoff: new Date(START.getTime() + 3_000),
-    inboundMessageId: "message-1",
+    inboundMessageId: "message-1", handoffReasonCode: undefined,
     now: START,
   } });
   assert.deepEqual(calls[2], { name: "deliver", input: {

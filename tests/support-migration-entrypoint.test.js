@@ -120,6 +120,10 @@ test("support schema verifier checks all tables, named indexes, and duplicate ac
     new URL("../drizzle/0007_support_inbox_pagination.sql", import.meta.url),
     "utf8",
   );
+  const decisionTimelineSql = await readFile(
+    new URL("../drizzle/0008_support_decision_timeline_index.sql", import.meta.url),
+    "utf8",
+  );
   const client = createClient({ url: ":memory:" });
   try {
     await client.executeMultiple(`
@@ -129,6 +133,7 @@ test("support schema verifier checks all tables, named indexes, and duplicate ac
       ${outboxSql.replaceAll("--> statement-breakpoint", "")}
       ${retentionSql.replaceAll("--> statement-breakpoint", "")}
       ${paginationSql.replaceAll("--> statement-breakpoint", "")}
+      ${decisionTimelineSql.replaceAll("--> statement-breakpoint", "")}
     `);
     assert.deepEqual(await verifySupportSchema(client), { schemaVerified: true });
 

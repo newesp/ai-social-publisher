@@ -98,6 +98,6 @@ test("active pending transitions are owner-scoped, unpaginated, and contain only
     }),
   });
   const response = await handlers.listActivePendingTransitions(new Request("http://localhost/api/support/conversations/active-pending-transitions"));
-  assert.deepEqual(await response.json(), { transitions: [{ id: "transition-31", conversationId: "conversation-31", action: "resolve", effectiveAt: "2026-07-20T00:00:10.000Z", customerLabel: "Customer" }] });
+  assert.deepEqual(await response.json(), { transitions: [{ id: "transition-31", conversationId: "conversation-31", action: "resolve", effectiveAt: "2026-07-20T00:00:10.000Z", customerLabel: "Customer" }], batchLimitExceeded: false });
   assert.deepEqual(calls, ["owner@example.com"]);
 });

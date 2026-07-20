@@ -24,7 +24,15 @@ export function createLineOutboundDeliveryService({
       deliveryId, now = new Date(), eventId, eventClaimId, connectionId, conversationId, conversationClaimId,
     } = {}) {
       const attemptedAt = validDate(now);
-      const claim = await outboxStore.claimDelivery({ deliveryId: requiredId(deliveryId), now: attemptedAt });
+      const claim = await outboxStore.claimDelivery({
+        deliveryId: requiredId(deliveryId),
+        now: attemptedAt,
+        ...(eventId ? { eventId } : {}),
+        ...(eventClaimId ? { eventClaimId } : {}),
+        ...(connectionId ? { connectionId } : {}),
+        ...(conversationId ? { conversationId } : {}),
+        ...(conversationClaimId ? { conversationClaimId } : {}),
+      });
       if (!claim?.claimed) return { status: claim?.status ?? "duplicate" };
 
       let response;

@@ -129,8 +129,8 @@ test("support migrations journal immutable outbound delivery, retention indexes,
   const outboxSql = await readFile(new URL("../drizzle/0005_line_outbound_delivery_outbox.sql", import.meta.url), "utf8");
   const journal = JSON.parse(await readFile(new URL("../drizzle/meta/_journal.json", import.meta.url), "utf8"));
   const snapshot = JSON.parse(await readFile(new URL("../drizzle/meta/0004_snapshot.json", import.meta.url), "utf8"));
-  assert.equal(journal.entries.at(-1).idx, 7);
-  assert.equal(journal.entries.at(-1).tag, "0007_support_inbox_pagination");
+  assert.equal(journal.entries.at(-1).idx, 8);
+  assert.equal(journal.entries.at(-1).tag, "0008_support_decision_timeline_index");
   for (const tableName of [
     "support_configurations",
     "support_faqs",

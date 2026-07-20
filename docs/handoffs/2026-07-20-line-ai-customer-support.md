@@ -1,217 +1,76 @@
-# LINE AI Customer Support Session Handoff
+# LINE AI Customer Support Final Handoff
 
-## Objective
+## Status
 
-Finish the approved LINE AI customer-support MVP in the existing
-`ai-social-publisher` repository. Each signed-in user owns one LINE Official
-Account connection and one isolated support workspace. Automated replies use
-the configured LLM provider, FAQ-grounded structured decisions, durable
-Workflow processing, and an immutable Push outbox. Human agents reply only
-through the product inbox for the MVP.
+Tasks 1 through 10 are complete on
+`codex/line-ai-customer-support`. Trust Git history and
+`.superpowers/sdd/progress.md`; do not repeat Task 9 or Task 10.
 
-## Repository State
+The branch implements the approved owner-scoped LINE AI customer-support MVP:
+signed webhook ingestion, durable Workflow processing, FAQ-grounded decisions,
+immutable Push outbox delivery, automatic handoff, a human support inbox,
+transitions and undo, retention operations, and operator documentation.
 
-- Repository: `E:\Leo\Projects\Auto-posting`
-- Isolated worktree:
-  `E:\Leo\Projects\Auto-posting\.worktrees\line-ai-customer-support`
-- Branch: `codex/line-ai-customer-support`
-- Task 7 implementation commit: `ad499a0 fix: centralize LINE support batch fencing`
-- Recovery design/plan commit: `6037bec docs: define Task 7 recovery architecture`
-- Branch base: `d9601de`
-- Upstream: none configured for this branch
-- Worktree status at handoff creation: clean before this handoff document
-- Plan:
-  `docs/superpowers/plans/2026-07-19-line-ai-customer-support.md`
-- Design:
-  `docs/superpowers/specs/2026-07-19-line-ai-customer-support-design.md`
-- Durable progress ledger: `.superpowers/sdd/progress.md`
+## Final security and reliability work
 
-Trust the ledger and Git history over conversational memory. Do not repeat a
-task marked complete.
+The whole-branch review findings were resolved in combined TDD waves:
 
-## Completed Gates
+- The public LINE webhook and Workflow internal routes bypass browser-session
+  middleware while retaining their own authentication.
+- Webhook input is byte-limited while streaming, event count is capped, and
+  non-user/non-message behavior is bounded.
+- LLM calls have a deadline and retry classification; reply/clarify content is
+  deterministically grounded in cited FAQ material, and risky or injected
+  input fails closed.
+- Human ownership is monotonic, transitions are fenced, and automated delivery
+  cannot race past human takeover.
+- Reply, clarify, and automatic non-text handoff recover the exact persisted
+  outbox after a post-commit/pre-delivery failure. Recovery never duplicates
+  the decision, message, outbox, retry key, or Push.
+- A terminal handoff replay finalizes only; it does not send again.
+- Inbox pagination is keyset-based and reachable through Load more. Inbox,
+  transition, detail, AI batch, and retention work are explicitly bounded.
+- Production query-plan tests cover the inbox and decision-timeline indexes.
+  Post-0004 migrations follow the documented manual-metadata policy and the
+  backup-gated verifier.
 
-- Task 1: Workflow SDK smoke and protected local route.
-- Task 2: support schema, strict local migrations, and backup-gated migration
-  entrypoint.
-- Task 3: owner-scoped support configuration and FAQ APIs.
-- Task 4: LINE webhook provisioning, readiness, provider test, settings UI,
-  and FAQ UI.
-- Task 5: signed webhook ingestion, inbound event deduplication, encrypted
-  identifiers, durable event claims, and immutable Push outbox.
-- Task 6: deterministic FAQ retrieval and fail-closed structured support
-  decisions.
-- Task 7: identifier-only durable provider steps, three-second batching,
-  jointly fenced terminal writes, immutable Push delivery, safe handoff, and
-  durable follow-up scheduling.
-- Task 8: owner-scoped safe inbox list/detail/read APIs, responsive queue,
-  retained-message thread, details drawer, bounded visible-tab polling, and
-  a safe navigation attention count.
+## Final local evidence
 
-Tasks 1–6 passed their recorded independent review gates. Task 7 passed the
-user-authorized controller recovery acceptance gate after three earlier broad
-review/fix cycles remained non-compliant. Commit ranges and known limitations
-are recorded in `.superpowers/sdd/progress.md`.
+- Full test suite: `npm.cmd test` — 496/496 passed.
+- Focused replay/batch/fence tests: 5/5 passed.
+- Affected support suites: 68/68 passed.
+- Runtime configuration check: passed with disposable process-scoped values.
+- Production build: passed; Workflow compiled 4 steps and 1 workflow.
+- `git diff --check`: passed.
+- Whole-branch secret scan: no credential-like matches; email matches were
+  synthetic `example.com` fixtures.
+- No lint script exists in `package.json`.
+- Dependency advisory lookup was not run because it would disclose dependency
+  metadata to the registry from this environment.
 
-## Current Gate: Task 8 Complete — Stop Requested
+## Explicitly unverified
 
-Task 8 is complete. Do not begin Task 9 until the user gives a new explicit
-instruction.
+No live LINE, LLM, remote database, migration, credential, deployment, or
+real-message action was performed. Authenticated browser QA against real
+database state was also not run. UI changes received static structural review
+and automated interaction/state coverage; a manual desktop/mobile pass remains
+appropriate after an authorized test deployment.
 
-- Task 8 commits: `5f48cc9 feat: add LINE support inbox`; `e1de767 fix:
-  complete support inbox states`
-- Report: `.superpowers/sdd/task-8-report.md`
-- Independent review and one re-review: both approved; re-review retained only
-  Minor notes on pre-pagination N+1 summary queries and source/mock-heavy
-  regression tests.
-- Final full suite evidence: `npm.cmd test` — 435/435 passed.
-- Final production build: passed with command-scoped disposable values;
-  `workflows build complete (4 steps, 1 workflow)` and rendered `/support`
-  plus its three inbox endpoints.
-- Diff gate: `git diff --check 6188ced..e1de767` passed. The final Task 8
-  code-and-handoff secret/PII diff scan found no matches.
-- Browser layout verification remains an environment limitation: the local
-  server exited before listening on `localhost:3000`, so desktop/mobile visual
-  rendering could not be exercised. Source layout guards use breakpoint grid
-  columns with `minWidth: 0` and bounded pane overflow.
-- No live LINE, LLM, remote database, deployment, credential, or migration
-  action was performed.
+Production migration remains manual-only. Follow
+`docs/line-support-runbook.md`, verify a restorable backup first, and execute
+the backup-gated migration only during an authorized maintenance window.
 
-First action in the next session:
+## Remaining non-blocking follow-ups
 
-1. Read this handoff and `.superpowers/sdd/progress.md`.
-2. Confirm Task 8 remains complete at or after `e1de767`; do not repeat its
-   implementation or review cycles.
-3. Start Task 9 only after a new explicit user instruction.
+- Add a commercial-grade data-subject erasure flow and key rotation/purpose
+  separation before expanding beyond the owner and dedicated test accounts.
+- Migrate deprecated Next.js middleware convention to proxy when convenient.
+- Resolve the existing multi-lockfile workspace-root build warning.
+- Add rendered browser tests for the support inbox if the project adopts a
+  browser test harness.
 
-## Remaining Tasks
+## Publishing
 
-- Task 9: human Push replies, takeover, ten-second return/resolve transitions,
-  global undo, refresh/navigation recovery, and stale-state fencing.
-- Task 10: retention cleanup, safe observability, runbook/README, local
-  acceptance, visual QA, and the explicit live-MVP authorization gate.
-
-Do not combine Tasks 8 and 9. They have different data-mutation and concurrency
-risk. Task 10 must stop before live acceptance until the user explicitly names
-the dedicated test LINE Official Account, test LINE user, deployed URL,
-selected LLM provider/model, and exact messages.
-
-## Binding Architecture Decisions
-
-- Browser responses never expose owner email, LINE user ID, connection ID,
-  tokens, credentials, webhook keys/hashes, configuration versions, or raw
-  provider errors.
-- Webhook signatures use the untouched raw request body. Official event ID plus
-  connection scope is the inbound deduplication authority.
-- External Workflow dispatch is at-least-once. The first durable event claim
-  prevents duplicate LLM/outbox creation.
-- Automated AI replies use Push, not Reply.
-- Every automated outbound delivery is an immutable persisted record. Its
-  canonical RFC 4122 UUID is the stable `X-Line-Retry-Key`; recipient and
-  canonical request body never change.
-- Retry identical Push requests only for timeout/transport failures explicitly
-  marked retryable or 5xx. Treat 2xx and accepted 409 as sent. Other 4xx and
-  unclassified failures are terminal.
-- A delivery still unknown after LINE's 24-hour retry-key window enters human
-  review. Never create a replacement key automatically.
-- Explicit-human requests, refund/payment risk, personal-data incidents,
-  prompt injection, invalid structured output, unsupported FAQ citations, and
-  insufficient knowledge fail closed to human support.
-- Support disable is always allowed. Enablement is repository-authoritative
-  and atomically rechecks current FAQ, provider key/model, active LINE
-  connection, webhook readiness, and acknowledgements.
-- All owner and connection boundaries remain server-side and normalized.
-
-## Verification and Environment Notes
-
-- On this Windows host, use `npm.cmd test`; `npm test` may be blocked by the
-  PowerShell `npm.ps1` execution policy before tests run.
-- Production builds need required runtime configuration. Use disposable,
-  process-scoped synthetic values for local verification; do not write fake or
-  real secrets into repository files.
-- Existing non-blocking build warnings:
-  - multiple lockfiles/workspace-root inference;
-  - deprecated Next.js middleware convention.
-- Browser discovery previously returned no available backend. Screenshot and
-  keyboard visual QA remain unverified; Task 10 must retry it or record the
-  environment limitation precisely.
-- The owner uses Vercel Hobby and this MVP is for the owner plus dedicated test
-  accounts, not commercial traffic.
-- Production Turso migrations, deployed Workflow smoke, real LINE messages,
-  real LLM calls, Vercel deployment, and production runtime checks remain
-  unauthorized and unverified.
-
-## Token-Efficient Execution Policy
-
-For each remaining task:
-
-1. Use one implementer with a task brief, report path, and `fork_turns: "none"`.
-2. The implementer uses focused tests and performs self-review. It does not
-   dispatch nested reviewers.
-3. Use one controller-dispatched independent reviewer and require one complete
-   verdict containing all findings.
-4. Resolve all Critical and Important findings in one combined fix wave, then
-   perform one re-review.
-5. Use focused or covering tests during implementation and fixes.
-6. Run the final-head full suite, production build, diff check, and secret scan
-   once after the last material fix before marking the task complete.
-7. Pass file paths, not pasted plan/history content.
-
-Model policy:
-
-- Mechanical implementation: `gpt-5.6-terra`, medium reasoning.
-- Task 8/9 multi-file integration, concurrency work, and all task reviewers:
-  `gpt-5.6-terra`, high reasoning.
-- Task 10 implementation: `gpt-5.6-terra`, medium or high according to the
-  remaining integration risk.
-- Final whole-branch architecture/security review only:
-  `gpt-5.6-sol`, ultra reasoning.
-
-Every dispatch must set `model`, `reasoning_effort`, and
-`fork_turns: "none"` explicitly. If a model is unavailable or quota-blocked,
-report the fallback; never silently inherit the controller model.
-
-## Ready-to-Paste Startup Prompt
-
-```text
-Use collaborate-with-me and Subagent-Driven Development.
-
-Continue the LINE AI customer-support implementation from:
-E:\Leo\Projects\Auto-posting\.worktrees\line-ai-customer-support
-
-Read first:
-1. docs/handoffs/2026-07-20-line-ai-customer-support.md
-2. .superpowers/sdd/progress.md
-3. docs/superpowers/plans/2026-07-19-line-ai-customer-support.md
-
-Trust the ledger and Git history. Do not repeat completed tasks. Task 7 is
-complete through `ad499a0`. Stop unless the user explicitly requests Task 8.
-
-For every implementer and task reviewer, explicitly use:
-model: gpt-5.6-terra
-reasoning_effort: high
-fork_turns: none
-
-Mechanical Task 10 work may use Terra medium. Use gpt-5.6-sol with high
-reasoning only for the final whole-branch architecture/security review.
-Do not allow implementers to spawn nested reviewers. Require one complete
-task-review verdict, one combined Critical/Important fix wave, and one
-re-review. Use focused tests during work and one final full-suite/build gate
-after the last material fix.
-
-Do not deploy, migrate a remote database, call a real LINE or LLM provider,
-write production secrets, or send real messages without new explicit
-authorization.
-```
-
-## Skill Synchronization Performed in the Previous Session
-
-The token-efficient execution and model-selection policy was added identically
-to:
-
-- `C:\Users\Administrator\.codex\skills\collaborate-with-me\SKILL.md`
-- `E:\Leo\Projects\my-skills\collaborate-with-me\SKILL.md`
-
-The files had matching SHA-256 values immediately after synchronization. The
-repository copy under `E:\Leo\Projects\my-skills` was not committed or pushed
-as part of this project handoff.
+The branch may be pushed and opened as a ready-for-review PR after the final
+confirmation review remains free of Critical/Important findings and GitHub
+authentication is available.
