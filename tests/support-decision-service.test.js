@@ -157,6 +157,27 @@ test("semantic safety variants hand off before a provider call", async () => {
   }
 });
 
+test("personal-data incident variants hand off before a provider call", async () => {
+  for (const text of [
+    "My personal data was exposed.",
+    "Someone accessed my personal information.",
+    "There is a privacy issue with my account.",
+  ]) {
+    const calls = [];
+    const service = createSupportDecisionService({
+      generateTextImpl: async (...args) => { calls.push(args); return "{}"; },
+    });
+
+    const result = await service.decide({
+      ...input,
+      messages: [{ senderType: "customer", text }],
+    });
+
+    assert.deepEqual(result, handoff("high_risk_personal_data"));
+    assert.equal(calls.length, 0);
+  }
+});
+
 test("ordinary FAQ wording is not treated as a semantic safety preflight", async () => {
   const calls = [];
   const service = createSupportDecisionService({

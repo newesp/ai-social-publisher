@@ -89,7 +89,10 @@ function hasExplicitHumanRequest(text) {
 }
 
 function hasPersonalDataRequest(text) {
+  const personalData = /\b(?:my\s+)?(?:personal\s+(?:data|information)|account\s+data)\b/;
   return /\b(?:delete|remove|erase|access|export|change|update)\b[\s\w]{0,60}\b(?:personal\s+(?:data|information)|(?:all\s+)?data\s+associated\s+with\s+(?:my\s+)?account|account\s+data)\b/.test(text)
+    || (personalData.test(text) && /\b(?:exposed|leaked|breached|compromised|accessed|stolen)\b/.test(text))
+    || /\bprivacy\s+(?:issue|incident|breach|concern|problem)\b[\s\w]{0,40}\b(?:my\s+)?account\b/.test(text)
     || /(?:刪除|删除|查詢|查询|更新).{0,16}(?:個人資料|个人资料)/.test(text);
 }
 
