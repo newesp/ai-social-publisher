@@ -4,6 +4,7 @@ import { decryptJson, encryptJson } from "../settings/credential-crypto.js";
 
 const CUSTOMER_LOOKUP_PURPOSE = "support.customer-lookup.v1";
 const EXTERNAL_ID_PURPOSE = "support.customer-external-id.v1";
+const REPLY_TOKEN_PURPOSE = "support.reply-token.v1";
 
 export function hashWebhookKey(key) {
   return crypto.createHash("sha256").update(requireText(key, "Webhook key")).digest("hex");
@@ -31,11 +32,26 @@ export function encryptExternalId(externalId, encryptionKey) {
 }
 
 export function decryptExternalId(encryptedExternalId, encryptionKey) {
-  const payload = decryptJson(encryptedExternalId, encryptionKey);
-  if (payload?.purpose !== EXTERNAL_ID_PURPOSE || typeof payload.externalId !== "string" || !payload.externalId) {
-    throw new Error("Stored customer identifier could not be decrypted.");
+  return decryptPurposeText(encryptedExternalId, encryptionKey, EXTERNAL_ID_PURPOSE, "externalId", "Stored customer identifier");
+}
+
+export function encryptReplyToken(replyToken, encryptionKey) {
+  return encryptJson({
+    purpose: REPLY_TOKEN_PURPOSE,
+    replyToken: requireText(replyToken, "LINE reply token"),
+  }, encryptionKey);
+}
+
+export function decryptReplyToken(encryptedReplyToken, encryptionKey) {
+  return decryptPurposeText(encryptedReplyToken, encryptionKey, REPLY_TOKEN_PURPOSE, "replyToken", "Stored reply token");
+}
+
+function decryptPurposeText(encryptedValue, encryptionKey, purpose, field, label) {
+  const payload = decryptJson(encryptedValue, encryptionKey);
+  if (payload?.purpose !== purpose || typeof payload[field] !== "string" || !payload[field]) {
+    throw new Error(`${label} could not be decrypted.`);
   }
-  return payload.externalId;
+  return payload[field];
 }
 
 function requireText(value, label) {

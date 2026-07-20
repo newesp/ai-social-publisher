@@ -12,7 +12,11 @@ import { drizzle } from "drizzle-orm/libsql";
 import {
   platformConnections,
   supportConfigurations,
+  supportConversationTransitions,
+  supportConversations,
   supportFaqs,
+  supportMessages,
+  supportWebhookEvents,
   userSettings,
 } from "../src/lib/db/schema.js";
 import { decryptJson, encryptJson } from "../src/lib/settings/credential-crypto.js";
@@ -90,6 +94,91 @@ test("configuration lookups and mutations stay scoped to the normalized owner", 
       null,
     );
     assert.equal((await repository.getConfiguration("owner@example.com")).platformConnectionId, created.platformConnectionId);
+  });
+});
+
+test("LINE ingress persists encrypted identities atomically and cancels only the affected conversation transition", async () => {
+  await withDatabase(async (db) => {
+    const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });
+    await db.insert(platformConnections).values([
+      connection("11111111-1111-4111-8111-111111111111", "owner@example.com"),
+      connection("22222222-2222-4222-8222-222222222222", "owner@example.com"),
+    ]);
+
+    const first = await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com",
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      eventId: "evt-1",
+      externalUserId: "private-user-id",
+      replyToken: "private-reply-token",
+      message: { type: "text", text: "private message", safeMetadata: {} },
+      receivedAt: NOW,
+    });
+    assert.equal(first.inserted, true);
+
+    const [event] = await db.select().from(supportWebhookEvents);
+    const [conversation] = await db.select().from(supportConversations);
+    const [message] = await db.select().from(supportMessages);
+    assert.equal(event.encryptedReplyToken.includes("private-reply-token"), false);
+    assert.equal(conversation.encryptedCustomerExternalId.includes("private-user-id"), false);
+    assert.equal(message.textContent, "private message");
+
+    const transition = {
+      id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      conversationId: conversation.id,
+      requestedAction: "resolve",
+      fromStatus: "ai_active",
+      toStatus: "resolve_pending",
+      requestedByOwnerEmail: "owner@example.com",
+      expectedVersion: 0,
+      requestedAt: NOW,
+      effectiveAt: LATER,
+      cancelledAt: null,
+      committedAt: null,
+      createdAt: NOW,
+    };
+    await db.insert(supportConversationTransitions).values(transition);
+    await db.update(supportConversations).set({
+      pendingTransitionId: transition.id,
+      pendingAction: "resolve",
+      pendingActionEffectiveAt: LATER,
+    }).where(eq(supportConversations.id, conversation.id));
+
+    const second = await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com",
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      eventId: "evt-2",
+      externalUserId: "private-user-id",
+      replyToken: "private-reply-token-2",
+      message: { type: "image", text: null, safeMetadata: { type: "image" }, handoffReasonCode: "non_text" },
+      receivedAt: LATER,
+    });
+    assert.equal(second.inserted, true);
+    assert.equal((await db.select().from(supportConversationTransitions))[0].cancelledAt.toISOString(), LATER.toISOString());
+    const updated = (await db.select().from(supportConversations))[0];
+    assert.equal(updated.pendingTransitionId, null);
+    assert.equal(updated.status, "waiting_human");
+
+    const otherConnection = await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com",
+      connectionId: "22222222-2222-4222-8222-222222222222",
+      eventId: "evt-1",
+      externalUserId: "private-user-id",
+      replyToken: "another-private-reply-token",
+      message: { type: "text", text: "other connection", safeMetadata: {} },
+      receivedAt: LATER,
+    });
+    assert.notEqual(otherConnection.conversationId, first.conversationId);
+    assert.equal((await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com",
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      eventId: "evt-1",
+      externalUserId: "private-user-id",
+      replyToken: "duplicate-private-reply-token",
+      message: { type: "text", text: "must not persist", safeMetadata: {} },
+      receivedAt: LATER,
+    })).inserted, false);
+    assert.equal((await db.select().from(supportMessages)).length, 3);
   });
 });
 
@@ -318,6 +407,36 @@ async function withDatabase(run) {
         answer TEXT NOT NULL, category TEXT NOT NULL, keywords_json TEXT NOT NULL DEFAULT '[]',
         enabled INTEGER NOT NULL DEFAULT 1, priority INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE support_conversations (
+        id TEXT PRIMARY KEY NOT NULL, owner_email TEXT NOT NULL,
+        platform_connection_id TEXT NOT NULL, platform TEXT NOT NULL,
+        customer_lookup_key TEXT NOT NULL, encrypted_customer_external_id TEXT NOT NULL,
+        status TEXT NOT NULL, handoff_reason_code TEXT, unread_count INTEGER NOT NULL DEFAULT 0,
+        pending_transition_id TEXT, pending_action TEXT, pending_action_effective_at INTEGER,
+        processing_claim_id TEXT, processing_claim_expires_at INTEGER, version INTEGER NOT NULL DEFAULT 0,
+        last_inbound_at INTEGER, last_outbound_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        UNIQUE (platform_connection_id, customer_lookup_key)
+      );
+      CREATE TABLE support_messages (
+        id TEXT PRIMARY KEY NOT NULL, conversation_id TEXT NOT NULL, direction TEXT NOT NULL,
+        sender_type TEXT NOT NULL, message_type TEXT NOT NULL, text_content TEXT,
+        safe_metadata_json TEXT NOT NULL DEFAULT '{}', provider_message_id TEXT,
+        delivery_status TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE, sent_at INTEGER,
+        failed_at INTEGER, safe_error_code TEXT, processed_at INTEGER, created_at INTEGER NOT NULL
+      );
+      CREATE TABLE support_webhook_events (
+        id TEXT PRIMARY KEY NOT NULL, platform_connection_id TEXT NOT NULL, webhook_event_id TEXT NOT NULL,
+        source_type TEXT NOT NULL, processing_status TEXT NOT NULL, encrypted_reply_token TEXT,
+        reply_token_expires_at INTEGER, safe_error_code TEXT, received_at INTEGER NOT NULL,
+        processed_at INTEGER, created_at INTEGER NOT NULL,
+        UNIQUE (platform_connection_id, webhook_event_id)
+      );
+      CREATE TABLE support_conversation_transitions (
+        id TEXT PRIMARY KEY NOT NULL, conversation_id TEXT NOT NULL, requested_action TEXT NOT NULL,
+        from_status TEXT NOT NULL, to_status TEXT NOT NULL, requested_by_owner_email TEXT NOT NULL,
+        expected_version INTEGER NOT NULL, requested_at INTEGER NOT NULL, effective_at INTEGER NOT NULL,
+        cancelled_at INTEGER, committed_at INTEGER, created_at INTEGER NOT NULL
       );
       CREATE TABLE user_settings (
         owner_email TEXT PRIMARY KEY NOT NULL, encrypted_settings TEXT NOT NULL,

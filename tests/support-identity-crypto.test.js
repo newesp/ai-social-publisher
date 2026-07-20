@@ -5,7 +5,9 @@ import { test } from "node:test";
 import {
   customerLookupKey,
   decryptExternalId,
+  decryptReplyToken,
   encryptExternalId,
+  encryptReplyToken,
   hashWebhookKey,
 } from "../src/lib/support/identity-crypto.js";
 
@@ -28,6 +30,14 @@ test("customer lookup is stable and domain-separated by connection while externa
   const encrypted = encryptExternalId("U123", ENCRYPTION_KEY);
   assert.equal(encrypted.includes("U123"), false);
   assert.equal(decryptExternalId(encrypted, ENCRYPTION_KEY), "U123");
+});
+
+test("reply tokens use a distinct encrypted payload purpose", () => {
+  const encrypted = encryptReplyToken("reply-token", ENCRYPTION_KEY);
+
+  assert.equal(encrypted.includes("reply-token"), false);
+  assert.equal(decryptReplyToken(encrypted, ENCRYPTION_KEY), "reply-token");
+  assert.throws(() => decryptExternalId(encrypted, ENCRYPTION_KEY), /could not be decrypted/i);
 });
 
 test("identity crypto rejects empty inputs and the wrong decryption key", () => {
