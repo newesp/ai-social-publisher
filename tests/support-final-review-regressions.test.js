@@ -62,3 +62,10 @@ test("clarify decisions persist as clarify rather than a forced reply", async ()
   assert.match(repository, /action: decision\.action/);
   assert.match(repository, /decision\.action !== "reply" && decision\.action !== "clarify"/);
 });
+
+test("conversation detail loads only its bounded cited FAQ sources", async () => {
+  const [, , repository] = await sources();
+  assert.match(repository, /INBOX_FAQ_SOURCE_LIMIT/);
+  assert.match(repository, /inArray\(supportFaqs\.id,\s*usedFaqIds\)/);
+  assert.match(repository, /\.limit\(INBOX_FAQ_SOURCE_LIMIT\)/);
+});

@@ -43,6 +43,7 @@ const CONTEXT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 const INBOX_QUERY_LIMIT = 31;
 const INBOX_MESSAGE_LIMIT = 100;
 const INBOX_DECISION_LIMIT = 50;
+const INBOX_FAQ_SOURCE_LIMIT = INBOX_DECISION_LIMIT * 5;
 const ACTIVE_PENDING_TRANSITION_LIMIT = 100;
 const MAX_CLAIMED_BATCH_MESSAGES = 25;
 const AUTOMATED_DELIVERY_STATUSES = Object.freeze(["pending", "retryable"]);
@@ -358,7 +359,7 @@ export function createSupportRepository(db = createDbClient(), {
         eq(supportConversations.id, id), eq(supportConversations.ownerEmail, owner),
       )).limit(1);
       if (!conversation) return null;
-      const [messages, decisions, faqs, transition, delivery] = await Promise.all([
+      const [messages, decisions, transition, delivery] = await Promise.all([
         db.select({
           id: supportMessages.id,
           direction: supportMessages.direction,
@@ -383,11 +384,6 @@ export function createSupportRepository(db = createDbClient(), {
         }).from(supportAiDecisions).where(eq(supportAiDecisions.conversationId, id))
           .orderBy(desc(supportAiDecisions.createdAt), desc(supportAiDecisions.id))
           .limit(INBOX_DECISION_LIMIT),
-        db.select({
-          id: supportFaqs.id,
-          question: supportFaqs.question,
-          category: supportFaqs.category,
-        }).from(supportFaqs).where(eq(supportFaqs.ownerEmail, owner)),
         conversation.pendingTransitionId ? db.select({
           id: supportConversationTransitions.id,
           requestedAction: supportConversationTransitions.requestedAction,
@@ -403,7 +399,17 @@ export function createSupportRepository(db = createDbClient(), {
           eq(supportOutboundDeliveries.conversationId, id), eq(supportOutboundDeliveries.deliveryStatus, "failed"),
         )).limit(1),
       ]);
-      const usedFaqIds = new Set(decisions.flatMap((decision) => parseKeywords(decision.faqIdsJson)));
+      const usedFaqIds = [...new Set(
+        decisions.flatMap((decision) => parseKeywords(decision.faqIdsJson)),
+      )].slice(0, INBOX_FAQ_SOURCE_LIMIT);
+      const faqs = usedFaqIds.length ? await db.select({
+        id: supportFaqs.id,
+        question: supportFaqs.question,
+        category: supportFaqs.category,
+      }).from(supportFaqs).where(and(
+        eq(supportFaqs.ownerEmail, owner),
+        inArray(supportFaqs.id, usedFaqIds),
+      )).limit(INBOX_FAQ_SOURCE_LIMIT) : [];
       messages.reverse();
       const [lastMessage] = messages.slice(-1);
       return {
@@ -421,7 +427,7 @@ export function createSupportRepository(db = createDbClient(), {
           id: decision.id, action: decision.action, category: decision.category, reasonCode: decision.reasonCode,
           faqSourceIds: parseKeywords(decision.faqIdsJson), createdAt: decision.createdAt,
         })),
-        faqSources: faqs.filter((faq) => usedFaqIds.has(faq.id)).map((faq) => ({ id: faq.id, question: faq.question, category: faq.category })),
+        faqSources: faqs.map((faq) => ({ id: faq.id, question: faq.question, category: faq.category })),
         pendingTransition: transition[0] ? { id: transition[0].id, action: transition[0].requestedAction, effectiveAt: transition[0].effectiveAt } : null,
       };
     },
@@ -2151,13 +2157,16 @@ async function selectClaimedBatchMessages(tx, {
 }
 
 async function terminalizeAutomatedDeliveries(tx, conversationId, now) {
-  await tx.update(supportOutboundDeliveries).set({
+  const deliveries = await tx.update(supportOutboundDeliveries).set({
     deliveryStatus: "human_review", deliveryClaimId: null, deliveryClaimExpiresAt: null,
     nextAttemptAt: null, humanReviewAt: now, safeErrorCode: "human_takeover",
   }).where(and(
     eq(supportOutboundDeliveries.conversationId, conversationId),
     inArray(supportOutboundDeliveries.deliveryStatus, AUTOMATED_DELIVERY_STATUSES),
-  ));
+  )).returning();
+  for (const delivery of deliveries) {
+    await synchronizeLinkedAiMessage(tx, delivery, "human_review", now, "human_takeover");
+  }
 }
 
 async function completeDispatchedBatchEvents(tx, { connectionId, eventId, cutoff }, messages) {

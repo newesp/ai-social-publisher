@@ -210,9 +210,21 @@ test("conversation detail returns only the 100 most recent messages and 50 decis
       action: "reply",
       category: "general",
       reasonCode: "faq_match",
-      faqIdsJson: "[]",
+      faqIdsJson: index === 54 ? JSON.stringify(["faq-001", "faq-300"]) : "[]",
       promptVersion: "v1",
       createdAt: new Date(NOW.getTime() + index * 1_000),
+    })));
+    await db.insert(supportFaqs).values(Array.from({ length: 300 }, (_, index) => ({
+      id: `faq-${String(index + 1).padStart(3, "0")}`,
+      ownerEmail: "owner@example.com",
+      question: `Question ${index + 1}`,
+      answer: `Answer ${index + 1}`,
+      category: "general",
+      keywordsJson: "[]",
+      enabled: true,
+      priority: 0,
+      createdAt: NOW,
+      updatedAt: NOW,
     })));
 
     const detail = await repository.getInboxConversation("owner@example.com", "conversation-detail");
@@ -224,6 +236,7 @@ test("conversation detail returns only the 100 most recent messages and 50 decis
     assert.equal(detail.decisions.length, 50);
     assert.equal(detail.decisions[0].id, "decision-055");
     assert.equal(detail.decisions.at(-1).id, "decision-006");
+    assert.deepEqual(detail.faqSources.map(({ id }) => id).sort(), ["faq-001", "faq-300"]);
     assert.equal(JSON.stringify(detail).includes("encrypted-detail"), false);
   });
 });
@@ -1737,6 +1750,48 @@ test("automated outbox claiming requires the exact live event and conversation o
   });
 });
 
+test("human takeover mirrors terminalized automated delivery to its linked AI message", async () => {
+  await withDatabase(async (db) => {
+    const fixture = await createReplayWorkflowFixture(db, {
+      connectionId: "66666666-aaaa-4666-8666-666666666666",
+      eventId: "evt-takeover-sync",
+      message: { type: "text", text: "Question", safeMetadata: {} },
+      decision: {
+        action: "reply",
+        answer: "Answer",
+        category: "general",
+        knowledgeSourceIds: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+      },
+    });
+    await assert.rejects(
+      fixture.crashingWorkflow({
+        connectionId: fixture.connectionId,
+        eventId: fixture.eventId,
+        conversationId: fixture.conversationId,
+      }),
+      /crash after persistence before delivery/,
+    );
+    const [before] = await db.select().from(supportConversations)
+      .where(eq(supportConversations.id, fixture.conversationId));
+    const taken = await fixture.repository.takeOverSupportConversation(
+      "owner@example.com",
+      fixture.conversationId,
+      before.version,
+      LATER,
+    );
+    assert.equal(taken.status, "human_active");
+    const snapshot = await replayPersistenceSnapshot(db, fixture.connectionId, fixture.eventId);
+    assert.equal(snapshot.delivery.deliveryStatus, "human_review");
+    const [outboundMessage] = await db.select().from(supportMessages).where(and(
+      eq(supportMessages.conversationId, fixture.conversationId),
+      eq(supportMessages.idempotencyKey, `ai:${fixture.connectionId}:${fixture.eventId}`),
+    ));
+    assert.equal(outboundMessage.deliveryStatus, "human_review");
+    assert.equal(outboundMessage.safeErrorCode, "human_takeover");
+    assert.equal(outboundMessage.failedAt.getTime(), LATER.getTime());
+  });
+});
+
 async function createReplayWorkflowFixture(db, { connectionId, eventId, message, decision }) {
   await db.insert(platformConnections).values({
     ...connection(connectionId, "owner@example.com"),
@@ -1805,6 +1860,7 @@ async function createReplayWorkflowFixture(db, { connectionId, eventId, message,
     now: () => NOW,
   };
   return {
+    repository,
     connectionId,
     eventId,
     conversationId: ingested.conversationId,
