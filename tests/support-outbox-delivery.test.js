@@ -100,7 +100,21 @@ test("a delivery that remains unknown for 24 hours is marked for human review wi
   assert.equal(store.retryKey, RETRY_KEY);
 });
 
-function createDeliveryStore({ firstAttemptAt = null } = {}) {
+test("a Push credential rejection fails closed and marks only its connection for reconnect", async () => {
+  const store = createDeliveryStore({ connectionId: "connection-1" });
+  const reconnects = [];
+  const service = createLineOutboundDeliveryService({
+    outboxStore: store,
+    sendPush: async () => ({ status: 401, headers: {} }),
+    onCredentialRejected: async (input) => reconnects.push(input),
+  });
+
+  assert.deepEqual(await service.attemptDelivery({ deliveryId: DELIVERY_ID, now: NOW }), { status: "failed" });
+  assert.deepEqual(reconnects, [{ connectionId: "connection-1", now: NOW }]);
+  assert.equal(store.status, "failed");
+});
+
+function createDeliveryStore({ firstAttemptAt = null, connectionId = undefined } = {}) {
   let claimId = null;
   let attemptCount = 0;
   return {
@@ -120,7 +134,7 @@ function createDeliveryStore({ firstAttemptAt = null } = {}) {
       claimId = `claim-${attemptCount}`;
       this.status = "sending";
       this.attempts.push({ retryKey: RETRY_KEY, body: BODY });
-      return { claimed: true, claimId, retryKey: RETRY_KEY, canonicalBody: BODY, attemptCount };
+      return { claimed: true, claimId, retryKey: RETRY_KEY, canonicalBody: BODY, attemptCount, ...(connectionId ? { connectionId } : {}) };
     },
     async markDeliverySent({ claimId: suppliedClaimId }) {
       assert.equal(suppliedClaimId, claimId);

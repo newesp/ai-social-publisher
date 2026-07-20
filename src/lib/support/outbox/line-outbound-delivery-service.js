@@ -5,6 +5,7 @@ const DEFAULT_MAX_RETRY_DELAY_MS = 30 * 60 * 1_000;
 export function createLineOutboundDeliveryService({
   outboxStore,
   sendPush,
+  onCredentialRejected = async () => {},
   baseRetryDelayMs = DEFAULT_BASE_RETRY_DELAY_MS,
   maxRetryDelayMs = DEFAULT_MAX_RETRY_DELAY_MS,
 } = {}) {
@@ -12,6 +13,7 @@ export function createLineOutboundDeliveryService({
     throw new Error("An outbound delivery store is required.");
   }
   if (typeof sendPush !== "function") throw new Error("A LINE Push sender is required.");
+  if (typeof onCredentialRejected !== "function") throw new Error("Credential rejection handler must be a function.");
   validateDelay(baseRetryDelayMs, "Base retry delay");
   validateDelay(maxRetryDelayMs, "Maximum retry delay");
 
@@ -23,7 +25,11 @@ export function createLineOutboundDeliveryService({
 
       let response;
       try {
-        response = await sendPush({ retryKey: claim.retryKey, body: claim.canonicalBody });
+        response = await sendPush({
+          retryKey: claim.retryKey,
+          body: claim.canonicalBody,
+          ...(claim.connectionId ? { connectionId: claim.connectionId } : {}),
+        });
       } catch (error) {
         if (error?.retryable === true) {
           return recordRetryable({
@@ -66,6 +72,9 @@ export function createLineOutboundDeliveryService({
           maxRetryDelayMs,
           safeErrorCode: "line_push_5xx",
         });
+      }
+      if (status === 401 && claim.connectionId) {
+        await onCredentialRejected({ connectionId: claim.connectionId, now: attemptedAt });
       }
       await outboxStore.markDeliveryFailed({
         deliveryId,

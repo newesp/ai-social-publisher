@@ -1,0 +1,113 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+
+import { createSupportProcessingService } from "../src/lib/support/support-processing-service.js";
+
+const IDS = Object.freeze({ eventId: "event-1", connectionId: "connection-1", conversationId: "conversation-1" });
+const NOW = new Date("2026-07-20T00:00:00.000Z");
+
+test("buildTurn claims one conversation and includes customer messages through its three-second cutoff", async () => {
+  const calls = [];
+  const service = createSupportProcessingService({
+    repository: {
+      acquireConversationClaim: async (input) => ({ acquired: true, claimId: "claim-1", windowStart: input.now }),
+      buildClaimedTurn: async (input) => {
+        calls.push(input);
+        return { inboundMessageId: "message-1", customerTexts: ["first", "second"] };
+      },
+    },
+  });
+
+  const claim = await service.acquireClaim({ ...IDS, now: NOW });
+  const turn = await service.buildTurn({ ...IDS, claimId: claim.claimId, cutoff: new Date(NOW.getTime() + 3_000) });
+
+  assert.deepEqual(claim, { acquired: true, claimId: "claim-1", windowStart: NOW });
+  assert.deepEqual(turn, { inboundMessageId: "message-1", customerTexts: ["first", "second"] });
+  assert.deepEqual(calls, [{ ...IDS, claimId: "claim-1", cutoff: new Date(NOW.getTime() + 3_000) }]);
+});
+
+test("the eleventh AI turn in five minutes persists a rate-limit handoff without an LLM call", async () => {
+  let decisionCalls = 0;
+  const handoffs = [];
+  const service = createSupportProcessingService({
+    repository: {
+      loadCurrentProcessingContext: async () => ({
+        supportState: "enabled", conversationStatus: "ai_active", aiTurnsInLastFiveMinutes: 10,
+      }),
+      persistHandoff: async (input) => handoffs.push(input),
+    },
+    decisionService: { decide: async () => { decisionCalls += 1; return { action: "reply" }; } },
+  });
+
+  const result = await service.decideAndPersist({ ...IDS, claimId: "claim-1", inboundMessageId: "message-1", customerTexts: ["question"], now: NOW });
+
+  assert.deepEqual(result, { status: "waiting_human", handoffReasonCode: "rate_limit" });
+  assert.equal(decisionCalls, 0);
+  assert.deepEqual(handoffs, [{ ...IDS, claimId: "claim-1", inboundMessageId: "message-1", reasonCode: "rate_limit", now: NOW }]);
+});
+
+test("decision persistence loads current protected context and atomically creates one immutable Push outbox record", async () => {
+  const persisted = [];
+  const service = createSupportProcessingService({
+    repository: {
+      loadCurrentProcessingContext: async (ids) => ({
+        ...ids,
+        supportState: "enabled",
+        conversationStatus: "ai_active",
+        aiTurnsInLastFiveMinutes: 0,
+        configuration: { brandName: "Acme", assistantName: "Ava", replyTone: "friendly", llmProvider: "openai", llmModel: "gpt-test" },
+        settings: { openAiApiKey: "private-key" },
+        faqs: [{ id: "faq-1", question: "How do I reset?", answer: "Use reset.", category: "account", keywords: ["reset"], enabled: true, priority: 0 }],
+        messages: [{ senderType: "customer", text: "How do I reset?" }],
+        recipient: "U-private",
+      }),
+      persistDecisionAndOutbound: async (input) => { persisted.push(input); return { decisionId: "decision-1", deliveryId: "delivery-1" }; },
+    },
+    decisionService: { decide: async ({ faqs, settings }) => {
+      assert.equal(settings.openAiApiKey, "private-key");
+      assert.deepEqual(faqs.map(({ id }) => id), ["faq-1"]);
+      return { action: "reply", answer: "Use reset.", category: "account", handoffReasonCode: null, knowledgeSourceIds: ["faq-1"] };
+    } },
+  });
+
+  const result = await service.decideAndPersist({ ...IDS, claimId: "claim-1", inboundMessageId: "message-1", customerTexts: ["How do I reset?"], now: NOW });
+
+  assert.deepEqual(result, { status: "pending_delivery", deliveryId: "delivery-1" });
+  assert.equal(persisted.length, 1);
+  assert.equal(persisted[0].canonicalBody, '{"to":"U-private","messages":[{"type":"text","text":"Use reset."}]}');
+  assert.deepEqual(persisted[0].decision, { action: "reply", answer: "Use reset.", category: "account", handoffReasonCode: null, knowledgeSourceIds: ["faq-1"] });
+});
+
+test("retryable decision failures are bounded at three attempts and then fail closed", async () => {
+  let attempts = 0;
+  const handoffs = [];
+  const service = createSupportProcessingService({
+    repository: {
+      loadCurrentProcessingContext: async () => ({
+        supportState: "enabled", conversationStatus: "ai_active", aiTurnsInLastFiveMinutes: 0,
+        configuration: {}, settings: {}, faqs: [{ id: "faq-1", question: "question", answer: "answer", category: "general", keywords: ["question"], enabled: true }],
+        messages: [{ senderType: "customer", text: "question" }], recipient: "U-private",
+      }),
+      persistHandoff: async (input) => handoffs.push(input),
+    },
+    decisionService: { decide: async () => { attempts += 1; throw Object.assign(new Error("provider timeout"), { retryable: true }); } },
+  });
+
+  const result = await service.decideAndPersist({ ...IDS, claimId: "claim-1", inboundMessageId: "message-1", customerTexts: ["question"], now: NOW });
+
+  assert.deepEqual(result, { status: "waiting_human", handoffReasonCode: "provider_unavailable" });
+  assert.equal(attempts, 3);
+  assert.equal(handoffs[0].reasonCode, "provider_unavailable");
+});
+
+test("delivery uses the immutable outbox record and Push-only transport", async () => {
+  const calls = [];
+  const service = createSupportProcessingService({
+    deliveryService: {
+      attemptDelivery: async (input) => { calls.push(input); return { status: "sent" }; },
+    },
+  });
+
+  assert.deepEqual(await service.deliver({ deliveryId: "delivery-1", now: NOW }), { status: "sent" });
+  assert.deepEqual(calls, [{ deliveryId: "delivery-1", now: NOW }]);
+});

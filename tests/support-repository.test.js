@@ -14,6 +14,7 @@ import {
   supportConfigurations,
   supportConversationTransitions,
   supportConversations,
+  supportAiDecisions,
   supportFaqs,
   supportMessages,
   supportOutboundDeliveries,
@@ -575,6 +576,59 @@ test("atomic enable accepts rotation to another current non-empty provider key",
   });
 });
 
+test("processing claims batch current protected data and atomically persist one decision with its immutable Push outbox", async () => {
+  await withDatabase(async (db) => {
+    const connectionId = "11111111-1111-4111-8111-111111111111";
+    await db.insert(platformConnections).values({
+      ...connection(connectionId, "owner@example.com"),
+      encryptedCredentials: encryptJson({ accessToken: "private-line-token" }, SETTINGS_ENCRYPTION_KEY),
+    });
+    await db.insert(supportConfigurations).values({ ...configurationRecord(), supportState: "enabled" });
+    await db.insert(userSettings).values({
+      ownerEmail: "owner@example.com",
+      encryptedSettings: encryptJson({ googleAiApiKey: "private-ai-key" }, SETTINGS_ENCRYPTION_KEY),
+      updatedAt: NOW,
+    });
+    await db.insert(supportFaqs).values({ ...faqRecord(), ownerEmail: "owner@example.com" });
+    const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });
+    const ingested = await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com", connectionId, eventId: "evt-turn-1", externalUserId: "U-private",
+      replyToken: "reply-token", message: { type: "text", text: "Question", safeMetadata: {} }, receivedAt: NOW,
+    });
+    const dispatch = await repository.claimLineWorkflowDispatch({ connectionId, eventId: "evt-turn-1", now: NOW });
+    await repository.markLineWorkflowDispatched({ ...dispatch, now: NOW });
+    const eventClaim = await repository.claimLineEventProcessing({ connectionId, eventId: "evt-turn-1", now: NOW });
+    const conversationClaim = await repository.acquireConversationClaim({ connectionId, conversationId: ingested.conversationId, now: NOW });
+    assert.equal(conversationClaim.acquired, true);
+    assert.equal((await repository.acquireConversationClaim({ connectionId, conversationId: ingested.conversationId, now: NOW })).acquired, false);
+
+    const turn = await repository.buildClaimedTurn({
+      connectionId, eventId: "evt-turn-1", conversationId: ingested.conversationId, claimId: conversationClaim.claimId,
+      cutoff: new Date(NOW.getTime() + 3_000),
+    });
+    assert.deepEqual(turn.customerTexts, ["Question"]);
+    const context = await repository.loadCurrentProcessingContext({
+      connectionId, eventId: "evt-turn-1", conversationId: ingested.conversationId, claimId: conversationClaim.claimId,
+    });
+    assert.equal(context.settings.googleAiApiKey, "private-ai-key");
+    assert.equal(context.recipient, "U-private");
+    assert.deepEqual(context.faqs.map(({ id }) => id), ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]);
+
+    const persisted = await repository.persistDecisionAndOutbound({
+      connectionId, eventId: "evt-turn-1", conversationId: ingested.conversationId, claimId: conversationClaim.claimId,
+      eventClaimId: eventClaim.claimId,
+      inboundMessageId: turn.inboundMessageId,
+      decision: { action: "reply", answer: "Answer", category: "general", handoffReasonCode: null, knowledgeSourceIds: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"] },
+      canonicalBody: "{\"to\":\"U-private\",\"messages\":[{\"type\":\"text\",\"text\":\"Answer\"}]}", now: NOW,
+    });
+    assert.ok(persisted.deliveryId);
+    assert.equal((await db.select().from(supportAiDecisions)).length, 1);
+    assert.equal((await db.select().from(supportOutboundDeliveries)).length, 1);
+    assert.equal(await repository.loadLineAccessToken(connectionId), "private-line-token");
+    assert.equal(await repository.markLineEventProcessed({ connectionId, eventId: "evt-turn-1", claimId: eventClaim.claimId, now: NOW }), true);
+  });
+});
+
 async function withDatabase(run) {
   const directory = await mkdtemp(join(tmpdir(), "support-repository-"));
   const databaseUrl = pathToFileURL(join(directory, "support.db")).href;
@@ -632,6 +686,13 @@ async function withDatabase(run) {
         reply_token_expires_at INTEGER, safe_error_code TEXT, received_at INTEGER NOT NULL,
         processed_at INTEGER, created_at INTEGER NOT NULL,
         UNIQUE (platform_connection_id, webhook_event_id)
+      );
+      CREATE TABLE support_ai_decisions (
+        id TEXT PRIMARY KEY NOT NULL, conversation_id TEXT NOT NULL, inbound_message_id TEXT NOT NULL,
+        action TEXT NOT NULL, category TEXT, reason_code TEXT, answer_message_id TEXT,
+        faq_ids_json TEXT NOT NULL DEFAULT '[]', llm_provider TEXT, llm_model TEXT,
+        prompt_version TEXT NOT NULL, input_tokens INTEGER, output_tokens INTEGER, latency_ms INTEGER,
+        created_at INTEGER NOT NULL
       );
       CREATE TABLE support_outbound_deliveries (
         id TEXT PRIMARY KEY NOT NULL, webhook_event_id TEXT NOT NULL UNIQUE,
