@@ -103,3 +103,76 @@ Implemented durable LINE support processing with a three-second conversation bat
 - Reviewed every terminal write after delivery/provider work: decision/outbox and handoff are jointly fenced; regular completion is jointly fenced; losing-event completion is an explicit event-lease-plus-consumed-message atomic contract; credential reconnect/handoff uses both leases and remains idempotent.
 - Rechecked the Task 7 invariants: exact three-second cutoff/sleep, owner scope, 30-day context, exactly three provider attempts then handoff, Push-only immutable UUID-key delivery, 409/24-hour behavior, inbound dedupe, follow-up scheduling, and the Task 5 `processEvent` seam remain present.
 - No real LINE or LLM provider, remote database, migration, deployment, secret write, or message was used.
+
+## Architecture Recovery and Acceptance (2026-07-20)
+
+### Why another patch cycle was rejected
+
+Three independent re-reviews kept finding the same ownership and durable-data
+invariants distributed across differently shaped APIs. The user authorized one
+controller-owned architecture recovery and explicitly declined another broad
+review/fix loop. The approved recovery design and plan are:
+
+- `docs/superpowers/specs/2026-07-20-line-support-task-7-recovery-design.md`
+- `docs/superpowers/plans/2026-07-20-line-support-task-7-recovery.md`
+
+### Architecture changes
+
+- `buildClaimedTurn` and Workflow provider-step inputs now expose only internal
+  IDs, claim IDs, cutoff/time metadata, and status. Customer batch text is
+  loaded inside the provider step through `loadCurrentProcessingContext`; raw
+  customer text no longer crosses a durable step boundary.
+- Decision/outbox persistence consumes the fixed batch and completes only
+  companion events that are still `dispatched` in the same transaction.
+  Companion events already owned by another processing claim remain
+  `processing` and resolve themselves through their existing consumed-message
+  contract.
+- Handoff persistence jointly verifies the primary event and conversation
+  leases, consumes the fixed batch, completes the primary event and eligible
+  dispatched companions, and transitions the conversation to `waiting_human`
+  in one transaction.
+- The unsafe post-persistence `resolveProcessedCompetingEvents` repository API,
+  service wrapper, and Workflow step were removed.
+- Processing ownership now reaches the delivery service unchanged. Delivery
+  terminal timestamps, including a credential-rejection handoff after a
+  delayed LINE 401, are obtained after the transport resolves. Production
+  wires a fresh clock; deterministic tests retain an explicit clock.
+- Workflow returns immediately after an atomic handoff or credential-rejection
+  completion instead of trying to renew claims that the terminal transaction
+  intentionally cleared.
+- Follow-up discovery now requires the conversation to remain `ai_active`.
+
+### RED/GREEN evidence
+
+- Baseline before recovery:
+  `npm.cmd test -- --test tests/support-message-workflow.test.js tests/support-processing-service.test.js tests/support-repository.test.js tests/support-outbox-delivery.test.js tests/support-decision-service.test.js tests/line-support-adapter.test.js tests/support-webhook-handler.test.js`
+  exited 0: 55 passed, 0 failed.
+- Recovery RED:
+  `npm.cmd test -- --test tests/support-message-workflow.test.js tests/support-processing-service.test.js tests/support-repository.test.js tests/support-outbox-delivery.test.js`
+  exited 1: 33 passed, 8 failed. The failures were protected turn data in
+  provider-step input, the unfenced batch resolver, request-time 401 fencing,
+  protected data returned by `buildTurn`, FAQ retrieval depending on Workflow
+  text, delivery ownership being discarded, and handoff leaving the batch
+  unconsumed.
+- Recovery GREEN: the same four-file command exited 0: 41 passed, 0 failed.
+- Complete Task 7 focused gate:
+  `npm.cmd test -- --test tests/support-message-workflow.test.js tests/support-processing-service.test.js tests/support-repository.test.js tests/support-outbox-delivery.test.js tests/support-decision-service.test.js tests/line-support-adapter.test.js tests/support-webhook-handler.test.js`
+  exited 0: 57 passed, 0 failed.
+- Final full suite: `npm.cmd test` exited 0: 427 passed, 0 failed.
+- Final production build: `npm.cmd run build` with disposable command-scoped
+  `AUTH_MODE`, encryption, Turso, Blob, and NextAuth values exited 0. Runtime
+  configuration was valid, Workflow compilation reported
+  `workflows build complete (4 steps, 1 workflow)`, and Next.js 16.2.10
+  compiled and generated 29 static pages successfully.
+- `git diff --check ca7a0b6..ad499a0` exited 0. The changed-file list contains
+  no Task 8 files. A diff scan for common AWS, OpenAI, Google, GitHub, Slack,
+  and PEM private-key patterns returned no matches.
+
+### Remaining limitations
+
+- The build retains the existing multiple-lockfile/workspace-root and
+  deprecated middleware-convention warnings.
+- No live LINE, LLM, deployed Workflow, production Turso, migration,
+  deployment, secret, or real-message verification was authorized or
+  performed.
+- Task 8 was not started. The user requested an explicit stop after Task 7.
