@@ -80,3 +80,51 @@ test("another owner cannot take over, send, request, or undo a conversation", as
   const response = await handlers.takeOver(new Request("http://localhost", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ expectedVersion: 0 }) }), "other-owner");
   assert.equal(response.status, 404);
 });
+
+test("retry is authenticated, same-origin, keyed only by stored message ID, and reports safe delivery failure", async () => {
+  const calls = [];
+  const handlers = createSupportHumanActionRouteHandlers({
+    requireOwner: async () => "OWNER@EXAMPLE.COM",
+    requireSameOrigin: () => calls.push(["origin"]),
+    getStore: async () => ({
+      async retryHumanMessage(owner, messageId) {
+        calls.push(["retry", owner, messageId]);
+        return { id: messageId, deliveryStatus: "failed", safeErrorCode: "line_push_4xx" };
+      },
+    }),
+  });
+
+  const response = await handlers.retryMessage(
+    new Request("http://localhost", { method: "POST", headers: { origin: "http://localhost" } }),
+    "message-1",
+  );
+
+  assert.equal(response.status, 502);
+  assert.deepEqual(await response.json(), {
+    error: "LINE message delivery failed. Retry after checking the connection.",
+    message: { id: "message-1", deliveryStatus: "failed", safeErrorCode: "line_push_4xx" },
+  });
+  assert.deepEqual(calls, [["origin"], ["retry", "owner@example.com", "message-1"]]);
+});
+
+test("a failed initial send returns a safe non-success response so the browser retains its draft", async () => {
+  const handlers = createSupportHumanActionRouteHandlers({
+    requireOwner: async () => "owner@example.com",
+    getStore: async () => ({
+      async sendHumanMessage() {
+        return { id: "message-1", deliveryStatus: "failed", safeErrorCode: "line_push_transport" };
+      },
+    }),
+  });
+  const response = await handlers.sendMessage(
+    new Request("http://localhost", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "Keep me", idempotencyKey: "stable-key" }),
+    }),
+    "conversation-1",
+  );
+
+  assert.equal(response.status, 502);
+  assert.equal(JSON.stringify(await response.json()).includes("transport"), true);
+});

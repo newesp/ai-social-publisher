@@ -26,6 +26,10 @@ import {
   encryptOutboundCanonicalBody,
   encryptReplyToken,
 } from "./identity-crypto.js";
+import {
+  buildHandoffAcknowledgementBody,
+  HANDOFF_ACKNOWLEDGEMENT_TEXT,
+} from "./handoff-acknowledgement.js";
 
 const PROVIDER_KEY_BY_NAME = Object.freeze({
   google: "googleAiApiKey",
@@ -463,14 +467,85 @@ export function createSupportRepository(db = createDbClient(), {
         } else if (message.deliveryStatus !== "sent") {
           [message] = await tx.update(supportMessages).set({ deliveryStatus: "pending", failedAt: null, safeErrorCode: null }).where(eq(supportMessages.id, message.id)).returning();
         }
-        return { id: message.id, deliveryStatus: message.deliveryStatus, safeErrorCode: message.safeErrorCode, retryKey: message.id, connectionId: conversation.platformConnectionId, canonicalBody: JSON.stringify({ to: decryptExternalId(conversation.encryptedCustomerExternalId, encryptionKey), messages: [{ type: "text", text: message.textContent }] }) };
+        return { id: message.id, conversationId: id, deliveryStatus: message.deliveryStatus, safeErrorCode: message.safeErrorCode, retryKey: message.id, connectionId: conversation.platformConnectionId, canonicalBody: JSON.stringify({ to: decryptExternalId(conversation.encryptedCustomerExternalId, encryptionKey), messages: [{ type: "text", text: message.textContent }] }) };
+      }));
+    },
+
+    async prepareHumanMessageRetry(ownerEmail, messageId, now = new Date()) {
+      const owner = normalizeOwner(ownerEmail);
+      const id = requiredBoundedText(messageId, "Human message ID", 100);
+      validDate(now);
+      return retryBusyOperation(() => db.transaction(async (tx) => {
+        const [message] = await tx.select().from(supportMessages).where(and(
+          eq(supportMessages.id, id),
+          eq(supportMessages.senderType, "human"),
+          eq(supportMessages.direction, "outbound"),
+          eq(supportMessages.deliveryStatus, "failed"),
+          exists(tx.select({ one: sql`1` }).from(supportConversations).where(and(
+            eq(supportConversations.id, supportMessages.conversationId),
+            eq(supportConversations.ownerEmail, owner),
+            eq(supportConversations.status, "human_active"),
+          ))),
+        )).limit(1);
+        if (!message) return null;
+        const [conversation] = await tx.select().from(supportConversations).where(and(
+          eq(supportConversations.id, message.conversationId),
+          eq(supportConversations.ownerEmail, owner),
+          eq(supportConversations.status, "human_active"),
+        )).limit(1);
+        if (!conversation) return null;
+        const [prepared] = await tx.update(supportMessages).set({
+          deliveryStatus: "pending",
+          failedAt: null,
+          safeErrorCode: null,
+        }).where(and(
+          eq(supportMessages.id, id),
+          eq(supportMessages.deliveryStatus, "failed"),
+        )).returning();
+        if (!prepared) return null;
+        return {
+          id: prepared.id,
+          conversationId: prepared.conversationId,
+          deliveryStatus: prepared.deliveryStatus,
+          safeErrorCode: prepared.safeErrorCode,
+          retryKey: prepared.id,
+          connectionId: conversation.platformConnectionId,
+          canonicalBody: JSON.stringify({
+            to: decryptExternalId(conversation.encryptedCustomerExternalId, encryptionKey),
+            messages: [{ type: "text", text: prepared.textContent }],
+          }),
+        };
       }));
     },
 
     async markHumanMessageDelivery(ownerEmail, messageId, status, safeErrorCode, now = new Date()) {
       const owner = normalizeOwner(ownerEmail); const id = requiredBoundedText(messageId, "Human message ID", 100); const timestamp = validDate(now);
+      if (status !== "sent" && status !== "failed") throw unavailablePersistenceError();
       const [message] = await retryBusyOperation(() => db.transaction(async (tx) => {
-        const [updated] = await tx.update(supportMessages).set({ deliveryStatus: status, sentAt: status === "sent" ? timestamp : null, failedAt: status === "failed" ? timestamp : null, safeErrorCode: safeErrorCode == null ? null : safeOutboundErrorCode(safeErrorCode) }).where(and(eq(supportMessages.id, id), eq(supportMessages.senderType, "human"), exists(tx.select({ one: sql`1` }).from(supportConversations).where(and(eq(supportConversations.id, supportMessages.conversationId), eq(supportConversations.ownerEmail, owner)))))).returning();
+        const ownerPredicate = exists(tx.select({ one: sql`1` }).from(supportConversations).where(and(
+          eq(supportConversations.id, supportMessages.conversationId),
+          eq(supportConversations.ownerEmail, owner),
+        )));
+        const [current] = await tx.select().from(supportMessages).where(and(
+          eq(supportMessages.id, id),
+          eq(supportMessages.senderType, "human"),
+          ownerPredicate,
+        )).limit(1);
+        if (!current) return [];
+        if (current.deliveryStatus === "sent") {
+          return [{ id: current.id, deliveryStatus: current.deliveryStatus, safeErrorCode: current.safeErrorCode }];
+        }
+        const [updated] = await tx.update(supportMessages).set({
+          deliveryStatus: status,
+          sentAt: status === "sent" ? timestamp : null,
+          failedAt: status === "failed" ? timestamp : null,
+          safeErrorCode: safeErrorCode == null ? null : safeOutboundErrorCode(safeErrorCode),
+        }).where(and(
+          eq(supportMessages.id, id),
+          eq(supportMessages.senderType, "human"),
+          ne(supportMessages.deliveryStatus, "sent"),
+          ownerPredicate,
+        )).returning();
         if (updated?.deliveryStatus === "sent") await tx.update(supportConversations).set({ lastOutboundAt: timestamp, updatedAt: timestamp }).where(eq(supportConversations.id, updated.conversationId));
         return updated ? [{ id: updated.id, deliveryStatus: updated.deliveryStatus, safeErrorCode: updated.safeErrorCode }] : [];
       }));
@@ -704,8 +779,23 @@ export function createSupportRepository(db = createDbClient(), {
       return claimed ? { acquired: true, claimId, windowStart: claim.now } : { acquired: false };
     },
 
-    async renewConversationClaim({ connectionId, conversationId, claimId, now = new Date() }) {
+    async renewConversationClaim({ connectionId, eventId, conversationId, claimId, now = new Date() }) {
       const claim = validateConversationClaimInput({ connectionId, conversationId, claimId, now });
+      const activeHandoffEventId = eventId == null
+        ? null
+        : requiredBoundedText(eventId, "Webhook event ID", 256);
+      const activeHandoff = activeHandoffEventId == null
+        ? sql`0`
+        : exists(db.select({ one: sql`1` }).from(supportOutboundDeliveries)
+          .innerJoin(supportWebhookEvents, eq(
+            supportWebhookEvents.id,
+            supportOutboundDeliveries.webhookEventId,
+          )).where(and(
+            eq(supportOutboundDeliveries.conversationId, claim.conversationId),
+            eq(supportWebhookEvents.platformConnectionId, claim.connectionId),
+            eq(supportWebhookEvents.webhookEventId, activeHandoffEventId),
+            inArray(supportOutboundDeliveries.deliveryStatus, ["pending", "sending", "retryable"]),
+          )));
       const [renewed] = await retryBusyOperation(() => db.update(supportConversations).set({
         processingClaimExpiresAt: new Date(claim.now.getTime() + EVENT_PROCESSING_LEASE_MS),
         updatedAt: claim.now,
@@ -713,7 +803,10 @@ export function createSupportRepository(db = createDbClient(), {
         eq(supportConversations.id, claim.conversationId),
         eq(supportConversations.platformConnectionId, claim.connectionId),
         eq(supportConversations.processingClaimId, claim.claimId),
-        eq(supportConversations.status, "ai_active"),
+        or(
+          eq(supportConversations.status, "ai_active"),
+          and(eq(supportConversations.status, "waiting_human"), activeHandoff),
+        ),
         gt(supportConversations.processingClaimExpiresAt, claim.now),
       )).returning({ id: supportConversations.id }));
       return Boolean(renewed);
@@ -872,40 +965,79 @@ export function createSupportRepository(db = createDbClient(), {
           sentAt: null, failedAt: null, humanReviewAt: null, createdAt: decision.now,
         }).returning({ id: supportOutboundDeliveries.id });
         if (!created) throw unavailablePersistenceError();
-        await tx.update(supportConversations).set({ lastOutboundAt: decision.now, updatedAt: decision.now })
-          .where(eq(supportConversations.id, decision.conversationId));
         return { deliveryId: created.id };
       }));
     },
 
-    async persistHandoff({ connectionId, eventId, eventClaimId, conversationId, claimId, cutoff, reasonCode, now = new Date() }) {
+    async persistHandoff({
+      connectionId, eventId, eventClaimId, conversationId, claimId, inboundMessageId,
+      cutoff, reasonCode, now = new Date(),
+    }) {
       const claim = validateConversationClaimInput({ connectionId, conversationId, claimId, now });
       const primaryEventId = eventId == null ? null : requiredBoundedText(eventId, "Webhook event ID", 256);
       const primaryEventClaimId = eventClaimId == null ? null : requiredBoundedText(eventClaimId, "Event processing claim", 100);
       if ((primaryEventId == null) !== (primaryEventClaimId == null)) throw unavailablePersistenceError();
+      const triggeringMessageId = requiredBoundedText(inboundMessageId, "Inbound message ID", 100);
       const batchCutoff = validDate(cutoff ?? claim.now);
       const handoffReason = requiredBoundedText(reasonCode, "Handoff reason", 100);
       return retryBusyOperation(() => db.transaction(async (tx) => {
-        const [conversation] = await tx.select({ id: supportConversations.id }).from(supportConversations).where(and(
+        const [conversation] = await tx.select().from(supportConversations).where(and(
           eq(supportConversations.id, claim.conversationId),
           eq(supportConversations.platformConnectionId, claim.connectionId),
           eq(supportConversations.processingClaimId, claim.claimId),
-          eq(supportConversations.status, "ai_active"),
+          inArray(supportConversations.status, ["ai_active", "waiting_human"]),
           gt(supportConversations.processingClaimExpiresAt, claim.now),
         )).limit(1);
         if (!conversation) return false;
+        if (conversation.status === "waiting_human") {
+          if (!primaryEventId || !primaryEventClaimId
+            || conversation.handoffReasonCode !== handoffReason) return false;
+          const [existingDelivery] = await tx.select({
+            deliveryId: supportOutboundDeliveries.id,
+          }).from(supportOutboundDeliveries).innerJoin(
+            supportWebhookEvents,
+            eq(supportWebhookEvents.id, supportOutboundDeliveries.webhookEventId),
+          ).where(and(
+            eq(supportOutboundDeliveries.conversationId, claim.conversationId),
+            eq(supportWebhookEvents.platformConnectionId, claim.connectionId),
+            eq(supportWebhookEvents.webhookEventId, primaryEventId),
+            eq(supportWebhookEvents.processingStatus, "processing"),
+            eq(supportWebhookEvents.safeErrorCode, primaryEventClaimId),
+            gt(supportWebhookEvents.processedAt, claim.now),
+            exists(tx.select({ one: sql`1` }).from(supportAiDecisions).where(and(
+              eq(supportAiDecisions.conversationId, claim.conversationId),
+              eq(supportAiDecisions.inboundMessageId, triggeringMessageId),
+              eq(supportAiDecisions.action, "handoff"),
+              eq(supportAiDecisions.reasonCode, handoffReason),
+              isNull(supportAiDecisions.answerMessageId),
+            ))),
+          )).limit(1);
+          return existingDelivery
+            ? { deliveryId: existingDelivery.deliveryId, handoffAcknowledgement: true }
+            : false;
+        }
+        const [configuration] = await tx.select({
+          llmProvider: supportConfigurations.llmProvider,
+          llmModel: supportConfigurations.llmModel,
+        }).from(supportConfigurations).where(and(
+          eq(supportConfigurations.ownerEmail, conversation.ownerEmail),
+          eq(supportConfigurations.platformConnectionId, claim.connectionId),
+        )).limit(1);
         let eventCompleted = false;
+        let primaryEvent;
+        let batchMessages = [];
         if (primaryEventId) {
-          const [event] = await tx.select({ id: supportWebhookEvents.id }).from(supportWebhookEvents).where(and(
+          [primaryEvent] = await tx.select({ id: supportWebhookEvents.id }).from(supportWebhookEvents).where(and(
             eq(supportWebhookEvents.platformConnectionId, claim.connectionId),
             eq(supportWebhookEvents.webhookEventId, primaryEventId),
             eq(supportWebhookEvents.processingStatus, "processing"),
             eq(supportWebhookEvents.safeErrorCode, primaryEventClaimId),
             gt(supportWebhookEvents.processedAt, claim.now),
           )).limit(1);
-          if (!event) return false;
+          if (!primaryEvent) return false;
           const batch = { ...claim, eventId: primaryEventId, cutoff: batchCutoff };
-          const batchMessages = await selectClaimedBatchMessages(tx, batch);
+          batchMessages = await selectClaimedBatchMessages(tx, batch);
+          if (!batchMessages.some(({ id }) => id === triggeringMessageId)) return false;
           await tx.update(supportMessages).set({ processedAt: batchCutoff }).where(and(
             eq(supportMessages.conversationId, claim.conversationId),
             eq(supportMessages.direction, "inbound"),
@@ -915,8 +1047,104 @@ export function createSupportRepository(db = createDbClient(), {
             lte(supportMessages.createdAt, batchCutoff),
           ));
           await completeDispatchedBatchEvents(tx, batch, batchMessages);
+        }
+        await tx.insert(supportAiDecisions).values({
+          id: randomUUID(),
+          conversationId: claim.conversationId,
+          inboundMessageId: triggeringMessageId,
+          action: "handoff",
+          category: null,
+          reasonCode: handoffReason,
+          answerMessageId: null,
+          faqIdsJson: "[]",
+          llmProvider: configuration?.llmProvider ?? null,
+          llmModel: configuration?.llmModel ?? null,
+          promptVersion: "support-v1",
+          inputTokens: null,
+          outputTokens: null,
+          latencyMs: null,
+          createdAt: claim.now,
+        });
+        let recipient = null;
+        const [activeConnection] = await tx.select({
+          id: platformConnections.id,
+          encryptedCredentials: platformConnections.encryptedCredentials,
+        }).from(platformConnections)
+          .where(and(
+            eq(platformConnections.id, claim.connectionId),
+            eq(platformConnections.ownerEmail, conversation.ownerEmail),
+            eq(platformConnections.platform, "line"),
+            eq(platformConnections.state, "active"),
+          )).limit(1);
+        let lineDeliveryUsable = false;
+        if (activeConnection) {
+          try {
+            lineDeliveryUsable = Boolean(
+              requiredBoundedText(
+                decryptJson(activeConnection.encryptedCredentials, encryptionKey)?.accessToken,
+                "LINE access token",
+                10_000,
+              ),
+            );
+          } catch {
+            lineDeliveryUsable = false;
+          }
+        }
+        if (lineDeliveryUsable && primaryEvent) {
+          try {
+            recipient = decryptExternalId(conversation.encryptedCustomerExternalId, encryptionKey);
+          } catch {
+            recipient = null;
+          }
+        }
+        let deliveryId = null;
+        if (recipient && primaryEvent) {
+          const acknowledgementMessageId = randomUUID();
+          await tx.insert(supportMessages).values({
+            id: acknowledgementMessageId,
+            conversationId: claim.conversationId,
+            direction: "outbound",
+            senderType: "ai",
+            messageType: "text",
+            textContent: HANDOFF_ACKNOWLEDGEMENT_TEXT,
+            safeMetadataJson: "{}",
+            providerMessageId: null,
+            deliveryStatus: "pending",
+            idempotencyKey: `ai:${claim.connectionId}:${primaryEventId}`,
+            sentAt: null,
+            failedAt: null,
+            safeErrorCode: null,
+            processedAt: claim.now,
+            createdAt: claim.now,
+          });
+          deliveryId = randomUUID();
+          const canonicalBody = buildHandoffAcknowledgementBody(recipient);
+          await tx.insert(supportOutboundDeliveries).values({
+            id: deliveryId,
+            webhookEventId: primaryEvent.id,
+            conversationId: claim.conversationId,
+            encryptedRecipient: encryptExternalId(recipient, encryptionKey),
+            encryptedCanonicalBody: encryptOutboundCanonicalBody(canonicalBody, encryptionKey),
+            retryKey: randomUUID(),
+            deliveryStatus: "pending",
+            deliveryClaimId: null,
+            deliveryClaimExpiresAt: null,
+            attemptCount: 0,
+            firstAttemptAt: null,
+            lastAttemptAt: null,
+            nextAttemptAt: null,
+            acceptedRequestId: null,
+            safeErrorCode: null,
+            sentAt: null,
+            failedAt: null,
+            humanReviewAt: null,
+            createdAt: claim.now,
+          });
+        } else if (primaryEvent) {
           const [completed] = await tx.update(supportWebhookEvents).set({
-            processingStatus: "processed", safeErrorCode: null, processedAt: claim.now,
+            processingStatus: "processed",
+            safeErrorCode: null,
+            processedAt: claim.now,
           }).where(and(
             eq(supportWebhookEvents.platformConnectionId, claim.connectionId),
             eq(supportWebhookEvents.webhookEventId, primaryEventId),
@@ -929,7 +1157,12 @@ export function createSupportRepository(db = createDbClient(), {
         }
         const [updated] = await tx.update(supportConversations).set({
           status: "waiting_human", handoffReasonCode: handoffReason,
-          processingClaimId: null, processingClaimExpiresAt: null, updatedAt: claim.now,
+          processingClaimId: deliveryId ? claim.claimId : null,
+          processingClaimExpiresAt: deliveryId
+            ? new Date(claim.now.getTime() + EVENT_PROCESSING_LEASE_MS)
+            : null,
+          version: conversation.version + 1,
+          updatedAt: claim.now,
         }).where(and(
           eq(supportConversations.id, claim.conversationId), eq(supportConversations.platformConnectionId, claim.connectionId),
           eq(supportConversations.processingClaimId, claim.claimId),
@@ -937,7 +1170,59 @@ export function createSupportRepository(db = createDbClient(), {
           gt(supportConversations.processingClaimExpiresAt, claim.now),
         )).returning({ id: supportConversations.id });
         if (!updated) throw unavailablePersistenceError();
-        return eventCompleted ? { eventCompleted: true } : true;
+        return deliveryId
+          ? { deliveryId, handoffAcknowledgement: true }
+          : eventCompleted ? { eventCompleted: true } : true;
+      }));
+    },
+
+    async finalizeHandoffDelivery({
+      connectionId, eventId, eventClaimId, conversationId, claimId, deliveryId, now = new Date(),
+    }) {
+      const input = {
+        ...validateConversationClaimInput({ connectionId, conversationId, claimId, now }),
+        eventId: requiredBoundedText(eventId, "Webhook event ID", 256),
+        eventClaimId: requiredBoundedText(eventClaimId, "Event processing claim", 100),
+        deliveryId: requiredBoundedText(deliveryId, "Outbound delivery ID", 100),
+      };
+      return retryBusyOperation(() => db.transaction(async (tx) => {
+        const terminalDelivery = exists(tx.select({ one: sql`1` }).from(supportOutboundDeliveries)
+          .innerJoin(supportWebhookEvents, eq(
+            supportWebhookEvents.id,
+            supportOutboundDeliveries.webhookEventId,
+          )).where(and(
+            eq(supportOutboundDeliveries.id, input.deliveryId),
+            eq(supportOutboundDeliveries.conversationId, input.conversationId),
+            inArray(supportOutboundDeliveries.deliveryStatus, ["sent", "failed", "human_review"]),
+            eq(supportWebhookEvents.platformConnectionId, input.connectionId),
+            eq(supportWebhookEvents.webhookEventId, input.eventId),
+          )));
+        const [conversation] = await tx.update(supportConversations).set({
+          processingClaimId: null,
+          processingClaimExpiresAt: null,
+          updatedAt: input.now,
+        }).where(and(
+          eq(supportConversations.id, input.conversationId),
+          eq(supportConversations.platformConnectionId, input.connectionId),
+          eq(supportConversations.status, "waiting_human"),
+          eq(supportConversations.processingClaimId, input.claimId),
+          gt(supportConversations.processingClaimExpiresAt, input.now),
+          terminalDelivery,
+        )).returning({ id: supportConversations.id });
+        if (!conversation) return false;
+        const [completed] = await tx.update(supportWebhookEvents).set({
+          processingStatus: "processed",
+          safeErrorCode: null,
+          processedAt: input.now,
+        }).where(and(
+          eq(supportWebhookEvents.platformConnectionId, input.connectionId),
+          eq(supportWebhookEvents.webhookEventId, input.eventId),
+          eq(supportWebhookEvents.processingStatus, "processing"),
+          eq(supportWebhookEvents.safeErrorCode, input.eventClaimId),
+          gt(supportWebhookEvents.processedAt, input.now),
+        )).returning({ id: supportWebhookEvents.id });
+        if (!completed) throw unavailablePersistenceError();
+        return true;
       }));
     },
 
@@ -1014,6 +1299,27 @@ export function createSupportRepository(db = createDbClient(), {
       return Boolean(updated);
     },
 
+    async markOwnedLineConnectionNeedsReconnect(ownerEmail, connectionId, conversationId, now = new Date()) {
+      const owner = normalizeOwner(ownerEmail);
+      const id = requiredBoundedText(connectionId, "Connection ID", 100);
+      const conversation = requiredBoundedText(conversationId, "Conversation ID", 100);
+      const [updated] = await retryBusyOperation(() => db.update(platformConnections).set({
+        state: "needs_reconnect",
+        updatedAt: validDate(now),
+      }).where(and(
+        eq(platformConnections.id, id),
+        eq(platformConnections.ownerEmail, owner),
+        eq(platformConnections.platform, "line"),
+        eq(platformConnections.state, "active"),
+        exists(db.select({ one: sql`1` }).from(supportConversations).where(and(
+          eq(supportConversations.id, conversation),
+          eq(supportConversations.ownerEmail, owner),
+          eq(supportConversations.platformConnectionId, id),
+        ))),
+      )).returning({ id: platformConnections.id }));
+      return Boolean(updated);
+    },
+
     async handleLineCredentialRejected({ connectionId, conversationId, eventId, eventClaimId, claimId, now = new Date() }) {
       const input = {
         ...validateConversationClaimInput({ connectionId, conversationId, claimId, now }),
@@ -1021,33 +1327,73 @@ export function createSupportRepository(db = createDbClient(), {
         eventClaimId: requiredBoundedText(eventClaimId, "Event processing claim", 100),
       };
       return retryBusyOperation(() => db.transaction(async (tx) => {
-        const eventPredicate = exists(tx.select({ one: sql`1` }).from(supportWebhookEvents).where(and(
+        const [event] = await tx.select({ id: supportWebhookEvents.id }).from(supportWebhookEvents).where(and(
           eq(supportWebhookEvents.platformConnectionId, input.connectionId),
           eq(supportWebhookEvents.webhookEventId, input.eventId),
           eq(supportWebhookEvents.processingStatus, "processing"),
           eq(supportWebhookEvents.safeErrorCode, input.eventClaimId),
           gt(supportWebhookEvents.processedAt, input.now),
-        )));
+        )).limit(1);
+        const [conversation] = await tx.select().from(supportConversations).where(and(
+          eq(supportConversations.id, input.conversationId),
+          eq(supportConversations.platformConnectionId, input.connectionId),
+          eq(supportConversations.processingClaimId, input.claimId),
+          inArray(supportConversations.status, ["ai_active", "waiting_human"]),
+          gt(supportConversations.processingClaimExpiresAt, input.now),
+        )).limit(1);
+        if (!event || !conversation) return false;
+        const [inbound] = await tx.select({ id: supportMessages.id }).from(supportMessages).where(and(
+          eq(supportMessages.conversationId, input.conversationId),
+          eq(supportMessages.idempotencyKey, `${input.connectionId}:${input.eventId}`),
+          eq(supportMessages.direction, "inbound"),
+        )).limit(1);
+        if (!inbound) return false;
         await tx.update(platformConnections).set({ state: "needs_reconnect", updatedAt: input.now }).where(and(
           eq(platformConnections.id, input.connectionId), eq(platformConnections.platform, "line"), eq(platformConnections.state, "active"),
-          exists(tx.select({ one: sql`1` }).from(supportConversations).where(and(
-            eq(supportConversations.id, input.conversationId),
-            eq(supportConversations.platformConnectionId, input.connectionId),
-            eq(supportConversations.processingClaimId, input.claimId),
-            eq(supportConversations.status, "ai_active"),
-            gt(supportConversations.processingClaimExpiresAt, input.now),
-          ))),
-          eventPredicate,
+          eq(platformConnections.ownerEmail, conversation.ownerEmail),
         ));
+        if (conversation.status === "ai_active") {
+          const [configuration] = await tx.select({
+            llmProvider: supportConfigurations.llmProvider,
+            llmModel: supportConfigurations.llmModel,
+          }).from(supportConfigurations).where(and(
+            eq(supportConfigurations.ownerEmail, conversation.ownerEmail),
+            eq(supportConfigurations.platformConnectionId, input.connectionId),
+          )).limit(1);
+          await tx.insert(supportAiDecisions).values({
+            id: randomUUID(),
+            conversationId: input.conversationId,
+            inboundMessageId: inbound.id,
+            action: "handoff",
+            category: null,
+            reasonCode: "credential_rejected",
+            answerMessageId: null,
+            faqIdsJson: "[]",
+            llmProvider: configuration?.llmProvider ?? null,
+            llmModel: configuration?.llmModel ?? null,
+            promptVersion: "support-v1",
+            inputTokens: null,
+            outputTokens: null,
+            latencyMs: null,
+            createdAt: input.now,
+          });
+        }
         const [handoff] = await tx.update(supportConversations).set({
-          status: "waiting_human", handoffReasonCode: "credential_rejected",
-          processingClaimId: null, processingClaimExpiresAt: null, updatedAt: input.now,
+          status: "waiting_human",
+          handoffReasonCode: conversation.status === "ai_active"
+            ? "credential_rejected"
+            : conversation.handoffReasonCode,
+          processingClaimId: null,
+          processingClaimExpiresAt: null,
+          version: conversation.status === "ai_active"
+            ? conversation.version + 1
+            : conversation.version,
+          updatedAt: input.now,
         }).where(and(
           eq(supportConversations.id, input.conversationId), eq(supportConversations.platformConnectionId, input.connectionId),
-          eq(supportConversations.status, "ai_active"),
+          eq(supportConversations.status, conversation.status),
           eq(supportConversations.processingClaimId, input.claimId),
           gt(supportConversations.processingClaimExpiresAt, input.now),
-          eventPredicate,
         )).returning({ id: supportConversations.id });
         if (!handoff) return false;
         const [completed] = await tx.update(supportWebhookEvents).set({
@@ -1130,7 +1476,7 @@ export function createSupportRepository(db = createDbClient(), {
         }
         if (existing.firstAttemptAt
           && delivery.now.getTime() - existing.firstAttemptAt.getTime() > OUTBOUND_REVIEW_WINDOW_MS) {
-          await tx.update(supportOutboundDeliveries).set({
+          const [reviewed] = await tx.update(supportOutboundDeliveries).set({
             deliveryStatus: "human_review",
             deliveryClaimId: null,
             deliveryClaimExpiresAt: null,
@@ -1142,10 +1488,21 @@ export function createSupportRepository(db = createDbClient(), {
             or(
               eq(supportOutboundDeliveries.deliveryStatus, "pending"),
               eq(supportOutboundDeliveries.deliveryStatus, "retryable"),
-              eq(supportOutboundDeliveries.deliveryStatus, "sending"),
+              and(
+                eq(supportOutboundDeliveries.deliveryStatus, "sending"),
+                lte(supportOutboundDeliveries.deliveryClaimExpiresAt, delivery.now),
+              ),
             ),
-          ));
-          return { claimed: false, status: "human_review" };
+          )).returning();
+          if (reviewed) {
+            await synchronizeLinkedAiMessage(tx, reviewed, "human_review", delivery.now, "line_push_review_required");
+            return { claimed: false, status: "human_review" };
+          }
+          const [authoritative] = await tx.select({ status: supportOutboundDeliveries.deliveryStatus })
+            .from(supportOutboundDeliveries)
+            .where(eq(supportOutboundDeliveries.id, delivery.deliveryId))
+            .limit(1);
+          return { claimed: false, status: authoritative?.status ?? "duplicate" };
         }
         if (existing.nextAttemptAt && existing.nextAttemptAt > delivery.now) {
           return { claimed: false, status: "retryable" };
@@ -1213,6 +1570,15 @@ export function createSupportRepository(db = createDbClient(), {
         deliveryId, claimId, now, status: "failed",
         changes: { failedAt: validDate(now), safeErrorCode: safeOutboundErrorCode(safeErrorCode), nextAttemptAt: null },
       });
+    },
+
+    async getLineOutboundDeliveryStatus(deliveryId) {
+      const id = requiredBoundedText(deliveryId, "Outbound delivery ID", 100);
+      const [delivery] = await db.select({ status: supportOutboundDeliveries.deliveryStatus })
+        .from(supportOutboundDeliveries)
+        .where(eq(supportOutboundDeliveries.id, id))
+        .limit(1);
+      return delivery?.status ?? "duplicate";
     },
 
     async recordIgnoredLineEvent({ connectionId, eventId, sourceType, receivedAt = new Date() }) {
@@ -1439,27 +1805,81 @@ async function updateOutboundDelivery(db, {
   acceptedRequestId = undefined,
   changes,
 }) {
-  validDate(now);
+  const timestamp = validDate(now);
   const safeDeliveryId = requiredBoundedText(deliveryId, "Outbound delivery ID", 100);
   const safeClaimId = requiredBoundedText(claimId, "Outbound delivery claim", 100);
-  const [updated] = await retryBusyOperation(() => db.update(supportOutboundDeliveries).set({
+  return retryBusyOperation(() => db.transaction(async (tx) => {
+    const [updated] = await tx.update(supportOutboundDeliveries).set({
+      deliveryStatus: status,
+      deliveryClaimId: null,
+      deliveryClaimExpiresAt: null,
+      ...(acceptedRequestId === undefined ? {} : {
+        acceptedRequestId: acceptedRequestId == null ? null : requiredBoundedText(
+          acceptedRequestId,
+          "LINE accepted request ID",
+          256,
+        ),
+      }),
+      ...changes,
+    }).where(and(
+      eq(supportOutboundDeliveries.id, safeDeliveryId),
+      eq(supportOutboundDeliveries.deliveryStatus, "sending"),
+      eq(supportOutboundDeliveries.deliveryClaimId, safeClaimId),
+      gt(supportOutboundDeliveries.deliveryClaimExpiresAt, timestamp),
+    )).returning();
+    if (!updated) return false;
+    if (status === "sent" || status === "failed" || status === "human_review") {
+      await synchronizeLinkedAiMessage(
+        tx,
+        updated,
+        status,
+        timestamp,
+        changes.safeErrorCode ?? null,
+      );
+    }
+    return true;
+  }));
+}
+
+async function synchronizeLinkedAiMessage(tx, delivery, status, timestamp, safeErrorCode) {
+  const [event] = await tx.select({
+    connectionId: supportWebhookEvents.platformConnectionId,
+    eventId: supportWebhookEvents.webhookEventId,
+  }).from(supportWebhookEvents).where(eq(
+    supportWebhookEvents.id,
+    delivery.webhookEventId,
+  )).limit(1);
+  if (!event) throw unavailablePersistenceError();
+  const messageChanges = {
     deliveryStatus: status,
-    deliveryClaimId: null,
-    deliveryClaimExpiresAt: null,
-    ...(acceptedRequestId === undefined ? {} : {
-      acceptedRequestId: acceptedRequestId == null ? null : requiredBoundedText(
-        acceptedRequestId,
-        "LINE accepted request ID",
-        256,
-      ),
-    }),
-    ...changes,
-  }).where(and(
-    eq(supportOutboundDeliveries.id, safeDeliveryId),
-    eq(supportOutboundDeliveries.deliveryStatus, "sending"),
-    eq(supportOutboundDeliveries.deliveryClaimId, safeClaimId),
-  )).returning({ id: supportOutboundDeliveries.id }));
-  return Boolean(updated);
+    sentAt: status === "sent" ? timestamp : null,
+    failedAt: status === "sent" ? null : timestamp,
+    safeErrorCode: status === "sent"
+      ? null
+      : safeErrorCode == null ? null : safeOutboundErrorCode(safeErrorCode),
+  };
+  const [message] = await tx.update(supportMessages).set(messageChanges).where(and(
+    eq(supportMessages.conversationId, delivery.conversationId),
+    eq(supportMessages.senderType, "ai"),
+    eq(supportMessages.direction, "outbound"),
+    eq(supportMessages.idempotencyKey, `ai:${event.connectionId}:${event.eventId}`),
+    ne(supportMessages.deliveryStatus, "sent"),
+  )).returning({ id: supportMessages.id });
+  if (status === "sent") {
+    if (!message) {
+      const [alreadySent] = await tx.select({ id: supportMessages.id }).from(supportMessages).where(and(
+        eq(supportMessages.conversationId, delivery.conversationId),
+        eq(supportMessages.senderType, "ai"),
+        eq(supportMessages.idempotencyKey, `ai:${event.connectionId}:${event.eventId}`),
+        eq(supportMessages.deliveryStatus, "sent"),
+      )).limit(1);
+      if (!alreadySent) return;
+    }
+    await tx.update(supportConversations).set({
+      lastOutboundAt: timestamp,
+      updatedAt: timestamp,
+    }).where(eq(supportConversations.id, delivery.conversationId));
+  }
 }
 
 async function findOwnedLineConnection(db, ownerEmail, connectionId) {

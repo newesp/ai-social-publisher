@@ -574,6 +574,81 @@ test("FAQ keyword limits apply after trimming and deduplication", async () => {
   }), 400);
 });
 
+test("human Push 401 marks the owned connection for reconnect and leaves a safe failed message", async () => {
+  const calls = [];
+  const repository = {
+    async prepareHumanMessage(owner, conversationId, message) {
+      calls.push(["prepare", owner, conversationId, message]);
+      return {
+        id: "11111111-1111-4111-8111-111111111111", deliveryStatus: "pending",
+        connectionId: CONNECTION_ID, canonicalBody: '{"to":"private","messages":[{"type":"text","text":"Hello"}]}',
+        retryKey: "11111111-1111-4111-8111-111111111111",
+      };
+    },
+    async loadLineAccessToken() { return "private-token"; },
+    async markOwnedLineConnectionNeedsReconnect(owner, connectionId, conversationId) {
+      calls.push(["reconnect", owner, connectionId, conversationId]);
+      return true;
+    },
+    async markHumanMessageDelivery(owner, messageId, status, safeErrorCode) {
+      calls.push(["mark", owner, messageId, status, safeErrorCode]);
+      return { id: messageId, deliveryStatus: status, safeErrorCode };
+    },
+  };
+  const store = createSupportStore({
+    repository, encryptionKey: "support-store-test-key",
+    lineAdapter: { pushCanonical: async () => ({ status: 401, headers: {} }) },
+  });
+
+  assert.deepEqual(await store.sendHumanMessage("OWNER@EXAMPLE.COM", "conversation-1", {
+    text: "Hello", idempotencyKey: "stable-key",
+  }), {
+    id: "11111111-1111-4111-8111-111111111111",
+    deliveryStatus: "failed",
+    safeErrorCode: "line_push_4xx",
+  });
+  assert.equal(calls.some(([name]) => name === "reconnect"), true);
+  assert.deepEqual(calls.find(([name]) => name === "reconnect"), [
+    "reconnect", "owner@example.com", CONNECTION_ID, "conversation-1",
+  ]);
+});
+
+test("human retry loads immutable server-stored content and reuses the original message UUID", async () => {
+  const calls = [];
+  const repository = {
+    async prepareHumanMessageRetry(owner, messageId) {
+      calls.push(["prepare-retry", owner, messageId]);
+      return {
+        id: messageId, deliveryStatus: "pending", connectionId: CONNECTION_ID,
+        canonicalBody: '{"to":"stored-recipient","messages":[{"type":"text","text":"Stored text"}]}',
+        retryKey: messageId,
+      };
+    },
+    async loadLineAccessToken() { return "private-token"; },
+    async markHumanMessageDelivery(owner, messageId, status, safeErrorCode) {
+      calls.push(["mark", owner, messageId, status, safeErrorCode]);
+      return { id: messageId, deliveryStatus: status, safeErrorCode };
+    },
+  };
+  const pushes = [];
+  const store = createSupportStore({
+    repository, encryptionKey: "support-store-test-key",
+    lineAdapter: { pushCanonical: async (input) => { pushes.push(input); return { status: 200, headers: {} }; } },
+  });
+
+  const result = await store.retryHumanMessage(
+    "owner@example.com",
+    "11111111-1111-4111-8111-111111111111",
+  );
+
+  assert.equal(result.deliveryStatus, "sent");
+  assert.deepEqual(pushes, [{
+    accessToken: "private-token",
+    canonicalBody: '{"to":"stored-recipient","messages":[{"type":"text","text":"Stored text"}]}',
+    retryKey: "11111111-1111-4111-8111-111111111111",
+  }]);
+});
+
 function createStore(repository = createMemoryRepository()) {
   return createSupportStore({
     repository,

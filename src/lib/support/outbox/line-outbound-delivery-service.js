@@ -47,26 +47,30 @@ export function createLineOutboundDeliveryService({
             safeErrorCode: "line_push_transport",
           });
         }
-        await outboxStore.markDeliveryFailed({
+        const updated = await outboxStore.markDeliveryFailed({
           deliveryId,
           claimId: claim.claimId,
           safeErrorCode: "line_push_unclassified_failure",
           now: completedAt,
         });
-        return { status: "failed" };
+        return updated === false
+          ? authoritativeDelivery(outboxStore, deliveryId)
+          : { status: "failed" };
       }
 
       const status = Number(response?.status);
       const completedAt = currentAttemptTime(clock, attemptedAt);
       const acceptedRequestId = readHeader(response?.headers, "x-line-accepted-request-id");
       if ((status >= 200 && status < 300) || (status === 409 && acceptedRequestId)) {
-        await outboxStore.markDeliverySent({
+        const updated = await outboxStore.markDeliverySent({
           deliveryId,
           claimId: claim.claimId,
           acceptedRequestId: acceptedRequestId || null,
           now: completedAt,
         });
-        return { status: "sent", acceptedRequestId: acceptedRequestId || null };
+        return updated === false
+          ? authoritativeDelivery(outboxStore, deliveryId)
+          : { status: "sent", acceptedRequestId: acceptedRequestId || null };
       }
       if (status >= 500 && status < 600) {
         return recordRetryable({
@@ -79,20 +83,20 @@ export function createLineOutboundDeliveryService({
           safeErrorCode: "line_push_5xx",
         });
       }
-      let credentialHandoff;
-      if (status === 401 && claim.connectionId) {
-        if (eventId && eventClaimId && conversationClaimId && connectionId && conversationId) {
-          credentialHandoff = await onCredentialRejected({
-            connectionId, conversationId, eventId, eventClaimId, claimId: conversationClaimId, now: completedAt,
-          });
-        }
-      }
-      await outboxStore.markDeliveryFailed({
+      const updated = await outboxStore.markDeliveryFailed({
         deliveryId,
         claimId: claim.claimId,
         safeErrorCode: "line_push_4xx",
         now: completedAt,
       });
+      if (updated === false) return authoritativeDelivery(outboxStore, deliveryId);
+      let credentialHandoff;
+      if (status === 401 && claim.connectionId
+        && eventId && eventClaimId && conversationClaimId && connectionId && conversationId) {
+        credentialHandoff = await onCredentialRejected({
+          connectionId, conversationId, eventId, eventClaimId, claimId: conversationClaimId, now: completedAt,
+        });
+      }
       return { status: "failed", ...(credentialHandoff?.eventCompleted === true ? { eventCompleted: true } : {}) };
     },
   };
@@ -110,14 +114,20 @@ async function recordRetryable({
   const exponent = Math.max(0, Number(claim.attemptCount) - 1);
   const delay = Math.min(maxRetryDelayMs, baseRetryDelayMs * (2 ** exponent));
   const retryAt = new Date(attemptedAt.getTime() + delay);
-  await outboxStore.markDeliveryRetryable({
+  const updated = await outboxStore.markDeliveryRetryable({
     deliveryId,
     claimId: claim.claimId,
     retryAt,
     safeErrorCode,
     now: attemptedAt,
   });
+  if (updated === false) return authoritativeDelivery(outboxStore, deliveryId);
   return { status: "retryable", retryAt };
+}
+
+async function authoritativeDelivery(outboxStore, deliveryId) {
+  if (typeof outboxStore.getDeliveryStatus !== "function") return { status: "duplicate" };
+  return { status: await outboxStore.getDeliveryStatus(deliveryId) };
 }
 
 function readHeader(headers, name) {

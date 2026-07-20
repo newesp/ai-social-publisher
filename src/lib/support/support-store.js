@@ -64,6 +64,47 @@ export function createSupportStore({
     return toConfiguration(updated);
   }
 
+  async function deliverHumanMessage(owner, conversationId, prepared) {
+    if (!prepared) return null;
+    if (prepared.deliveryStatus === "sent") return toHumanMessage(prepared);
+    let response;
+    try {
+      const accessToken = await repository.loadLineAccessToken(prepared.connectionId);
+      response = await lineAdapter.pushCanonical({
+        accessToken,
+        canonicalBody: prepared.canonicalBody,
+        retryKey: prepared.retryKey,
+      });
+    } catch {
+      return toHumanMessage(await repository.markHumanMessageDelivery(
+        owner,
+        prepared.id,
+        "failed",
+        "line_push_transport",
+        now(),
+      ));
+    }
+    const status = Number(response?.status);
+    const acceptedRequestId = response?.headers?.["x-line-accepted-request-id"] || "";
+    const accepted = (status >= 200 && status < 300)
+      || (status === 409 && acceptedRequestId);
+    if (status === 401 && typeof repository.markOwnedLineConnectionNeedsReconnect === "function") {
+      await repository.markOwnedLineConnectionNeedsReconnect(
+        owner,
+        prepared.connectionId,
+        conversationId,
+        now(),
+      );
+    }
+    return toHumanMessage(await repository.markHumanMessageDelivery(
+      owner,
+      prepared.id,
+      accepted ? "sent" : "failed",
+      accepted ? null : safePushFailure(status),
+      now(),
+    ));
+  }
+
   async function persistConfiguration(owner, configuration) {
     const timestamp = now();
     const current = await repository.getConfiguration(owner);
@@ -329,21 +370,14 @@ export function createSupportStore({
       const conversationId = requireText(id, "Conversation ID");
       const message = validateHumanMessage(input);
       const prepared = await repository.prepareHumanMessage(owner, conversationId, message, now());
-      if (!prepared) return null;
-      if (prepared.deliveryStatus === "sent") return toHumanMessage(prepared);
-      let response;
-      try {
-        const accessToken = await repository.loadLineAccessToken(prepared.connectionId);
-        response = await lineAdapter.pushCanonical({ accessToken, canonicalBody: prepared.canonicalBody, retryKey: prepared.retryKey });
-      } catch {
-        return toHumanMessage(await repository.markHumanMessageDelivery(owner, prepared.id, "failed", "line_push_transport", now()));
-      }
-      const acceptedRequestId = response?.headers?.["x-line-accepted-request-id"] || "";
-      const accepted = (Number(response?.status) >= 200 && Number(response?.status) < 300)
-        || (Number(response?.status) === 409 && acceptedRequestId);
-      return toHumanMessage(await repository.markHumanMessageDelivery(
-        owner, prepared.id, accepted ? "sent" : "failed", accepted ? null : safePushFailure(Number(response?.status)), now(),
-      ));
+      return deliverHumanMessage(owner, conversationId, prepared);
+    },
+
+    async retryHumanMessage(ownerEmail, messageId) {
+      const owner = requireOwner(ownerEmail);
+      const id = requireText(messageId, "Human message ID");
+      const prepared = await repository.prepareHumanMessageRetry(owner, id, now());
+      return deliverHumanMessage(owner, prepared?.conversationId, prepared);
     },
 
     async requestTransition(ownerEmail, id, action, expectedVersion) {

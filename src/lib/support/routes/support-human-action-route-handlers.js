@@ -15,7 +15,12 @@ export function createSupportHumanActionRouteHandlers({
     async sendMessage(request, id) {
       const owner = await authenticatedOwner(requireOwner); requireSameOrigin(request);
       const message = await (await getStore()).sendHumanMessage(owner, requiredId(id), humanMessageBody(await jsonBody(request)));
-      return message ? respond({ message: safeMessage(message) }) : notFound(respond);
+      return message ? deliveryResponse(message, respond) : notFound(respond);
+    },
+    async retryMessage(request, messageId) {
+      const owner = await authenticatedOwner(requireOwner); requireSameOrigin(request);
+      const message = await (await getStore()).retryHumanMessage(owner, requiredId(messageId));
+      return message ? deliveryResponse(message, respond) : notFound(respond);
     },
     async requestTransition(request, id) {
       const owner = await authenticatedOwner(requireOwner); requireSameOrigin(request);
@@ -52,6 +57,15 @@ function humanMessageBody(body) {
 }
 function safeConversation(value) { return { id: String(value.id ?? ""), status: String(value.status ?? ""), version: Number.isInteger(value.version) ? value.version : 0 }; }
 function safeMessage(value) { return { id: String(value.id ?? ""), deliveryStatus: String(value.deliveryStatus ?? "failed"), safeErrorCode: value.safeErrorCode ?? null }; }
+function deliveryResponse(value, respond) {
+  const message = safeMessage(value);
+  return message.deliveryStatus === "sent"
+    ? respond({ message })
+    : respond({
+      error: "LINE message delivery failed. Retry after checking the connection.",
+      message,
+    }, { status: 502 });
+}
 function safeTransition(value) { return { id: String(value.id ?? ""), conversationId: String(value.conversationId ?? ""), action: String(value.action ?? ""), effectiveAt: new Date(value.effectiveAt).toISOString() }; }
 function notFound(respond) { return respond({ error: "Support conversation not found." }, { status: 404 }); }
 function routeError(message, status) { const error = new Error(message); error.status = status; return error; }

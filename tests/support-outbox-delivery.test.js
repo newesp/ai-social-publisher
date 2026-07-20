@@ -164,6 +164,34 @@ test("a delayed 401 fences credential rejection at response time instead of requ
   assert.equal(rejected[0].now.getTime(), afterResponse.getTime());
 });
 
+test("a terminal CAS loss reconciles and returns the authoritative stored status", async () => {
+  const store = createDeliveryStore();
+  store.markDeliverySent = async () => false;
+  store.getDeliveryStatus = async () => "sending";
+  const service = createLineOutboundDeliveryService({
+    outboxStore: store,
+    sendPush: async () => ({ status: 200, headers: {} }),
+  });
+
+  assert.deepEqual(await service.attemptDelivery({ deliveryId: DELIVERY_ID, now: NOW }), {
+    status: "sending",
+  });
+});
+
+test("a retryable CAS loss returns a concurrently stored sent outcome without scheduling another attempt", async () => {
+  const store = createDeliveryStore();
+  store.markDeliveryRetryable = async () => false;
+  store.getDeliveryStatus = async () => "sent";
+  const service = createLineOutboundDeliveryService({
+    outboxStore: store,
+    sendPush: async () => ({ status: 503, headers: {} }),
+  });
+
+  assert.deepEqual(await service.attemptDelivery({ deliveryId: DELIVERY_ID, now: NOW }), {
+    status: "sent",
+  });
+});
+
 function createDeliveryStore({ firstAttemptAt = null, connectionId = undefined, conversationId = undefined } = {}) {
   let claimId = null;
   let attemptCount = 0;

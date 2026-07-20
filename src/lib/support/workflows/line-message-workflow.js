@@ -124,6 +124,18 @@ async function runLineMessageWorkflow({ eventId, connectionId, conversationId },
         }
       } while (delivery.status === "retryable" && delivery.retryAt);
       if (delivery.eventCompleted) return { status: delivery.status };
+      if (!["sent", "failed", "human_review"].includes(delivery.status)) {
+        throw new Error("Outbound delivery did not reach a terminal state.");
+      }
+      if (outcome.handoffAcknowledgement === true) {
+        const completionNow = await workflowNowStep(now);
+        const finalized = await finalizeHandoffStep(processingService, {
+          deliveryId: outcome.deliveryId, eventId, eventClaimId: eventClaim.claimId,
+          connectionId, conversationId, conversationClaimId: conversationClaim.claimId, now: completionNow,
+        });
+        if (finalized !== true) throw new Error("Handoff acknowledgement finalization could not be recorded.");
+        return { status: delivery.status };
+      }
       const completionNow = await workflowNowStep(now);
       await renewFences({ eventStore, processingService, eventId, connectionId, conversationId, eventClaimId: eventClaim.claimId, conversationClaimId: conversationClaim.claimId, now: completionNow });
       await completeEvent(eventStore, { eventId, connectionId, claimId: eventClaim.claimId, conversationId, conversationClaimId: conversationClaim.claimId, now: completionNow });
@@ -165,6 +177,7 @@ function productionProcessingService(env = process.env) {
       markDeliverySent: (input) => repository.markLineOutboundDeliverySent(input),
       markDeliveryRetryable: (input) => repository.markLineOutboundDeliveryRetryable(input),
       markDeliveryFailed: (input) => repository.markLineOutboundDeliveryFailed(input),
+      getDeliveryStatus: (deliveryId) => repository.getLineOutboundDeliveryStatus(deliveryId),
     },
     sendPush: async ({ retryKey, body, connectionId }) => {
       const accessToken = await repository.loadLineAccessToken(connectionId);
@@ -250,6 +263,7 @@ async function buildTurnStep(processingService, input) { "use step"; return curr
 async function providerAttemptStep(processingService, input) { "use step"; return currentProcessingService(processingService).decideAndPersist(input); }
 async function persistHandoffStep(processingService, input) { "use step"; return currentProcessingService(processingService).persistHandoff(input); }
 async function deliverStep(processingService, input) { "use step"; return currentProcessingService(processingService).deliver(input); }
+async function finalizeHandoffStep(processingService, input) { "use step"; return currentProcessingService(processingService).finalizeHandoff(input); }
 async function releaseConversationClaimStep(processingService, input) { "use step"; return currentProcessingService(processingService).releaseClaim(input); }
 async function findFollowUpStep(processingService, input) { "use step"; return currentProcessingService(processingService).findFollowUp(input); }
 async function startFollowUpStep(startWorkflow, input) { "use step"; return typeof startWorkflow === "function" ? startWorkflow(input) : startNextLineMessageWorkflow(input); }

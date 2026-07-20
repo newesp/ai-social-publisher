@@ -22,6 +22,7 @@ import {
   userSettings,
 } from "../src/lib/db/schema.js";
 import { decryptJson, encryptJson } from "../src/lib/settings/credential-crypto.js";
+import { encryptExternalId, encryptOutboundCanonicalBody } from "../src/lib/support/identity-crypto.js";
 import { createSupportRepository } from "../src/lib/support/support-repository.js";
 
 const NOW = new Date("2026-07-19T00:00:00.000Z");
@@ -356,6 +357,7 @@ test("LINE ingress persists encrypted identities atomically and cancels only the
     const updated = (await db.select().from(supportConversations))[0];
     assert.equal(updated.pendingTransitionId, null);
     assert.equal(updated.status, "waiting_human");
+    assert.equal(updated.version, 1);
 
     const otherConnection = await repository.ingestLineUserEvent({
       ownerEmail: "owner@example.com",
@@ -949,6 +951,11 @@ test("processing claims batch current protected data and atomically persist one 
     const [handoffConversation] = await db.select().from(supportConversations).where(eq(supportConversations.id, ingested.conversationId));
     assert.equal(handoffConversation.status, "waiting_human");
     assert.equal(handoffConversation.handoffReasonCode, "credential_rejected");
+    assert.equal(handoffConversation.version, 2);
+    const credentialAudit = (await db.select().from(supportAiDecisions))
+      .find(({ action }) => action === "handoff");
+    assert.equal(credentialAudit.reasonCode, "credential_rejected");
+    assert.equal(credentialAudit.answerMessageId, null);
     assert.equal(await repository.handleLineCredentialRejected({
       connectionId, conversationId: ingested.conversationId, eventId: "evt-turn-1", eventClaimId: eventClaim.claimId,
       claimId: conversationClaim.claimId, now: NOW,
@@ -980,10 +987,13 @@ test("a handoff atomically consumes its batch and resolves dispatched companion 
       connectionId, conversationId: primary.conversationId, now: NOW,
     });
     const cutoff = new Date(NOW.getTime() + 3_000);
+    const [triggeringMessage] = await db.select({ id: supportMessages.id }).from(supportMessages)
+      .where(eq(supportMessages.idempotencyKey, `${connectionId}:evt-handoff-1`));
 
     assert.deepEqual(await repository.persistHandoff({
       connectionId, eventId: "evt-handoff-1", eventClaimId: eventClaim.claimId,
       conversationId: primary.conversationId, claimId: conversationClaim.claimId,
+      inboundMessageId: triggeringMessage.id,
       cutoff, reasonCode: "explicit_human", now: NOW,
     }), { eventCompleted: true });
 
@@ -1034,6 +1044,277 @@ test("a consumed losing event is completed once by its repository resolution", a
     }), false);
     const [event] = await db.select().from(supportWebhookEvents).where(eq(supportWebhookEvents.webhookEventId, "evt-loser"));
     assert.equal(event.processingStatus, "processed");
+  });
+});
+
+test("AI delivery terminal state is transactionally mirrored to its message and accepted delivery alone advances last outbound", async () => {
+  await withDatabase(async (db) => {
+    const connectionId = "55555555-5555-4555-8555-555555555555";
+    const eventId = "evt-ai-delivery-truth";
+    await db.insert(platformConnections).values(connection(connectionId, "owner@example.com"));
+    const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });
+    const ingested = await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com", connectionId, eventId, externalUserId: "U-private",
+      replyToken: "reply-token", message: { type: "text", text: "Question", safeMetadata: {} }, receivedAt: NOW,
+    });
+    const dispatch = await repository.claimLineWorkflowDispatch({ connectionId, eventId, now: NOW });
+    await repository.markLineWorkflowDispatched({ ...dispatch, now: NOW });
+    const eventClaim = await repository.claimLineEventProcessing({ connectionId, eventId, now: NOW });
+    const conversationClaim = await repository.acquireConversationClaim({
+      connectionId, conversationId: ingested.conversationId, now: NOW,
+    });
+    const persisted = await repository.persistDecisionAndOutbound({
+      connectionId, eventId, eventClaimId: eventClaim.claimId, conversationId: ingested.conversationId,
+      claimId: conversationClaim.claimId, inboundMessageId: (await repository.buildClaimedTurn({
+        connectionId, eventId, conversationId: ingested.conversationId, claimId: conversationClaim.claimId,
+        cutoff: new Date(NOW.getTime() + 3_000),
+      })).inboundMessageId,
+      cutoff: new Date(NOW.getTime() + 3_000),
+      decision: { action: "reply", answer: "Answer", category: "general", knowledgeSourceIds: ["faq-1"] },
+      canonicalBody: '{"to":"U-private","messages":[{"type":"text","text":"Answer"}]}',
+      now: NOW,
+    });
+    let [conversation] = await db.select().from(supportConversations)
+      .where(eq(supportConversations.id, ingested.conversationId));
+    assert.equal(conversation.lastOutboundAt, null);
+
+    const claim = await repository.claimLineOutboundDelivery({ deliveryId: persisted.deliveryId, now: NOW });
+    const acceptedAt = new Date(NOW.getTime() + 1_000);
+    assert.equal(await repository.markLineOutboundDeliverySent({
+      deliveryId: persisted.deliveryId, claimId: claim.claimId, acceptedRequestId: "accepted-1", now: acceptedAt,
+    }), true);
+    const [delivery] = await db.select().from(supportOutboundDeliveries)
+      .where(eq(supportOutboundDeliveries.id, persisted.deliveryId));
+    const [message] = await db.select().from(supportMessages)
+      .where(eq(supportMessages.idempotencyKey, `ai:${connectionId}:${eventId}`));
+    [conversation] = await db.select().from(supportConversations)
+      .where(eq(supportConversations.id, ingested.conversationId));
+    assert.equal(delivery.deliveryStatus, "sent");
+    assert.equal(message.deliveryStatus, "sent");
+    assert.equal(message.sentAt.getTime(), acceptedAt.getTime());
+    assert.equal(message.failedAt, null);
+    assert.equal(message.safeErrorCode, null);
+    assert.equal(conversation.lastOutboundAt.getTime(), acceptedAt.getTime());
+  });
+});
+
+test("an expired outbound claim cannot report success and a newer terminal claim remains monotonic", async () => {
+  await withDatabase(async (db) => {
+    const connectionId = "66666666-6666-4666-8666-666666666666";
+    await db.insert(platformConnections).values(connection(connectionId, "owner@example.com"));
+    await db.insert(supportConversations).values({
+      id: "conversation-stale-delivery", ownerEmail: "owner@example.com", platformConnectionId: connectionId,
+      platform: "line", customerLookupKey: "stale", encryptedCustomerExternalId: "encrypted",
+      status: "ai_active", createdAt: NOW, updatedAt: NOW,
+    });
+    await db.insert(supportWebhookEvents).values({
+      id: "event-stale-delivery", platformConnectionId: connectionId, webhookEventId: "evt-stale-delivery",
+      sourceType: "user", processingStatus: "processed", receivedAt: NOW, createdAt: NOW,
+    });
+    await db.insert(supportMessages).values({
+      id: "message-stale-delivery", conversationId: "conversation-stale-delivery", direction: "outbound",
+      senderType: "ai", messageType: "text", textContent: "immutable", safeMetadataJson: "{}",
+      deliveryStatus: "pending", idempotencyKey: `ai:${connectionId}:evt-stale-delivery`, createdAt: NOW,
+    });
+    await db.insert(supportOutboundDeliveries).values({
+      id: "delivery-stale", webhookEventId: "event-stale-delivery", conversationId: "conversation-stale-delivery",
+      encryptedRecipient: encryptExternalId("U-private", SETTINGS_ENCRYPTION_KEY),
+      encryptedCanonicalBody: encryptOutboundCanonicalBody('{"to":"U-private","messages":[{"type":"text","text":"immutable"}]}', SETTINGS_ENCRYPTION_KEY),
+      retryKey: "retry-stale",
+      deliveryStatus: "pending", createdAt: NOW,
+    });
+    const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });
+    const stale = await repository.claimLineOutboundDelivery({ deliveryId: "delivery-stale", now: NOW });
+    const reclaimedAt = new Date(NOW.getTime() + 31_000);
+    const current = await repository.claimLineOutboundDelivery({ deliveryId: "delivery-stale", now: reclaimedAt });
+
+    assert.equal(await repository.markLineOutboundDeliverySent({
+      deliveryId: "delivery-stale", claimId: stale.claimId, now: reclaimedAt,
+    }), false);
+    assert.equal(await repository.markLineOutboundDeliveryFailed({
+      deliveryId: "delivery-stale", claimId: current.claimId, safeErrorCode: "line_push_4xx", now: reclaimedAt,
+    }), true);
+    assert.equal(await repository.markLineOutboundDeliverySent({
+      deliveryId: "delivery-stale", claimId: stale.claimId, now: new Date(reclaimedAt.getTime() + 1),
+    }), false);
+    const [message] = await db.select().from(supportMessages)
+      .where(eq(supportMessages.id, "message-stale-delivery"));
+    assert.equal(message.deliveryStatus, "failed");
+    assert.equal(message.safeErrorCode, "line_push_4xx");
+  });
+});
+
+test("the 24-hour review threshold cannot terminalize another worker's unexpired delivery claim", async () => {
+  await withDatabase(async (db) => {
+    const connectionId = "99999999-9999-4999-8999-999999999999";
+    await db.insert(platformConnections).values(connection(connectionId, "owner@example.com"));
+    await db.insert(supportConversations).values({
+      id: "conversation-review-fence", ownerEmail: "owner@example.com", platformConnectionId: connectionId,
+      platform: "line", customerLookupKey: "review-fence", encryptedCustomerExternalId: "encrypted",
+      status: "ai_active", createdAt: NOW, updatedAt: NOW,
+    });
+    await db.insert(supportWebhookEvents).values({
+      id: "event-review-fence", platformConnectionId: connectionId, webhookEventId: "evt-review-fence",
+      sourceType: "user", processingStatus: "processed", receivedAt: NOW, createdAt: NOW,
+    });
+    await db.insert(supportOutboundDeliveries).values({
+      id: "delivery-review-fence", webhookEventId: "event-review-fence",
+      conversationId: "conversation-review-fence",
+      encryptedRecipient: encryptExternalId("U-private", SETTINGS_ENCRYPTION_KEY),
+      encryptedCanonicalBody: encryptOutboundCanonicalBody('{"to":"U-private","messages":[{"type":"text","text":"immutable"}]}', SETTINGS_ENCRYPTION_KEY),
+      retryKey: "review-fence-key", deliveryStatus: "pending", createdAt: NOW,
+    });
+    const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });
+    await repository.claimLineOutboundDelivery({ deliveryId: "delivery-review-fence", now: NOW });
+    const nearThreshold = new Date(NOW.getTime() + (24 * 60 * 60 * 1_000) - 1_000);
+    const active = await repository.claimLineOutboundDelivery({
+      deliveryId: "delivery-review-fence",
+      now: nearThreshold,
+    });
+    assert.equal(active.claimed, true);
+
+    const reviewAttempt = await repository.claimLineOutboundDelivery({
+      deliveryId: "delivery-review-fence",
+      now: new Date(NOW.getTime() + (24 * 60 * 60 * 1_000) + 1),
+    });
+    assert.equal(reviewAttempt.status, "sending");
+    assert.equal((await db.select().from(supportOutboundDeliveries))[0].deliveryClaimId, active.claimId);
+  });
+});
+
+test("automatic handoff records audit and fixed acknowledgement while retaining exact fences until terminal delivery", async () => {
+  await withDatabase(async (db) => {
+    const connectionId = "77777777-7777-4777-8777-777777777777";
+    const eventId = "evt-handoff-durable";
+    await db.insert(platformConnections).values({
+      ...connection(connectionId, "owner@example.com"),
+      encryptedCredentials: encryptJson({ accessToken: "line-token" }, SETTINGS_ENCRYPTION_KEY),
+    });
+    await db.insert(supportConfigurations).values({
+      ...configurationRecord(), id: "config-handoff", platformConnectionId: connectionId,
+      llmProvider: "openai", llmModel: "gpt-safe",
+    });
+    const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });
+    const ingested = await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com", connectionId, eventId, externalUserId: "U-private",
+      replyToken: "reply-token", message: { type: "text", text: "Human please", safeMetadata: {} }, receivedAt: NOW,
+    });
+    const dispatch = await repository.claimLineWorkflowDispatch({ connectionId, eventId, now: NOW });
+    await repository.markLineWorkflowDispatched({ ...dispatch, now: NOW });
+    const eventClaim = await repository.claimLineEventProcessing({ connectionId, eventId, now: NOW });
+    const conversationClaim = await repository.acquireConversationClaim({
+      connectionId, conversationId: ingested.conversationId, now: NOW,
+    });
+    const cutoff = new Date(NOW.getTime() + 3_000);
+    const handoff = await repository.persistHandoff({
+      connectionId, eventId, eventClaimId: eventClaim.claimId, conversationId: ingested.conversationId,
+      claimId: conversationClaim.claimId, inboundMessageId: (await repository.buildClaimedTurn({
+        connectionId, eventId, conversationId: ingested.conversationId, claimId: conversationClaim.claimId, cutoff,
+      })).inboundMessageId,
+      cutoff, reasonCode: "explicit_human_request", now: NOW,
+    });
+
+    assert.ok(handoff.deliveryId);
+    const [decision] = await db.select().from(supportAiDecisions);
+    const [acknowledgement] = await db.select().from(supportMessages)
+      .where(eq(supportMessages.idempotencyKey, `ai:${connectionId}:${eventId}`));
+    let [conversation] = await db.select().from(supportConversations)
+      .where(eq(supportConversations.id, ingested.conversationId));
+    let [event] = await db.select().from(supportWebhookEvents)
+      .where(eq(supportWebhookEvents.webhookEventId, eventId));
+    assert.deepEqual({
+      action: decision.action, reasonCode: decision.reasonCode, inboundMessageId: decision.inboundMessageId,
+      answerMessageId: decision.answerMessageId, llmProvider: decision.llmProvider, llmModel: decision.llmModel,
+    }, {
+      action: "handoff", reasonCode: "explicit_human_request", inboundMessageId: decision.inboundMessageId,
+      answerMessageId: null, llmProvider: "openai", llmModel: "gpt-safe",
+    });
+    assert.equal(acknowledgement.textContent, "已轉交人工客服，請稍候。");
+    assert.equal(acknowledgement.deliveryStatus, "pending");
+    assert.equal(conversation.status, "waiting_human");
+    assert.equal(conversation.version, 1);
+    assert.equal(conversation.processingClaimId, conversationClaim.claimId);
+    assert.equal(event.processingStatus, "processing");
+    assert.equal(event.safeErrorCode, eventClaim.claimId);
+    assert.deepEqual(await repository.persistHandoff({
+      connectionId, eventId, eventClaimId: eventClaim.claimId, conversationId: ingested.conversationId,
+      claimId: conversationClaim.claimId, inboundMessageId: decision.inboundMessageId,
+      cutoff, reasonCode: "explicit_human_request", now: new Date(NOW.getTime() + 1_000),
+    }), handoff);
+    assert.equal((await db.select().from(supportAiDecisions)).length, 1);
+    assert.equal((await db.select().from(supportOutboundDeliveries)).length, 1);
+    assert.equal((await db.select().from(supportMessages)
+      .where(eq(supportMessages.idempotencyKey, `ai:${connectionId}:${eventId}`))).length, 1);
+
+    await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com", connectionId, eventId: "evt-after-handoff", externalUserId: "U-private",
+      replyToken: "reply-token-2", message: { type: "text", text: "Are you there?", safeMetadata: {} },
+      receivedAt: new Date(NOW.getTime() + 1_000),
+    });
+    assert.equal((await repository.claimLineWorkflowDispatch({
+      connectionId, eventId: "evt-after-handoff", now: NOW,
+    })).claimed, false);
+    assert.equal(await repository.renewConversationClaim({
+      connectionId, eventId, conversationId: ingested.conversationId,
+      claimId: conversationClaim.claimId, now: new Date(NOW.getTime() + 1_000),
+    }), true);
+
+    const deliveryClaim = await repository.claimLineOutboundDelivery({ deliveryId: handoff.deliveryId, now: NOW });
+    const terminalAt = new Date(NOW.getTime() + 2_000);
+    await repository.markLineOutboundDeliverySent({
+      deliveryId: handoff.deliveryId, claimId: deliveryClaim.claimId, now: terminalAt,
+    });
+    assert.equal(await repository.finalizeHandoffDelivery({
+      connectionId, eventId, eventClaimId: eventClaim.claimId, conversationId: ingested.conversationId,
+      claimId: conversationClaim.claimId, deliveryId: handoff.deliveryId, now: terminalAt,
+    }), true);
+    conversation = (await db.select().from(supportConversations)
+      .where(eq(supportConversations.id, ingested.conversationId)))[0];
+    event = (await db.select().from(supportWebhookEvents)
+      .where(eq(supportWebhookEvents.webhookEventId, eventId)))[0];
+    assert.equal(conversation.processingClaimId, null);
+    assert.equal(conversation.status, "waiting_human");
+    assert.equal(event.processingStatus, "processed");
+    assert.equal(await repository.finalizeHandoffDelivery({
+      connectionId, eventId, eventClaimId: "stale", conversationId: ingested.conversationId,
+      claimId: conversationClaim.claimId, deliveryId: handoff.deliveryId, now: terminalAt,
+    }), false);
+  });
+});
+
+test("human delivery is monotonic and retry-by-ID rebuilds only immutable owner-scoped stored content", async () => {
+  await withDatabase(async (db) => {
+    const connectionId = "88888888-8888-4888-8888-888888888888";
+    await db.insert(platformConnections).values(connection(connectionId, "owner@example.com"));
+    await db.insert(supportConversations).values({
+      id: "conversation-human-retry", ownerEmail: "owner@example.com", platformConnectionId: connectionId,
+      platform: "line", customerLookupKey: "human-retry",
+      encryptedCustomerExternalId: encryptExternalId("U-stored", SETTINGS_ENCRYPTION_KEY),
+      status: "human_active", createdAt: NOW, updatedAt: NOW,
+    });
+    const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });
+    const prepared = await repository.prepareHumanMessage(
+      "owner@example.com",
+      "conversation-human-retry",
+      { text: "Stored reply", idempotencyKey: "browser-key" },
+      NOW,
+    );
+    assert.equal(await repository.markHumanMessageDelivery(
+      "owner@example.com", prepared.id, "sent", null, new Date(NOW.getTime() + 1_000),
+    ).then((message) => message.deliveryStatus), "sent");
+    assert.equal(await repository.markHumanMessageDelivery(
+      "owner@example.com", prepared.id, "failed", "line_push_transport", new Date(NOW.getTime() + 2_000),
+    ).then((message) => message.deliveryStatus), "sent");
+
+    await db.update(supportMessages).set({
+      deliveryStatus: "failed", sentAt: null, failedAt: new Date(NOW.getTime() + 3_000),
+      safeErrorCode: "line_push_4xx",
+    }).where(eq(supportMessages.id, prepared.id));
+    const retry = await repository.prepareHumanMessageRetry("owner@example.com", prepared.id, LATER);
+    assert.equal(retry.retryKey, prepared.id);
+    assert.equal(retry.canonicalBody, '{"to":"U-stored","messages":[{"type":"text","text":"Stored reply"}]}');
+    assert.equal(await repository.prepareHumanMessageRetry("other@example.com", prepared.id, LATER), null);
+    assert.equal(JSON.stringify(retry).includes("browser-key"), false);
   });
 });
 

@@ -208,6 +208,53 @@ test("the durable orchestration exposes one provider attempt per step instead of
   assert.match(source, /for \(let providerAttempt = 0; providerAttempt < 3; providerAttempt \+= 1\)/);
 });
 
+test("handoff acknowledgement retains workflow fences through delivery and finalizes them repository-side once", async () => {
+  const eventStore = claimedEventStore();
+  const calls = [];
+  const workflow = createLineMessageWorkflow({
+    eventStore,
+    processingService: {
+      acquireClaim: async () => ({ acquired: true, claimId: "conversation-claim", windowStart: START }),
+      renewClaim: async () => true,
+      buildTurn: async () => ({ inboundMessageId: "message-1", customerTexts: ["human"] }),
+      decideAndPersist: async () => ({
+        status: "pending_delivery", deliveryId: "handoff-delivery", handoffAcknowledgement: true,
+      }),
+      deliver: async () => ({ status: "sent" }),
+      finalizeHandoff: async (input) => { calls.push(input); return true; },
+      releaseClaim: async () => {}, findFollowUp: async () => null,
+    },
+    sleepImpl: async () => {},
+    now: () => START,
+  });
+
+  assert.deepEqual(await workflow(IDS), { status: "sent" });
+  assert.deepEqual(calls, [{
+    deliveryId: "handoff-delivery", eventId: "event-1", eventClaimId: "event-claim",
+    connectionId: "connection-1", conversationId: "conversation-1",
+    conversationClaimId: "conversation-claim", now: START,
+  }]);
+  assert.equal(eventStore.completed.length, 0);
+});
+
+test("a nonterminal authoritative delivery status does not complete the workflow event", async () => {
+  const eventStore = claimedEventStore();
+  const workflow = createLineMessageWorkflow({
+    eventStore,
+    processingService: {
+      acquireClaim: async () => ({ acquired: true, claimId: "conversation-claim", windowStart: START }),
+      buildTurn: async () => ({ inboundMessageId: "message-1", customerTexts: ["first"] }),
+      decideAndPersist: async () => ({ status: "pending_delivery", deliveryId: "delivery-1" }),
+      deliver: async () => ({ status: "sending" }),
+      releaseClaim: async () => {}, findFollowUp: async () => null,
+    },
+    sleepImpl: async () => {}, now: () => START,
+  });
+
+  await assert.rejects(() => workflow(IDS), /terminal state/);
+  assert.equal(eventStore.completed.length, 0);
+});
+
 function claimedEventStore() {
   return {
     completed: [], released: [], renewed: [],

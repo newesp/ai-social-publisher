@@ -88,6 +88,18 @@ export function createSupportProcessingService({ repository, decisionService, de
       return repository.resolveLineEventAfterConversationLoss(input);
     },
 
+    async finalizeHandoff(input) {
+      return repository.finalizeHandoffDelivery({
+        deliveryId: input.deliveryId,
+        eventId: input.eventId,
+        eventClaimId: input.eventClaimId,
+        connectionId: input.connectionId,
+        conversationId: input.conversationId,
+        claimId: input.conversationClaimId,
+        now: input.now,
+      });
+    },
+
     async persistHandoff(input) {
       return persistHandoff(repository, input, input.reasonCode);
     },
@@ -112,6 +124,13 @@ async function persistHandoff(repository, input, reasonCode) {
     reasonCode,
     now: input.now,
   });
+  if (persisted?.deliveryId) {
+    return {
+      status: "pending_delivery",
+      deliveryId: persisted.deliveryId,
+      handoffAcknowledgement: true,
+    };
+  }
   return {
     status: "waiting_human", handoffReasonCode: reasonCode,
     ...(persisted?.eventCompleted === true ? { eventCompleted: true } : {}),

@@ -63,3 +63,20 @@ test("inbox fetches every active pending transition outside the paginated conver
   assert.match(inbox, /globalTransitions/);
   assert.match(undo, /transitions/);
 });
+
+test("human delivery UI keeps a stable draft key through failure and exposes pending, sent, failed, and retry states", async () => {
+  const [inbox, thread] = await Promise.all([
+    readFile(new URL("../src/components/support/SupportInbox.js", import.meta.url), "utf8"),
+    readFile(new URL("../src/components/support/ConversationThread.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(inbox, /retryHumanMessage/);
+  assert.match(inbox, /\/api\/support\/messages\//);
+  assert.match(thread, /idempotencyKeyRef/);
+  assert.match(thread, /deliveryStatus/);
+  assert.match(thread, /pending/);
+  assert.match(thread, /sent/);
+  assert.match(thread, /failed/);
+  assert.match(thread, /Retry/);
+  assert.match(thread, /setDraft\(""\)/);
+  assert.match(thread, /catch/);
+});
