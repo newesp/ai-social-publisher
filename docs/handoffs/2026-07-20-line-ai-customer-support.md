@@ -44,39 +44,48 @@ task marked complete.
 - Task 7: identifier-only durable provider steps, three-second batching,
   jointly fenced terminal writes, immutable Push delivery, safe handoff, and
   durable follow-up scheduling.
+- Task 8: owner-scoped safe inbox list/detail/read APIs, responsive queue,
+  retained-message thread, details drawer, bounded visible-tab polling, and
+  a safe navigation attention count.
 
 Tasks 1–6 passed their recorded independent review gates. Task 7 passed the
 user-authorized controller recovery acceptance gate after three earlier broad
 review/fix cycles remained non-compliant. Commit ranges and known limitations
 are recorded in `.superpowers/sdd/progress.md`.
 
-## Current Gate: Task 7 Complete — Stop Requested
+## Current Gate: Task 8 Complete — Stop Requested
 
-Task 7 is complete. Do not begin Task 8 until the user gives a new explicit
+Task 8 is complete. Do not begin Task 9 until the user gives a new explicit
 instruction.
 
-- Recovery commit: `ad499a0 fix: centralize LINE support batch fencing`
-- Report: `.superpowers/sdd/line-support-task-7-report.md`
-- Recovery RED: 33 passed, 8 expected failures
-- Recovery GREEN: 41/41 passed
-- Complete Task 7 focused evidence: 57/57 passed
-- Full suite evidence: `npm.cmd test` — 427/427 passed
-- Production build: passed with command-scoped disposable values;
-  `workflows build complete (4 steps, 1 workflow)`
-- Diff/secret gate: clean; no Task 8 files changed
+- Task 8 commits: `5f48cc9 feat: add LINE support inbox`; `e1de767 fix:
+  complete support inbox states`
+- Report: `.superpowers/sdd/task-8-report.md`
+- Independent review and one re-review: both approved; re-review retained only
+  Minor notes on pre-pagination N+1 summary queries and source/mock-heavy
+  regression tests.
+- Final full suite evidence: `npm.cmd test` — 435/435 passed.
+- Final production build: passed with command-scoped disposable values;
+  `workflows build complete (4 steps, 1 workflow)` and rendered `/support`
+  plus its three inbox endpoints.
+- Diff gate: `git diff --check 6188ced..e1de767` passed. The final Task 8
+  code-and-handoff secret/PII diff scan found no matches.
+- Browser layout verification remains an environment limitation: the local
+  server exited before listening on `localhost:3000`, so desktop/mobile visual
+  rendering could not be exercised. Source layout guards use breakpoint grid
+  columns with `minWidth: 0` and bounded pane overflow.
 - No live LINE, LLM, remote database, deployment, credential, or migration
-  action was performed
+  action was performed.
 
 First action in the next session:
 
 1. Read this handoff and `.superpowers/sdd/progress.md`.
-2. Confirm Task 7 remains complete at or after `ad499a0`; do not repeat its
+2. Confirm Task 8 remains complete at or after `e1de767`; do not repeat its
    implementation or review cycles.
-3. Start Task 8 only after a new explicit user instruction.
+3. Start Task 9 only after a new explicit user instruction.
 
 ## Remaining Tasks
 
-- Task 8: owner-scoped support inbox APIs and responsive read UI.
 - Task 9: human Push replies, takeover, ten-second return/resolve transitions,
   global undo, refresh/navigation recovery, and stale-state fencing.
 - Task 10: retention cleanup, safe observability, runbook/README, local
