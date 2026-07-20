@@ -58,3 +58,38 @@ DONE. The local/mock-focused behavior, full test suite, and production build pas
 ## Commit
 
 `4a38ddc feat: add recoverable human support actions`; the subsequent commit records the build-boundary fix.
+
+## Review fix wave: refresh reconciliation and workflow-start compensation
+
+### Fixes
+
+- Inbox summaries now carry only safe pending-transition metadata (transition ID, action, effective time) for the authenticated owner's conversations. `SupportInbox` reconciles its global undo notice from those summaries after initial load, polling, and refresh, so a pending transition remains undoable after reload and after changing the selected conversation.
+- A transition-start failure now calls a server-side exact-transition recovery method. It delegates to the repository's owner-, conversation-, transition-ID-, and optimistic-version-fenced undo mutation; the browser never supplies a replacement state. The route returns a bounded `503` after attempted recovery instead of stranding AI in a pending state.
+
+### TDD evidence
+
+1. RED: `node --test tests/support-human-actions.test.js tests/support-inbox-ui.test.js` exited `1` with the expected missing workflow-failure compensation and missing global reconciliation assertions.
+2. GREEN: `node --test tests/support-human-actions.test.js tests/support-inbox-ui.test.js tests/support-transition-workflow.test.js` exited `0`, `12/12` passing.
+
+### Verification
+
+- `npm.cmd test` — PASS, `443/443`.
+- `npm.cmd run build` with disposable process-scoped runtime values — PASS; Workflow build reported `4 steps, 1 workflow` and rendered the transition/undo routes.
+- `git diff --check` — PASS.
+
+### Files amended
+
+- `src/components/support/SupportInbox.js`
+- `src/lib/support/support-repository.js`
+- `src/lib/support/support-store.js`
+- `src/lib/support/routes/support-inbox-route-handlers.js`
+- `src/lib/support/routes/support-human-action-route-handlers.js`
+- `tests/support-human-actions.test.js`
+- `tests/support-inbox-ui.test.js`
+- `tests/support-inbox-routes.test.js`
+
+### Self-review
+
+- Pending transition data in list responses is limited to the existing safe customer label and transition metadata; no owner, external recipient, credential, or provider data was added.
+- Reconciliation derives the undo target from server state, not the selected thread or browser-supplied state.
+- Recovery reuses the exact transition fence and is harmless if a competing commit, inbound cancellation, or undo has already made the transition stale.

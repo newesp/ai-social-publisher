@@ -346,6 +346,11 @@ export function createSupportStore({
       const result = await repository.undoSupportTransition(requireOwner(ownerEmail), requireText(id, "Conversation ID"), requireText(transitionId, "Transition ID"), now());
       return result ? toActionConversation(result) : null;
     },
+
+    async recoverTransitionStartFailure(ownerEmail, id, transitionId) {
+      const result = await repository.undoSupportTransition(requireOwner(ownerEmail), requireText(id, "Conversation ID"), requireText(transitionId, "Transition ID"), now());
+      return result ? toActionConversation(result) : null;
+    },
   };
 }
 
@@ -508,6 +513,7 @@ function toInboxSummary(record) {
     id: record.id, customerLabel: "Customer", status: record.status, unreadCount: record.unreadCount,
     handoffReason: record.handoffReason, lastMessagePreview: record.lastMessagePreview, deliveryFailed: record.deliveryFailed === true,
     lastInboundAt: record.lastInboundAt, lastOutboundAt: record.lastOutboundAt, updatedAt: record.updatedAt,
+    pendingTransition: record.pendingTransition ? { id: record.pendingTransition.id, action: record.pendingTransition.action, effectiveAt: record.pendingTransition.effectiveAt } : null,
   };
 }
 

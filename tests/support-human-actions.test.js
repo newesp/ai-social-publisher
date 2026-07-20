@@ -47,6 +47,28 @@ test("transition requests and exact undo use server state only and stale undo is
   ]);
 });
 
+test("a workflow-start failure compensates only the exact server-created transition", async () => {
+  const calls = [];
+  const handlers = createSupportHumanActionRouteHandlers({
+    requireOwner: async () => "owner@example.com",
+    requireSameOrigin: () => calls.push(["origin"]),
+    startTransition: async () => { throw new Error("workflow unavailable"); },
+    getStore: async () => ({
+      async requestTransition(owner, id, action, expectedVersion) {
+        calls.push(["request", owner, id, action, expectedVersion]);
+        return { id: "transition-1", conversationId: id, action, effectiveAt: new Date("2026-07-20T00:00:10.000Z") };
+      },
+      async recoverTransitionStartFailure(owner, id, transitionId) { calls.push(["recover", owner, id, transitionId]); return { id, status: "human_active", version: 5 }; },
+    }),
+  });
+  const request = new Request("http://localhost", { method: "POST", headers: { origin: "http://localhost", "content-type": "application/json" }, body: JSON.stringify({ action: "resolve", expectedVersion: 3 }) });
+  await assert.rejects(() => handlers.requestTransition(request, "conversation-1"), (error) => error.status === 503);
+  assert.deepEqual(calls, [
+    ["origin"], ["request", "owner@example.com", "conversation-1", "resolve", 3],
+    ["recover", "owner@example.com", "conversation-1", "transition-1"],
+  ]);
+});
+
 test("another owner cannot take over, send, request, or undo a conversation", async () => {
   const handlers = createSupportHumanActionRouteHandlers({
     requireOwner: async () => "owner@example.com",

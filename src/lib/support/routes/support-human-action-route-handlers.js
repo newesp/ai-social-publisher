@@ -23,7 +23,12 @@ export function createSupportHumanActionRouteHandlers({
       if (!ACTIONS.has(body?.action)) throw routeError("Support transition action is invalid.", 400);
       const transition = await (await getStore()).requestTransition(owner, requiredId(id), body.action, requiredVersion(body));
       if (!transition) return notFound(respond);
-      await startTransition({ transitionId: transition.id, conversationId: transition.conversationId });
+      try {
+        await startTransition({ transitionId: transition.id, conversationId: transition.conversationId });
+      } catch {
+        await (await getStore()).recoverTransitionStartFailure(owner, transition.conversationId, transition.id);
+        throw routeError("Support transition could not be scheduled.", 503);
+      }
       return respond({ transition: safeTransition(transition) });
     },
     async undoTransition(request, id, transitionId) {

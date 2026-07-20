@@ -52,6 +52,7 @@ export function SupportInbox() {
       if (!response.ok || !Array.isArray(data.conversations)) throw new Error("list");
       hasSummaries.current = true;
       setConversations(data.conversations);
+      setGlobalTransition(reconcileGlobalTransition(data.conversations));
       setListState("ready");
       setRecoveryState((current) => current === "reconnecting" || current === "recovery_failed" ? "recovered" : "idle");
       if (selectedId) await loadDetail(selectedId);
@@ -122,3 +123,9 @@ export function SupportInbox() {
 }
 
 async function safeJson(response) { try { return await response.json(); } catch { return {}; } }
+
+function reconcileGlobalTransition(conversations) {
+  const pending = Array.isArray(conversations) ? conversations.filter((conversation) => conversation?.pendingTransition?.id && conversation?.id) : [];
+  const selected = pending.sort((left, right) => Date.parse(left.pendingTransition.effectiveAt) - Date.parse(right.pendingTransition.effectiveAt))[0];
+  return selected ? { ...selected.pendingTransition, conversationId: selected.id, customerLabel: selected.customerLabel } : null;
+}

@@ -56,6 +56,7 @@ function toSummary(value) {
     lastInboundAt: safeDate(value?.lastInboundAt),
     lastOutboundAt: safeDate(value?.lastOutboundAt),
     updatedAt: safeDate(value?.updatedAt),
+    pendingTransition: value?.pendingTransition ? { id: safeText(value.pendingTransition.id), action: safeText(value.pendingTransition.action), effectiveAt: safeDate(value.pendingTransition.effectiveAt) } : null,
   };
 }
 

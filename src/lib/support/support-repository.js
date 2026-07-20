@@ -179,10 +179,11 @@ export function createSupportRepository(db = createDbClient(), {
         ...(status ? [eq(supportConversations.status, status)] : []),
       ));
       const summaries = await Promise.all(conversations.map(async (conversation) => {
-        const [lastMessage] = await db.select({ text: supportMessages.textContent }).from(supportMessages)
-          .where(eq(supportMessages.conversationId, conversation.id)).orderBy(desc(supportMessages.createdAt)).limit(1);
-        const [delivery] = await db.select({ id: supportOutboundDeliveries.id }).from(supportOutboundDeliveries)
-          .where(and(eq(supportOutboundDeliveries.conversationId, conversation.id), eq(supportOutboundDeliveries.deliveryStatus, "failed"))).limit(1);
+        const [[lastMessage], [delivery], [transition]] = await Promise.all([
+          db.select({ text: supportMessages.textContent }).from(supportMessages).where(eq(supportMessages.conversationId, conversation.id)).orderBy(desc(supportMessages.createdAt)).limit(1),
+          db.select({ id: supportOutboundDeliveries.id }).from(supportOutboundDeliveries).where(and(eq(supportOutboundDeliveries.conversationId, conversation.id), eq(supportOutboundDeliveries.deliveryStatus, "failed"))).limit(1),
+          conversation.pendingTransitionId ? db.select().from(supportConversationTransitions).where(and(eq(supportConversationTransitions.id, conversation.pendingTransitionId), eq(supportConversationTransitions.conversationId, conversation.id), eq(supportConversationTransitions.requestedByOwnerEmail, owner))).limit(1) : [],
+        ]);
         return {
           id: conversation.id,
           customerLabel: "Customer",
@@ -194,6 +195,7 @@ export function createSupportRepository(db = createDbClient(), {
           lastInboundAt: conversation.lastInboundAt,
           lastOutboundAt: conversation.lastOutboundAt,
           updatedAt: conversation.updatedAt,
+          pendingTransition: transition ? { id: transition.id, action: transition.requestedAction, effectiveAt: transition.effectiveAt } : null,
         };
       }));
       return summaries.sort((left, right) => inboxPriority(right) - inboxPriority(left)

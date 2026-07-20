@@ -79,7 +79,7 @@ test("list returns a safe attention total independent of the paginated summaries
     conversations: [{
       id: "conversation-1", customerLabel: "Customer", status: "", unreadCount: 0,
       handoffReason: null, lastMessagePreview: null, deliveryFailed: false,
-      lastInboundAt: null, lastOutboundAt: null, updatedAt: null,
+      lastInboundAt: null, lastOutboundAt: null, updatedAt: null, pendingTransition: null,
     }],
     nextCursor: "next-page",
     attentionCount: 37,

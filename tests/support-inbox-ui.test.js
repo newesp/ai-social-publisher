@@ -43,3 +43,13 @@ test("composer supports server-confirmed human Push replies and global undo rema
   assert.match(inbox, /GlobalTransitionUndo/);
   assert.match(undo, /Undo/);
 });
+
+test("inbox reconstructs the global undo from safe pending transition summaries after refresh", async () => {
+  const [inbox, routeHandler] = await Promise.all([
+    readFile(new URL("../src/components/support/SupportInbox.js", import.meta.url), "utf8"),
+    readFile(new URL("../src/lib/support/routes/support-inbox-route-handlers.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(inbox, /reconcileGlobalTransition/);
+  assert.match(inbox, /pendingTransition/);
+  assert.match(routeHandler, /pendingTransition/);
+});
