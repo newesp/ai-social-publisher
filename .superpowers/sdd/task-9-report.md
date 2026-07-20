@@ -93,3 +93,39 @@ DONE. The local/mock-focused behavior, full test suite, and production build pas
 - Pending transition data in list responses is limited to the existing safe customer label and transition metadata; no owner, external recipient, credential, or provider data was added.
 - Reconciliation derives the undo target from server state, not the selected thread or browser-supplied state.
 - Recovery reuses the exact transition fence and is harmless if a competing commit, inbound cancellation, or undo has already made the transition stale.
+
+## Authorized recovery: owner-global active pending transitions
+
+### Implementation
+
+- Added `GET /api/support/conversations/active-pending-transitions`, independent of inbox cursor/page slicing. It returns every active pending transition for only the authenticated owner.
+- The response is restricted to transition ID, conversation ID, action, effective time, and the existing safe `Customer` label.
+- `SupportInbox` fetches this collection during initial load, refresh, and visible-tab polling. `GlobalTransitionUndo` now renders and independently undoes every active transition using its existing path IDs.
+
+### TDD evidence
+
+1. RED: `node --test tests/support-inbox-routes.test.js tests/support-inbox-ui.test.js tests/support-human-actions.test.js tests/support-transition-workflow.test.js` exited `1`: the active-pending handler was absent and the inbox had no collection endpoint/reconciliation.
+2. GREEN: the same command exited `0`, `18/18` passing.
+
+### Verification
+
+- `npm.cmd test` — PASS, `445/445`.
+- `npm.cmd run build` with disposable process-scoped runtime values — PASS; `4 steps, 1 workflow`, including `/api/support/conversations/active-pending-transitions`.
+- `git diff --check` — PASS.
+
+### Files amended
+
+- `src/app/api/support/conversations/active-pending-transitions/route.js`
+- `src/components/support/GlobalTransitionUndo.js`
+- `src/components/support/SupportInbox.js`
+- `src/lib/support/support-repository.js`
+- `src/lib/support/support-store.js`
+- `src/lib/support/routes/support-inbox-route-handlers.js`
+- `tests/support-inbox-routes.test.js`
+- `tests/support-inbox-ui.test.js`
+
+### Self-review and concerns
+
+- The collection is owner-filtered before transition selection and never exposes identifiers outside the approved safe browser contract.
+- It queries all active pending transitions rather than relying on the 30-item conversation page; concurrent transitions are retained, deduplicated, and individually undoable.
+- No concerns remain. No live external action was performed.

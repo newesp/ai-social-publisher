@@ -298,6 +298,14 @@ export function createSupportStore({
       return { conversations, nextCursor: next ? encodeInboxCursor(next) : null, attentionCount };
     },
 
+    async listActivePendingTransitions(ownerEmail) {
+      const transitions = await repository.listActivePendingSupportTransitions(requireOwner(ownerEmail));
+      return Array.isArray(transitions) ? transitions.map((transition) => ({
+        id: transition.id, conversationId: transition.conversationId, action: transition.action,
+        effectiveAt: transition.effectiveAt, customerLabel: "Customer",
+      })) : [];
+    },
+
     async getConversation(ownerEmail, id) {
       const record = await repository.getInboxConversation(requireOwner(ownerEmail), requireText(id, "Conversation ID"));
       return record ? toInboxConversation(record) : null;

@@ -25,6 +25,13 @@ export function createSupportInboxRouteHandlers({
       });
     },
 
+    async listActivePendingTransitions() {
+      const owner = await normalizedOwner(requireOwner);
+      const supportStore = await getStore();
+      const transitions = await supportStore.listActivePendingTransitions(owner);
+      return respond({ transitions: Array.isArray(transitions) ? transitions.map(toPendingTransition) : [] });
+    },
+
     async getConversation(_request, id) {
       const owner = await normalizedOwner(requireOwner);
       const supportStore = await getStore();
@@ -84,6 +91,8 @@ function toConversation(value) {
     } : null,
   };
 }
+
+function toPendingTransition(value) { return { id: safeText(value?.id), conversationId: safeText(value?.conversationId), action: safeText(value?.action), effectiveAt: safeDate(value?.effectiveAt), customerLabel: safeText(value?.customerLabel) || "Customer" }; }
 
 function safeText(value) { return typeof value === "string" ? value.slice(0, 4_000) : ""; }
 function nullableText(value) { const text = safeText(value); return text || null; }

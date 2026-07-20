@@ -18,8 +18,8 @@ export function SupportInbox() {
   const [listState, setListState] = useState("loading");
   const [detailState, setDetailState] = useState("idle");
   const [recoveryState, setRecoveryState] = useState("idle");
-  const [globalTransition, setGlobalTransition] = useState(null);
-  const [undoingTransition, setUndoingTransition] = useState(false);
+  const [globalTransitions, setGlobalTransitions] = useState([]);
+  const [undoingTransition, setUndoingTransition] = useState(null);
   const listAbort = useRef(null);
   const detailAbort = useRef(null);
   const hasSummaries = useRef(false);
@@ -41,6 +41,17 @@ export function SupportInbox() {
     }
   }, []);
 
+  const loadActivePendingTransitions = useCallback(async (signal) => {
+    try {
+      const response = await fetch("/api/support/conversations/active-pending-transitions", { signal });
+      const data = await safeJson(response);
+      if (!response.ok || !Array.isArray(data.transitions)) throw new Error("pending transitions");
+      setGlobalTransitions(data.transitions);
+    } catch (error) {
+      if (error.name !== "AbortError") setGlobalTransitions([]);
+    }
+  }, []);
+
   const loadList = useCallback(async () => {
     listAbort.current?.abort();
     const controller = new AbortController();
@@ -52,7 +63,7 @@ export function SupportInbox() {
       if (!response.ok || !Array.isArray(data.conversations)) throw new Error("list");
       hasSummaries.current = true;
       setConversations(data.conversations);
-      setGlobalTransition(reconcileGlobalTransition(data.conversations));
+      await loadActivePendingTransitions(controller.signal);
       setListState("ready");
       setRecoveryState((current) => current === "reconnecting" || current === "recovery_failed" ? "recovered" : "idle");
       if (selectedId) await loadDetail(selectedId);
@@ -62,7 +73,7 @@ export function SupportInbox() {
         setRecoveryState((current) => current === "reconnecting" ? "recovery_failed" : current);
       }
     }
-  }, [loadDetail, selectedId]);
+  }, [loadActivePendingTransitions, loadDetail, selectedId]);
 
   useEffect(() => { loadList(); }, [loadList]);
   useEffect(() => {
@@ -103,29 +114,31 @@ export function SupportInbox() {
     if (!selected) return;
     const response = await fetch(`/api/support/conversations/${encodeURIComponent(selected.id)}/transitions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, expectedVersion: selected.version }) });
     const data = await safeJson(response);
-    if (response.ok && data.transition) setGlobalTransition({ ...data.transition, customerLabel: selected.customerLabel });
+    if (response.ok && data.transition) setGlobalTransitions((current) => reconcileGlobalTransitions([...current, { ...data.transition, customerLabel: selected.customerLabel }]));
     await loadDetail(selected.id); await loadList();
   }, [loadDetail, loadList, selected]);
-  const undoTransition = useCallback(async () => {
-    if (!globalTransition) return;
-    setUndoingTransition(true);
+  const undoTransition = useCallback(async (transition) => {
+    if (!transition) return;
+    setUndoingTransition(transition.id);
     try {
-      const response = await fetch(`/api/support/conversations/${encodeURIComponent(globalTransition.conversationId)}/transitions/${encodeURIComponent(globalTransition.id)}/undo`, { method: "POST" });
-      if (response.ok || response.status === 409) setGlobalTransition(null);
+      const response = await fetch(`/api/support/conversations/${encodeURIComponent(transition.conversationId)}/transitions/${encodeURIComponent(transition.id)}/undo`, { method: "POST" });
+      if (response.ok || response.status === 409) setGlobalTransitions((current) => current.filter((item) => item.id !== transition.id));
       await loadList();
-      if (selectedId === globalTransition.conversationId) await loadDetail(selectedId);
-    } finally { setUndoingTransition(false); }
-  }, [globalTransition, loadDetail, loadList, selectedId]);
+      if (selectedId === transition.conversationId) await loadDetail(selectedId);
+    } finally { setUndoingTransition(null); }
+  }, [loadDetail, loadList, selectedId]);
   const showList = !mobile || !selectedId;
   const showThread = !mobile || Boolean(selectedId);
 
-  return <Stack gap="md" style={{ minWidth: 0 }}><Group justify="space-between"><div><Text fw={700} size="xl">Support inbox</Text><Text c="dimmed" size="sm">Polling pauses while this tab is hidden.</Text></div><Button variant="light" onClick={loadList} loading={listState === "loading"}>Refresh</Button></Group><GlobalTransitionUndo transition={globalTransition} onUndo={undoTransition} undoing={undoingTransition} /><SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="md" style={{ minWidth: 0 }}>{showList ? <ConversationList conversations={conversations} selectedId={selectedId} loading={listState === "loading"} state={listState} recoveryState={recoveryState} onSelect={choose} onRefresh={loadList} /> : null}{showThread ? <ConversationThread conversation={selected} loading={detailState === "loading"} error={detailState === "error"} mobile={mobile} onBack={() => { setSelectedId(null); setSelected(null); }} onTakeOver={takeOver} onSendMessage={sendMessage} onTransition={requestTransition} /> : null}{selected ? <ConversationDetailsDrawer conversation={selected} /> : null}</SimpleGrid></Stack>;
+  return <Stack gap="md" style={{ minWidth: 0 }}><Group justify="space-between"><div><Text fw={700} size="xl">Support inbox</Text><Text c="dimmed" size="sm">Polling pauses while this tab is hidden.</Text></div><Button variant="light" onClick={loadList} loading={listState === "loading"}>Refresh</Button></Group><GlobalTransitionUndo transitions={globalTransitions} onUndo={undoTransition} undoingTransitionId={undoingTransition} /><SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="md" style={{ minWidth: 0 }}>{showList ? <ConversationList conversations={conversations} selectedId={selectedId} loading={listState === "loading"} state={listState} recoveryState={recoveryState} onSelect={choose} onRefresh={loadList} /> : null}{showThread ? <ConversationThread conversation={selected} loading={detailState === "loading"} error={detailState === "error"} mobile={mobile} onBack={() => { setSelectedId(null); setSelected(null); }} onTakeOver={takeOver} onSendMessage={sendMessage} onTransition={requestTransition} /> : null}{selected ? <ConversationDetailsDrawer conversation={selected} /> : null}</SimpleGrid></Stack>;
 }
 
 async function safeJson(response) { try { return await response.json(); } catch { return {}; } }
 
-function reconcileGlobalTransition(conversations) {
-  const pending = Array.isArray(conversations) ? conversations.filter((conversation) => conversation?.pendingTransition?.id && conversation?.id) : [];
-  const selected = pending.sort((left, right) => Date.parse(left.pendingTransition.effectiveAt) - Date.parse(right.pendingTransition.effectiveAt))[0];
-  return selected ? { ...selected.pendingTransition, conversationId: selected.id, customerLabel: selected.customerLabel } : null;
+function reconcileGlobalTransitions(transitions) {
+  const byId = new Map();
+  for (const transition of Array.isArray(transitions) ? transitions : []) {
+    if (transition?.id && transition?.conversationId && transition?.effectiveAt) byId.set(transition.id, transition);
+  }
+  return [...byId.values()].sort((left, right) => Date.parse(left.effectiveAt) - Date.parse(right.effectiveAt));
 }

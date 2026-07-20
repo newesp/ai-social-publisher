@@ -85,3 +85,19 @@ test("list returns a safe attention total independent of the paginated summaries
     attentionCount: 37,
   });
 });
+
+test("active pending transitions are owner-scoped, unpaginated, and contain only undo-safe fields", async () => {
+  const calls = [];
+  const handlers = createSupportInboxRouteHandlers({
+    requireOwner: async () => "OWNER@EXAMPLE.COM",
+    getStore: async () => ({
+      async listActivePendingTransitions(owner) {
+        calls.push(owner);
+        return [{ id: "transition-31", conversationId: "conversation-31", action: "resolve", effectiveAt: new Date("2026-07-20T00:00:10.000Z"), customerLabel: "Customer", ownerEmail: "owner@example.com", customerExternalId: "U-private", token: "private" }];
+      },
+    }),
+  });
+  const response = await handlers.listActivePendingTransitions(new Request("http://localhost/api/support/conversations/active-pending-transitions"));
+  assert.deepEqual(await response.json(), { transitions: [{ id: "transition-31", conversationId: "conversation-31", action: "resolve", effectiveAt: "2026-07-20T00:00:10.000Z", customerLabel: "Customer" }] });
+  assert.deepEqual(calls, ["owner@example.com"]);
+});

@@ -50,6 +50,16 @@ test("inbox reconstructs the global undo from safe pending transition summaries 
     readFile(new URL("../src/lib/support/routes/support-inbox-route-handlers.js", import.meta.url), "utf8"),
   ]);
   assert.match(inbox, /reconcileGlobalTransition/);
-  assert.match(inbox, /pendingTransition/);
+  assert.match(inbox, /loadActivePendingTransitions/);
   assert.match(routeHandler, /pendingTransition/);
+});
+
+test("inbox fetches every active pending transition outside the paginated conversation page", async () => {
+  const [inbox, undo] = await Promise.all([
+    readFile(new URL("../src/components/support/SupportInbox.js", import.meta.url), "utf8"),
+    readFile(new URL("../src/components/support/GlobalTransitionUndo.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(inbox, /active-pending-transitions/);
+  assert.match(inbox, /globalTransitions/);
+  assert.match(undo, /transitions/);
 });

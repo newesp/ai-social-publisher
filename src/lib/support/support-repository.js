@@ -213,6 +213,26 @@ export function createSupportRepository(db = createDbClient(), {
       return Number.isSafeInteger(count) && count > 0 ? count : 0;
     },
 
+    async listActivePendingSupportTransitions(ownerEmail) {
+      const owner = normalizeOwner(ownerEmail);
+      const conversations = await db.select().from(supportConversations).where(and(
+        eq(supportConversations.ownerEmail, owner),
+        or(eq(supportConversations.status, "return_to_ai_pending"), eq(supportConversations.status, "resolve_pending")),
+      ));
+      const transitions = await Promise.all(conversations.map(async (conversation) => {
+        if (!conversation.pendingTransitionId) return null;
+        const [transition] = await db.select().from(supportConversationTransitions).where(and(
+          eq(supportConversationTransitions.id, conversation.pendingTransitionId),
+          eq(supportConversationTransitions.conversationId, conversation.id),
+          eq(supportConversationTransitions.requestedByOwnerEmail, owner),
+          isNull(supportConversationTransitions.cancelledAt),
+          isNull(supportConversationTransitions.committedAt),
+        )).limit(1);
+        return transition ? { id: transition.id, conversationId: conversation.id, action: transition.requestedAction, effectiveAt: transition.effectiveAt, customerLabel: "Customer" } : null;
+      }));
+      return transitions.filter(Boolean).sort((left, right) => dateValue(left.effectiveAt) - dateValue(right.effectiveAt));
+    },
+
     async getInboxConversation(ownerEmail, conversationId) {
       const owner = normalizeOwner(ownerEmail);
       const id = requiredBoundedText(conversationId, "Conversation ID", 100);
