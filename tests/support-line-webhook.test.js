@@ -5,19 +5,67 @@ import { test } from "node:test";
 import { createLineSupportAdapter } from "../src/lib/support/channel-adapters/line-support-adapter.js";
 import { hashWebhookKey } from "../src/lib/support/identity-crypto.js";
 import { createLineWebhookHandler } from "../src/lib/support/routes/line-webhook-handler.js";
-import { lineMessageWorkflow } from "../src/lib/support/workflows/line-message-workflow.js";
+import {
+  createLineMessageWorkflow,
+} from "../src/lib/support/workflows/line-message-workflow.js";
 
 const CHANNEL_SECRET = "test-channel-secret";
 const CONNECTION_ID = "11111111-1111-4111-8111-111111111111";
 
-test("the workflow shell accepts and returns only safe internal identifiers", async () => {
+test("the workflow prerequisite passes only safe internal identifiers to its processing hook", async () => {
   const input = {
     eventId: "evt-user-1",
     connectionId: CONNECTION_ID,
     conversationId: "conversation-1",
   };
+  const processed = [];
+  const workflow = createLineMessageWorkflow({
+    eventStore: createWorkflowProcessingStore(),
+    processEvent: async (value) => { processed.push(value); },
+  });
 
-  assert.deepEqual(await lineMessageWorkflow(input), input);
+  assert.deepEqual(await workflow(input), { status: "processed" });
+  assert.deepEqual(processed, [input]);
+});
+
+test("duplicate durable workflow runs grant one event-processing right and invoke one downstream hook", async () => {
+  const store = createWorkflowProcessingStore();
+  const processed = [];
+  const workflow = createLineMessageWorkflow({
+    eventStore: store,
+    processEvent: async (input) => { processed.push(input); },
+  });
+  const input = { eventId: "evt-workflow-1", connectionId: CONNECTION_ID, conversationId: "conversation-1" };
+
+  const results = await Promise.all([workflow(input), workflow(input)]);
+
+  assert.deepEqual(results.map(({ status }) => status).sort(), ["duplicate", "processed"]);
+  assert.deepEqual(processed, [input]);
+  assert.equal(store.completed, true);
+});
+
+test("a failed first durable claim releases for retry and a completed event cannot be processed again", async () => {
+  const store = createWorkflowProcessingStore();
+  let failuresRemaining = 1;
+  const processed = [];
+  const workflow = createLineMessageWorkflow({
+    eventStore: store,
+    processEvent: async (input) => {
+      if (failuresRemaining > 0) {
+        failuresRemaining -= 1;
+        throw new Error("safe controlled failure");
+      }
+      processed.push(input);
+    },
+  });
+  const input = { eventId: "evt-workflow-retry", connectionId: CONNECTION_ID, conversationId: "conversation-2" };
+
+  await assert.rejects(workflow(input), /safe controlled failure/);
+  assert.equal(store.completed, false);
+  assert.equal(store.claimed, false);
+  assert.equal((await workflow(input)).status, "processed");
+  assert.equal((await workflow(input)).status, "duplicate");
+  assert.deepEqual(processed, [input]);
 });
 
 test("a valid user message persists once and starts one workflow with internal identifiers only", async () => {
@@ -314,6 +362,33 @@ function createConcurrentStore() {
       locked = true;
       await new Promise((resolve) => setTimeout(resolve, 1));
       return store.ingestUserEvent(input);
+    },
+  };
+}
+
+function createWorkflowProcessingStore() {
+  let claimed = false;
+  let completed = false;
+  let claimId = null;
+  return {
+    get claimed() { return claimed; },
+    get completed() { return completed; },
+    async claimEventProcessing(input) {
+      if (claimed || completed) return { claimed: false };
+      claimed = true;
+      claimId = `processing-${input.eventId}`;
+      return { claimed: true, claimId };
+    },
+    async markEventProcessed({ claimId: suppliedClaimId }) {
+      if (!claimed || suppliedClaimId !== claimId) return false;
+      completed = true;
+      claimed = false;
+      return true;
+    },
+    async releaseEventProcessing({ claimId: suppliedClaimId }) {
+      if (!claimed || suppliedClaimId !== claimId) return false;
+      claimed = false;
+      return true;
     },
   };
 }

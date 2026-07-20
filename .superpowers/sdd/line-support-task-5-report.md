@@ -103,3 +103,34 @@ One additional RED/GREEN cycle covered the case where `startWorkflow` succeeds b
   - Exit 0; 376 tests passed, 0 failed.
 - Fresh production build with the disposable command-scoped demo values
   - Exit 0; build passed.
+
+## User-approved at-least-once dispatch / exactly-once processing amendment
+
+The owner explicitly approved the reliability amendment in `.superpowers/sdd/task-5-brief.md`. The dispatcher retains recoverable at-least-once behavior: an ambiguous successful Workflow start plus a failed completion write can later create another Workflow run. Customer-visible processing is instead fenced in the first durable Workflow step.
+
+### Implementation
+
+- `lineMessageWorkflow` now has a first `"use step"` that atomically claims the persisted LINE webhook event before invoking the next processing hook.
+- The existing event fields represent the execution state after dispatch: `dispatched` → `processing` → `processed`.
+- A processing lease is stored in `processed_at`; an opaque UUID claim token is stored in `safe_error_code`. Completion and release compare that token, so stale runs cannot overwrite a newer claimant.
+- A duplicate run exits `{ status: "duplicate" }` before the hook. A hook failure releases its claim back to `dispatched`; a completed event cannot be claimed again.
+- The production hook is deliberately a no-op. No batching, retrieval, LLM request, LINE action, handoff, or customer-visible persistence was added; Task 7 supplies that downstream hook later.
+
+### RED / GREEN evidence
+
+RED command: `node --test tests/support-line-webhook.test.js tests/support-repository.test.js`
+
+- Exit 1 before the amendment implementation: `createLineMessageWorkflow` export was absent and `repository.claimLineEventProcessing` was not a function.
+
+GREEN command: `node --test tests/support-line-webhook.test.js tests/support-repository.test.js`
+
+- Exit 0; 28 tests passed, 0 failed.
+- Two duplicate durable runs yield one `processed` and one `duplicate` result, with one downstream-hook call.
+- A controlled downstream failure releases the first claim; retry succeeds; a completed event is rejected without another hook call.
+- Repository coverage confirms atomic claim, duplicate fencing, release, retry, and final completion persistence.
+
+### Final verification
+
+- `npm.cmd test`: exit 0; 379 tests passed, 0 failed.
+- `npm.cmd run build` using the documented command-scoped disposable demo values: exit 0.
+- No migration, live LINE/LLM/database call, deployment, batching, retrieval, or delivery action was performed.

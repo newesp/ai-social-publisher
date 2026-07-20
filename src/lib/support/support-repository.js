@@ -27,6 +27,7 @@ const PROVIDER_KEY_BY_NAME = Object.freeze({
   openai: "openAiApiKey",
 });
 const DISPATCH_LEASE_MS = 30_000;
+const EVENT_PROCESSING_LEASE_MS = 30_000;
 
 export function createSupportRepository(db = createDbClient(), {
   encryptionKey,
@@ -240,6 +241,67 @@ export function createSupportRepository(db = createDbClient(), {
         eq(supportWebhookEvents.webhookEventId, dispatch.eventId),
         eq(supportWebhookEvents.processingStatus, "dispatching"),
         eq(supportWebhookEvents.safeErrorCode, dispatch.claimId),
+      )).returning({ id: supportWebhookEvents.id }));
+      return Boolean(released);
+    },
+
+    async claimLineEventProcessing({ connectionId, eventId, now = new Date() }) {
+      const processing = validateDispatchInput({ connectionId, eventId, now });
+      return retryBusyOperation(() => db.transaction(async (tx) => {
+        const claimId = randomUUID();
+        const leaseExpiresAt = new Date(processing.now.getTime() + EVENT_PROCESSING_LEASE_MS);
+        const [claimed] = await tx.update(supportWebhookEvents).set({
+          processingStatus: "processing",
+          safeErrorCode: claimId,
+          processedAt: leaseExpiresAt,
+        }).where(and(
+          eq(supportWebhookEvents.platformConnectionId, processing.connectionId),
+          eq(supportWebhookEvents.webhookEventId, processing.eventId),
+          eq(supportWebhookEvents.sourceType, "user"),
+          or(
+            eq(supportWebhookEvents.processingStatus, "dispatched"),
+            and(
+              eq(supportWebhookEvents.processingStatus, "processing"),
+              lte(supportWebhookEvents.processedAt, processing.now),
+            ),
+          ),
+        )).returning({ id: supportWebhookEvents.id });
+        if (!claimed) return { claimed: false };
+        return {
+          claimed: true,
+          claimId,
+          connectionId: processing.connectionId,
+          eventId: processing.eventId,
+        };
+      }));
+    },
+
+    async markLineEventProcessed({ connectionId, eventId, claimId, now = new Date() }) {
+      const processing = validateDispatchInput({ connectionId, eventId, claimId, now });
+      const [updated] = await retryBusyOperation(() => db.update(supportWebhookEvents).set({
+        processingStatus: "processed",
+        safeErrorCode: null,
+        processedAt: processing.now,
+      }).where(and(
+        eq(supportWebhookEvents.platformConnectionId, processing.connectionId),
+        eq(supportWebhookEvents.webhookEventId, processing.eventId),
+        eq(supportWebhookEvents.processingStatus, "processing"),
+        eq(supportWebhookEvents.safeErrorCode, processing.claimId),
+      )).returning({ id: supportWebhookEvents.id }));
+      return Boolean(updated);
+    },
+
+    async releaseLineEventProcessing({ connectionId, eventId, claimId }) {
+      const processing = validateDispatchInput({ connectionId, eventId, claimId, now: new Date() });
+      const [released] = await retryBusyOperation(() => db.update(supportWebhookEvents).set({
+        processingStatus: "dispatched",
+        safeErrorCode: null,
+        processedAt: null,
+      }).where(and(
+        eq(supportWebhookEvents.platformConnectionId, processing.connectionId),
+        eq(supportWebhookEvents.webhookEventId, processing.eventId),
+        eq(supportWebhookEvents.processingStatus, "processing"),
+        eq(supportWebhookEvents.safeErrorCode, processing.claimId),
       )).returning({ id: supportWebhookEvents.id }));
       return Boolean(released);
     },

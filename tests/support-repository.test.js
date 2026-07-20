@@ -270,6 +270,70 @@ test("workflow dispatch claims are retryable, exclusive, and safely recover afte
   });
 });
 
+test("event-processing claims fence duplicate workflow runs, release failures, and completed events", async () => {
+  await withDatabase(async (db) => {
+    const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });
+    await db.insert(platformConnections).values(
+      connection("11111111-1111-4111-8111-111111111111", "owner@example.com"),
+    );
+    await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com",
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      eventId: "evt-process-1",
+      externalUserId: "private-user-id",
+      replyToken: "private-reply-token",
+      message: { type: "text", text: "private message", safeMetadata: {} },
+      receivedAt: NOW,
+    });
+    const dispatch = await repository.claimLineWorkflowDispatch({
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      eventId: "evt-process-1",
+      now: NOW,
+    });
+    await repository.markLineWorkflowDispatched({
+      connectionId: dispatch.connectionId,
+      eventId: dispatch.eventId,
+      claimId: dispatch.claimId,
+      now: NOW,
+    });
+
+    const first = await repository.claimLineEventProcessing({
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      eventId: "evt-process-1",
+      now: NOW,
+    });
+    assert.equal(first.claimed, true);
+    assert.equal((await repository.claimLineEventProcessing({
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      eventId: "evt-process-1",
+      now: NOW,
+    })).claimed, false);
+    assert.equal(await repository.releaseLineEventProcessing({
+      connectionId: first.connectionId,
+      eventId: first.eventId,
+      claimId: first.claimId,
+    }), true);
+
+    const retry = await repository.claimLineEventProcessing({
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      eventId: "evt-process-1",
+      now: LATER,
+    });
+    assert.equal(retry.claimed, true);
+    assert.equal(await repository.markLineEventProcessed({
+      connectionId: retry.connectionId,
+      eventId: retry.eventId,
+      claimId: retry.claimId,
+      now: LATER,
+    }), true);
+    assert.equal((await repository.claimLineEventProcessing({
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      eventId: "evt-process-1",
+      now: LATER,
+    })).claimed, false);
+  });
+});
+
 test("FAQ mutations require both normalized owner and FAQ id", async () => {
   await withDatabase(async (db) => {
     const repository = createSupportRepository(db);
