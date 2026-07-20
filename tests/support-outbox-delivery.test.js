@@ -145,6 +145,25 @@ test("a stale 401 cannot mutate credential or conversation state after its proce
   }]);
 });
 
+test("a delayed 401 fences credential rejection at response time instead of request time", async () => {
+  const afterResponse = new Date(NOW.getTime() + 31_000);
+  const store = createDeliveryStore({ connectionId: "connection-1", conversationId: "conversation-1" });
+  const rejected = [];
+  const service = createLineOutboundDeliveryService({
+    outboxStore: store,
+    sendPush: async () => ({ status: 401, headers: {} }),
+    onCredentialRejected: async (input) => rejected.push(input),
+    now: () => afterResponse,
+  });
+
+  await service.attemptDelivery({
+    deliveryId: DELIVERY_ID, now: NOW, eventId: "event-1", eventClaimId: "event-claim",
+    connectionId: "connection-1", conversationId: "conversation-1", conversationClaimId: "conversation-claim",
+  });
+
+  assert.equal(rejected[0].now.getTime(), afterResponse.getTime());
+});
+
 function createDeliveryStore({ firstAttemptAt = null, connectionId = undefined, conversationId = undefined } = {}) {
   let claimId = null;
   let attemptCount = 0;

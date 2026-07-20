@@ -6,7 +6,7 @@ import { createSupportProcessingService } from "../src/lib/support/support-proce
 const IDS = Object.freeze({ eventId: "event-1", connectionId: "connection-1", conversationId: "conversation-1" });
 const NOW = new Date("2026-07-20T00:00:00.000Z");
 
-test("buildTurn claims one conversation and includes customer messages through its three-second cutoff", async () => {
+test("buildTurn exposes only internal batch metadata to durable workflow state", async () => {
   const calls = [];
   const service = createSupportProcessingService({
     repository: {
@@ -22,7 +22,7 @@ test("buildTurn claims one conversation and includes customer messages through i
   const turn = await service.buildTurn({ ...IDS, claimId: claim.claimId, cutoff: new Date(NOW.getTime() + 3_000) });
 
   assert.deepEqual(claim, { acquired: true, claimId: "claim-1", windowStart: NOW });
-  assert.deepEqual(turn, { inboundMessageId: "message-1", customerTexts: ["first", "second"] });
+  assert.deepEqual(turn, { inboundMessageId: "message-1" });
   assert.deepEqual(calls, [{ ...IDS, claimId: "claim-1", cutoff: new Date(NOW.getTime() + 3_000) }]);
 });
 
@@ -58,6 +58,7 @@ test("decision persistence loads current protected context and atomically create
         configuration: { brandName: "Acme", assistantName: "Ava", replyTone: "friendly", llmProvider: "openai", llmModel: "gpt-test" },
         settings: { openAiApiKey: "private-key" },
         faqs: [{ id: "faq-1", question: "How do I reset?", answer: "Use reset.", category: "account", keywords: ["reset"], enabled: true, priority: 0 }],
+        customerTexts: ["How do I reset?"],
         messages: [{ senderType: "customer", text: "How do I reset?" }],
         recipient: "U-private",
       }),
@@ -70,7 +71,10 @@ test("decision persistence loads current protected context and atomically create
     } },
   });
 
-  const result = await service.decideAndPersist({ ...IDS, claimId: "claim-1", inboundMessageId: "message-1", customerTexts: ["How do I reset?"], now: NOW });
+  const result = await service.decideAndPersist({
+    ...IDS, claimId: "claim-1", eventClaimId: "event-claim", inboundMessageId: "message-1",
+    cutoff: new Date(NOW.getTime() + 3_000), now: NOW,
+  });
 
   assert.deepEqual(result, { status: "pending_delivery", deliveryId: "delivery-1" });
   assert.equal(persisted.length, 1);
@@ -109,7 +113,7 @@ test("a retryable provider result is surfaced so the workflow owns its three dur
       loadCurrentProcessingContext: async () => ({
         supportState: "enabled", conversationStatus: "ai_active", aiTurnsInLastFiveMinutes: 0,
         configuration: {}, settings: {}, faqs: [{ id: "faq-1", question: "question", answer: "answer", category: "general", keywords: ["question"], enabled: true }],
-        messages: [{ senderType: "customer", text: "question" }], recipient: "U-private",
+        customerTexts: ["question"], messages: [{ senderType: "customer", text: "question" }], recipient: "U-private",
       }),
       persistHandoff: async (input) => handoffs.push(input),
     },
@@ -164,7 +168,7 @@ test("a stale claimed turn cannot finalize after its conversation fence has been
   );
 });
 
-test("delivery uses the immutable outbox record and Push-only transport", async () => {
+test("delivery preserves processing ownership for response-time credential fencing", async () => {
   const calls = [];
   const service = createSupportProcessingService({
     deliveryService: {
@@ -172,6 +176,11 @@ test("delivery uses the immutable outbox record and Push-only transport", async 
     },
   });
 
-  assert.deepEqual(await service.deliver({ deliveryId: "delivery-1", now: NOW }), { status: "sent" });
-  assert.deepEqual(calls, [{ deliveryId: "delivery-1", now: NOW }]);
+  const input = {
+    deliveryId: "delivery-1", eventId: "event-1", eventClaimId: "event-claim",
+    connectionId: "connection-1", conversationId: "conversation-1",
+    conversationClaimId: "conversation-claim", now: NOW,
+  };
+  assert.deepEqual(await service.deliver(input), { status: "sent" });
+  assert.deepEqual(calls, [input]);
 });

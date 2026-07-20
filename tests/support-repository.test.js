@@ -614,13 +614,15 @@ test("processing claims batch current protected data and atomically persist one 
       connectionId, eventId: "evt-turn-1", conversationId: ingested.conversationId, claimId: conversationClaim.claimId,
       cutoff: new Date(NOW.getTime() + 3_000),
     });
-    assert.deepEqual(turn.customerTexts, ["Question", "Second question"]);
+    assert.deepEqual(turn, { inboundMessageId: turn.inboundMessageId });
     const context = await repository.loadCurrentProcessingContext({
       connectionId, eventId: "evt-turn-1", conversationId: ingested.conversationId, claimId: conversationClaim.claimId,
+      cutoff: new Date(NOW.getTime() + 3_000),
     });
     assert.equal(context.settings.googleAiApiKey, "private-ai-key");
     assert.equal(context.recipient, "U-private");
     assert.deepEqual(context.faqs.map(({ id }) => id), ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]);
+    assert.deepEqual(context.customerTexts, ["Question", "Second question"]);
     await db.insert(supportMessages).values({
       id: "old-context-message", conversationId: ingested.conversationId, direction: "inbound", senderType: "customer",
       messageType: "text", textContent: "outside retention", safeMetadataJson: "{}", providerMessageId: null,
@@ -628,7 +630,8 @@ test("processing claims batch current protected data and atomically persist one 
       safeErrorCode: null, processedAt: NOW, createdAt: new Date(NOW.getTime() - (31 * 24 * 60 * 60 * 1_000)),
     });
     const retainedContext = await repository.loadCurrentProcessingContext({
-      connectionId, conversationId: ingested.conversationId, claimId: conversationClaim.claimId, now: NOW,
+      connectionId, conversationId: ingested.conversationId, claimId: conversationClaim.claimId,
+      cutoff: new Date(NOW.getTime() + 3_000), now: NOW,
     });
     assert.equal(retainedContext.messages.some(({ text }) => text === "outside retention"), false);
 
@@ -643,9 +646,13 @@ test("processing claims batch current protected data and atomically persist one 
     assert.ok(persisted.deliveryId);
     assert.equal((await db.select().from(supportAiDecisions)).length, 1);
     assert.equal((await db.select().from(supportOutboundDeliveries)).length, 1);
-    assert.equal(await repository.resolveProcessedCompetingEvents({
-      connectionId, eventId: "evt-turn-1", conversationId: ingested.conversationId, cutoff: new Date(NOW.getTime() + 3_000),
-    }), 1);
+    const [ownedCompanion] = await db.select().from(supportWebhookEvents)
+      .where(eq(supportWebhookEvents.webhookEventId, "evt-turn-2"));
+    assert.equal(ownedCompanion.processingStatus, "processing");
+    assert.equal(await repository.resolveLineEventAfterConversationLoss({
+      connectionId, eventId: "evt-turn-2", conversationId: ingested.conversationId,
+      claimId: competingEventClaim.claimId, now: NOW,
+    }), true);
     assert.equal(await repository.markLineEventProcessed({
       connectionId, eventId: "evt-turn-2", claimId: competingEventClaim.claimId, now: NOW,
     }), false);
@@ -663,6 +670,48 @@ test("processing claims batch current protected data and atomically persist one 
       claimId: conversationClaim.claimId, now: NOW,
     }), false);
     assert.equal(await repository.markLineEventProcessed({ connectionId, eventId: "evt-turn-1", claimId: eventClaim.claimId, now: NOW }), false);
+  });
+});
+
+test("a handoff atomically consumes its batch and resolves dispatched companion events", async () => {
+  await withDatabase(async (db) => {
+    const connectionId = "44444444-4444-4444-8444-444444444444";
+    await db.insert(platformConnections).values(connection(connectionId, "owner@example.com"));
+    const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });
+    const primary = await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com", connectionId, eventId: "evt-handoff-1", externalUserId: "U-private",
+      replyToken: "reply-token", message: { type: "text", text: "Human please", safeMetadata: {} }, receivedAt: NOW,
+    });
+    await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com", connectionId, eventId: "evt-handoff-2", externalUserId: "U-private",
+      replyToken: "reply-token-2", message: { type: "text", text: "Second message", safeMetadata: {} },
+      receivedAt: new Date(NOW.getTime() + 1_000),
+    });
+    for (const eventId of ["evt-handoff-1", "evt-handoff-2"]) {
+      const dispatch = await repository.claimLineWorkflowDispatch({ connectionId, eventId, now: NOW });
+      await repository.markLineWorkflowDispatched({ ...dispatch, now: NOW });
+    }
+    const eventClaim = await repository.claimLineEventProcessing({ connectionId, eventId: "evt-handoff-1", now: NOW });
+    const conversationClaim = await repository.acquireConversationClaim({
+      connectionId, conversationId: primary.conversationId, now: NOW,
+    });
+    const cutoff = new Date(NOW.getTime() + 3_000);
+
+    assert.deepEqual(await repository.persistHandoff({
+      connectionId, eventId: "evt-handoff-1", eventClaimId: eventClaim.claimId,
+      conversationId: primary.conversationId, claimId: conversationClaim.claimId,
+      cutoff, reasonCode: "explicit_human", now: NOW,
+    }), { eventCompleted: true });
+
+    const messages = await db.select().from(supportMessages)
+      .where(eq(supportMessages.conversationId, primary.conversationId));
+    assert.equal(messages.every(({ processedAt }) => processedAt?.getTime() === cutoff.getTime()), true);
+    const events = await db.select().from(supportWebhookEvents)
+      .where(eq(supportWebhookEvents.platformConnectionId, connectionId));
+    assert.deepEqual(events.map(({ processingStatus }) => processingStatus).sort(), ["processed", "processed"]);
+    assert.equal(await repository.findNextUnprocessedEvent({
+      connectionId, conversationId: primary.conversationId,
+    }), null);
   });
 });
 

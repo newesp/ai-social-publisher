@@ -7,7 +7,7 @@ import { readFile } from "node:fs/promises";
 const IDS = Object.freeze({ eventId: "event-1", connectionId: "connection-1", conversationId: "conversation-1" });
 const START = new Date("2026-07-20T00:00:00.000Z");
 
-test("messages inside one three-second workflow window become one AI turn", async () => {
+test("messages inside one three-second workflow window become one AI turn without crossing the durable step boundary", async () => {
   const calls = [];
   const workflow = createLineMessageWorkflow({
     eventStore: claimedEventStore(),
@@ -30,7 +30,14 @@ test("messages inside one three-second workflow window become one AI turn", asyn
 
   assert.deepEqual(result, { status: "sent" });
   assert.deepEqual(calls[0], { name: "build", input: { ...IDS, claimId: "conversation-claim", cutoff: new Date(START.getTime() + 3_000) } });
-  assert.deepEqual(calls[1].input.customerTexts, ["first", "second"]);
+  assert.deepEqual(calls[1], { name: "decide", input: {
+    ...IDS,
+    claimId: "conversation-claim",
+    eventClaimId: "event-claim",
+    cutoff: new Date(START.getTime() + 3_000),
+    inboundMessageId: "message-1",
+    now: START,
+  } });
   assert.deepEqual(calls[2], { name: "deliver", input: {
     deliveryId: "delivery-1", eventId: IDS.eventId, eventClaimId: "event-claim", connectionId: IDS.connectionId,
     conversationId: IDS.conversationId, conversationClaimId: "conversation-claim", now: START,
@@ -129,14 +136,13 @@ test("a remaining unprocessed message starts one durable follow-up after the con
   assert.deepEqual(starts, [{ eventId: "event-2", connectionId: IDS.connectionId, conversationId: IDS.conversationId }]);
 });
 
-test("the winning batch resolves every competing event it consumed before follow-up scheduling", async () => {
-  const resolved = [];
+test("terminal persistence owns batch resolution instead of an unfenced workflow step", async () => {
   const workflow = createLineMessageWorkflow({
     eventStore: claimedEventStore(),
     processingService: {
       acquireClaim: async () => ({ acquired: true, claimId: "conversation-claim", windowStart: START }),
       buildTurn: async () => ({ inboundMessageId: "message-1", customerTexts: ["first", "second"] }),
-      resolveBatchedEvents: async (input) => { resolved.push(input); },
+      resolveBatchedEvents: async () => { throw new Error("must not resolve a persisted batch outside its terminal transaction"); },
       decideAndPersist: async () => ({ status: "pending_delivery", deliveryId: "delivery-1" }),
       deliver: async () => ({ status: "sent" }),
       releaseClaim: async () => {}, findFollowUp: async () => null,
@@ -145,7 +151,6 @@ test("the winning batch resolves every competing event it consumed before follow
   });
 
   assert.deepEqual(await workflow(IDS), { status: "sent" });
-  assert.deepEqual(resolved, [{ ...IDS, cutoff: new Date(START.getTime() + 3_000) }]);
 });
 
 test("an atomically handoff-completed event is not completed a second time by the workflow", async () => {

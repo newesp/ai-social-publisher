@@ -8,12 +8,14 @@ export function createLineOutboundDeliveryService({
   onCredentialRejected = async () => {},
   baseRetryDelayMs = DEFAULT_BASE_RETRY_DELAY_MS,
   maxRetryDelayMs = DEFAULT_MAX_RETRY_DELAY_MS,
+  now: clock = null,
 } = {}) {
   if (!outboxStore || typeof outboxStore.claimDelivery !== "function") {
     throw new Error("An outbound delivery store is required.");
   }
   if (typeof sendPush !== "function") throw new Error("A LINE Push sender is required.");
   if (typeof onCredentialRejected !== "function") throw new Error("Credential rejection handler must be a function.");
+  if (clock != null && typeof clock !== "function") throw new Error("Delivery clock must be a function.");
   validateDelay(baseRetryDelayMs, "Base retry delay");
   validateDelay(maxRetryDelayMs, "Maximum retry delay");
 
@@ -33,12 +35,13 @@ export function createLineOutboundDeliveryService({
           ...(claim.connectionId ? { connectionId: claim.connectionId } : {}),
         });
       } catch (error) {
+        const completedAt = currentAttemptTime(clock, attemptedAt);
         if (error?.retryable === true) {
           return recordRetryable({
             outboxStore,
             claim,
             deliveryId,
-            attemptedAt,
+            attemptedAt: completedAt,
             baseRetryDelayMs,
             maxRetryDelayMs,
             safeErrorCode: "line_push_transport",
@@ -48,19 +51,20 @@ export function createLineOutboundDeliveryService({
           deliveryId,
           claimId: claim.claimId,
           safeErrorCode: "line_push_unclassified_failure",
-          now: attemptedAt,
+          now: completedAt,
         });
         return { status: "failed" };
       }
 
       const status = Number(response?.status);
+      const completedAt = currentAttemptTime(clock, attemptedAt);
       const acceptedRequestId = readHeader(response?.headers, "x-line-accepted-request-id");
       if ((status >= 200 && status < 300) || (status === 409 && acceptedRequestId)) {
         await outboxStore.markDeliverySent({
           deliveryId,
           claimId: claim.claimId,
           acceptedRequestId: acceptedRequestId || null,
-          now: attemptedAt,
+          now: completedAt,
         });
         return { status: "sent", acceptedRequestId: acceptedRequestId || null };
       }
@@ -69,7 +73,7 @@ export function createLineOutboundDeliveryService({
           outboxStore,
           claim,
           deliveryId,
-          attemptedAt,
+          attemptedAt: completedAt,
           baseRetryDelayMs,
           maxRetryDelayMs,
           safeErrorCode: "line_push_5xx",
@@ -79,7 +83,7 @@ export function createLineOutboundDeliveryService({
       if (status === 401 && claim.connectionId) {
         if (eventId && eventClaimId && conversationClaimId && connectionId && conversationId) {
           credentialHandoff = await onCredentialRejected({
-            connectionId, conversationId, eventId, eventClaimId, claimId: conversationClaimId, now: attemptedAt,
+            connectionId, conversationId, eventId, eventClaimId, claimId: conversationClaimId, now: completedAt,
           });
         }
       }
@@ -87,7 +91,7 @@ export function createLineOutboundDeliveryService({
         deliveryId,
         claimId: claim.claimId,
         safeErrorCode: "line_push_4xx",
-        now: attemptedAt,
+        now: completedAt,
       });
       return { status: "failed", ...(credentialHandoff?.eventCompleted === true ? { eventCompleted: true } : {}) };
     },
@@ -125,6 +129,10 @@ function readHeader(headers, name) {
 function validDate(value) {
   if (!(value instanceof Date) || !Number.isFinite(value.getTime())) throw new Error("A valid attempt time is required.");
   return value;
+}
+
+function currentAttemptTime(now, fallback) {
+  return now == null ? fallback : validDate(now());
 }
 
 function requiredId(value) {

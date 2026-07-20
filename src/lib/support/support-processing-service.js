@@ -9,7 +9,8 @@ export function createSupportProcessingService({ repository, decisionService, de
     },
 
     async buildTurn(input) {
-      return repository.buildClaimedTurn(input);
+      const turn = await repository.buildClaimedTurn(input);
+      return turn ? { inboundMessageId: turn.inboundMessageId } : null;
     },
 
     async renewClaim(input) {
@@ -30,7 +31,7 @@ export function createSupportProcessingService({ repository, decisionService, de
       }
 
       const faqs = retrieveFaqs({
-        query: input.customerTexts?.join("\n") ?? "",
+        query: context.customerTexts?.join("\n") ?? "",
         faqs: context.faqs,
       });
       let decision;
@@ -71,8 +72,8 @@ export function createSupportProcessingService({ repository, decisionService, de
       return { status: "pending_delivery", deliveryId: persisted.deliveryId };
     },
 
-    async deliver({ deliveryId, now = new Date() }) {
-      return deliveryService.attemptDelivery({ deliveryId, now });
+    async deliver(input) {
+      return deliveryService.attemptDelivery(input);
     },
 
     async releaseClaim(input) {
@@ -85,10 +86,6 @@ export function createSupportProcessingService({ repository, decisionService, de
 
     async resolveCompetingEvent(input) {
       return repository.resolveLineEventAfterConversationLoss(input);
-    },
-
-    async resolveBatchedEvents(input) {
-      return repository.resolveProcessedCompetingEvents(input);
     },
 
     async persistHandoff(input) {
@@ -111,6 +108,7 @@ async function persistHandoff(repository, input, reasonCode) {
     conversationId: input.conversationId,
     claimId: input.claimId,
     inboundMessageId: input.inboundMessageId,
+    ...(input.cutoff ? { cutoff: input.cutoff } : {}),
     reasonCode,
     now: input.now,
   });

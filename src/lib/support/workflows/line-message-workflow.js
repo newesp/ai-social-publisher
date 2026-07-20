@@ -92,7 +92,7 @@ async function runLineMessageWorkflow({ eventId, connectionId, conversationId },
       await renewFences({ eventStore, processingService, eventId, connectionId, conversationId, eventClaimId: eventClaim.claimId, conversationClaimId: conversationClaim.claimId, now: operationNow });
       outcome = await providerAttemptStep(processingService, {
         eventId, connectionId, conversationId, claimId: conversationClaim.claimId, eventClaimId: eventClaim.claimId,
-        cutoff: batchCutoff, ...turn, now: operationNow,
+        cutoff: batchCutoff, inboundMessageId: turn.inboundMessageId, now: operationNow,
       });
       if (outcome.status !== "retryable_provider") break;
     }
@@ -101,13 +101,11 @@ async function runLineMessageWorkflow({ eventId, connectionId, conversationId },
       await renewFences({ eventStore, processingService, eventId, connectionId, conversationId, eventClaimId: eventClaim.claimId, conversationClaimId: conversationClaim.claimId, now: handoffNow });
       outcome = await persistHandoffStep(processingService, {
         eventId, connectionId, conversationId, claimId: conversationClaim.claimId, eventClaimId: eventClaim.claimId,
-        inboundMessageId: turn.inboundMessageId, reasonCode: "provider_unavailable", now: handoffNow,
+        inboundMessageId: turn.inboundMessageId, cutoff: batchCutoff,
+        reasonCode: "provider_unavailable", now: handoffNow,
       });
     }
     if (outcome.deliveryId) {
-      await resolveBatchedEventsStep(processingService, {
-        eventId, connectionId, conversationId, cutoff: batchCutoff,
-      });
       let delivery;
       do {
         const deliveryNow = await workflowNowStep(now);
@@ -125,14 +123,16 @@ async function runLineMessageWorkflow({ eventId, connectionId, conversationId },
           });
         }
       } while (delivery.status === "retryable" && delivery.retryAt);
+      if (delivery.eventCompleted) return { status: delivery.status };
       const completionNow = await workflowNowStep(now);
       await renewFences({ eventStore, processingService, eventId, connectionId, conversationId, eventClaimId: eventClaim.claimId, conversationClaimId: conversationClaim.claimId, now: completionNow });
-      if (!delivery.eventCompleted) await completeEvent(eventStore, { eventId, connectionId, claimId: eventClaim.claimId, conversationId, conversationClaimId: conversationClaim.claimId, now: completionNow });
+      await completeEvent(eventStore, { eventId, connectionId, claimId: eventClaim.claimId, conversationId, conversationClaimId: conversationClaim.claimId, now: completionNow });
       return { status: delivery.status };
     }
+    if (outcome.eventCompleted) return { status: outcome.status };
     const completionNow = await workflowNowStep(now);
     await renewFences({ eventStore, processingService, eventId, connectionId, conversationId, eventClaimId: eventClaim.claimId, conversationClaimId: conversationClaim.claimId, now: completionNow });
-    if (!outcome.eventCompleted) await completeEvent(eventStore, { eventId, connectionId, claimId: eventClaim.claimId, conversationId, conversationClaimId: conversationClaim.claimId, now: completionNow });
+    await completeEvent(eventStore, { eventId, connectionId, claimId: eventClaim.claimId, conversationId, conversationClaimId: conversationClaim.claimId, now: completionNow });
     return { status: outcome.status };
   } catch (error) {
     await releaseEventStep(eventStore, { eventId, connectionId, claimId: eventClaim.claimId });
@@ -171,6 +171,7 @@ function productionProcessingService(env = process.env) {
       return adapter.pushCanonical({ accessToken, canonicalBody: body, retryKey });
     },
     onCredentialRejected: (input) => repository.handleLineCredentialRejected(input),
+    now: () => new Date(),
   });
   return createSupportProcessingService({
     repository,
@@ -246,7 +247,6 @@ async function acquireConversationClaimStep(processingService, input) { "use ste
 async function resolveCompetingEventStep(processingService, input) { "use step"; const service = currentProcessingService(processingService); return typeof service.resolveCompetingEvent === "function" && service.resolveCompetingEvent(input); }
 async function releaseEventStep(eventStore, input) { "use step"; return currentEventStore(eventStore).releaseEventProcessing(input); }
 async function buildTurnStep(processingService, input) { "use step"; return currentProcessingService(processingService).buildTurn(input); }
-async function resolveBatchedEventsStep(processingService, input) { "use step"; const service = currentProcessingService(processingService); return typeof service.resolveBatchedEvents === "function" && service.resolveBatchedEvents(input); }
 async function providerAttemptStep(processingService, input) { "use step"; return currentProcessingService(processingService).decideAndPersist(input); }
 async function persistHandoffStep(processingService, input) { "use step"; return currentProcessingService(processingService).persistHandoff(input); }
 async function deliverStep(processingService, input) { "use step"; return currentProcessingService(processingService).deliver(input); }
