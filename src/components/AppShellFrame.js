@@ -40,14 +40,24 @@ export function AppShellFrame({ active, children }) {
 
   useEffect(() => {
     let current = true;
-    fetch("/api/support/conversations")
-      .then((response) => response.ok ? response.json() : null)
-      .then((data) => {
-        if (current && Array.isArray(data?.conversations)) {
-          setSupportCount(data.conversations.reduce((total, item) => total + (item.unreadCount || 0) + (item.status === "waiting_human" ? 1 : 0), 0));
+    let controller = null;
+    const refreshSupportCount = async () => {
+      if (document.visibilityState !== "visible") return;
+      controller?.abort();
+      controller = new AbortController();
+      try {
+        const response = await fetch("/api/support/conversations", { signal: controller.signal });
+        const data = response.ok ? await response.json() : null;
+        if (current && Number.isSafeInteger(data?.attentionCount) && data.attentionCount >= 0) {
+          setSupportCount(data.attentionCount);
         }
-      }).catch(() => {});
-    return () => { current = false; };
+      } catch {}
+    };
+    const refreshWhenVisible = () => { if (document.visibilityState === "visible") refreshSupportCount(); };
+    refreshSupportCount();
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    const timer = window.setInterval(refreshWhenVisible, 15000);
+    return () => { current = false; controller?.abort(); document.removeEventListener("visibilitychange", refreshWhenVisible); window.clearInterval(timer); };
   }, []);
 
   return (

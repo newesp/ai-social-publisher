@@ -286,11 +286,14 @@ export function createSupportStore({
     async listConversations(ownerEmail, { status, cursor } = {}) {
       const owner = requireOwner(ownerEmail);
       if (status != null && !INBOX_STATUSES.has(status)) throw badRequest("Conversation status is invalid.");
-      const records = await repository.listInboxConversations(owner, { status });
+      const [records, attentionCount] = await Promise.all([
+        repository.listInboxConversations(owner, { status }),
+        repository.countInboxAttention(owner),
+      ]);
       const start = decodeInboxCursor(cursor, records);
       const conversations = records.slice(start, start + INBOX_PAGE_SIZE).map(toInboxSummary);
       const next = records[start + INBOX_PAGE_SIZE];
-      return { conversations, nextCursor: next ? encodeInboxCursor(next) : null };
+      return { conversations, nextCursor: next ? encodeInboxCursor(next) : null, attentionCount };
     },
 
     async getConversation(ownerEmail, id) {

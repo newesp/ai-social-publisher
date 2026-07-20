@@ -21,3 +21,20 @@ test("support page and navigation expose the responsive inbox without sensitive 
     assert.equal(inbox.includes(forbidden), false);
   }
 });
+
+test("inbox exposes stale and reconnect recovery states while the shell refreshes the safe total", async () => {
+  const [inbox, shell] = await Promise.all([
+    readFile(new URL("../src/components/support/SupportInbox.js", import.meta.url), "utf8"),
+    readFile(new URL("../src/components/AppShellFrame.js", import.meta.url), "utf8"),
+  ]);
+  for (const marker of ["stale", "reconnecting", "recovery", "15000"]) assert.equal(inbox.includes(marker), true);
+  for (const marker of ["attentionCount", "setInterval", "15000"]) assert.equal(shell.includes(marker), true);
+});
+
+test("composer input is enabled only for server-confirmed human handling without adding send behavior", async () => {
+  const source = await readFile(new URL("../src/components/support/ConversationThread.js", import.meta.url), "utf8");
+  assert.match(source, /TextInput[^>]+disabled=\{!composerEnabled\}/);
+  assert.match(source, /Button disabled/);
+  assert.doesNotMatch(source, /fetch\(/);
+  assert.match(source, /<Button disabled>Sending unavailable<\/Button>/);
+});

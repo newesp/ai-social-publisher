@@ -21,6 +21,7 @@ export function createSupportInboxRouteHandlers({
       return respond({
         conversations: Array.isArray(result?.conversations) ? result.conversations.map(toSummary) : [],
         nextCursor: typeof result?.nextCursor === "string" ? result.nextCursor : null,
+        attentionCount: safeCount(result?.attentionCount),
       });
     },
 

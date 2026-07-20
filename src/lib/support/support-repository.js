@@ -202,6 +202,16 @@ export function createSupportRepository(db = createDbClient(), {
         || dateValue(right.updatedAt) - dateValue(left.updatedAt));
     },
 
+    async countInboxAttention(ownerEmail) {
+      const owner = normalizeOwner(ownerEmail);
+      const [result] = await db.select({ count: sql`count(*)` }).from(supportConversations).where(and(
+        eq(supportConversations.ownerEmail, owner),
+        or(eq(supportConversations.status, "waiting_human"), gt(supportConversations.unreadCount, 0)),
+      ));
+      const count = Number(result?.count ?? 0);
+      return Number.isSafeInteger(count) && count > 0 ? count : 0;
+    },
+
     async getInboxConversation(ownerEmail, conversationId) {
       const owner = normalizeOwner(ownerEmail);
       const id = requiredBoundedText(conversationId, "Conversation ID", 100);

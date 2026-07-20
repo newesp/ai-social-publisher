@@ -33,7 +33,7 @@ test("list, detail, and read calls use only the normalized authenticated owner",
   });
 
   const list = await handlers.listConversations(new Request("http://localhost/api/support/conversations?status=waiting_human&cursor=page-2"));
-  assert.deepEqual(await list.json(), { conversations: [], nextCursor: null });
+  assert.deepEqual(await list.json(), { conversations: [], nextCursor: null, attentionCount: 0 });
   await handlers.getConversation(new Request("http://localhost"), "conversation-1");
   const read = await handlers.markConversationRead(new Request("http://localhost", { method: "POST", headers: { origin: "http://localhost" } }), "conversation-1");
 
@@ -62,4 +62,26 @@ test("browser responses exclude customer identifiers, owner email, and provider 
   const body = JSON.stringify({ list: await list.json(), detail: await detail.json() });
 
   for (const forbidden of ["U-line-user", "owner@example.com", "secret", "private"]) assert.equal(body.includes(forbidden), false);
+});
+
+test("list returns a safe attention total independent of the paginated summaries", async () => {
+  const handlers = createSupportInboxRouteHandlers({
+    requireOwner: async () => "owner@example.com",
+    getStore: async () => ({
+      async listConversations() {
+        return { conversations: [{ id: "conversation-1", customerLabel: "Customer" }], nextCursor: "next-page", attentionCount: 37 };
+      },
+    }),
+  });
+
+  const response = await handlers.listConversations(new Request("http://localhost/api/support/conversations"));
+  assert.deepEqual(await response.json(), {
+    conversations: [{
+      id: "conversation-1", customerLabel: "Customer", status: "", unreadCount: 0,
+      handoffReason: null, lastMessagePreview: null, deliveryFailed: false,
+      lastInboundAt: null, lastOutboundAt: null, updatedAt: null,
+    }],
+    nextCursor: "next-page",
+    attentionCount: 37,
+  });
 });
