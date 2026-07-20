@@ -1,6 +1,8 @@
 import { getLLMModel } from "./model-config.js";
 import { filterActivePlatforms } from "../platforms/platform-config.js";
 
+const PROVIDER_TIMEOUT_MS = 15_000;
+
 export async function generatePlatformTargets({
   llmProvider = "google",
   llmModel,
@@ -40,9 +42,10 @@ export function generateText({
   fetchImpl = fetch,
   signal,
 }) {
+  const boundedSignal = signal ?? AbortSignal.timeout(PROVIDER_TIMEOUT_MS);
   return llmProvider === "openai"
-    ? generateWithOpenAI(prompt, llmModel, settings, fetchImpl, systemPrompt, signal)
-    : generateWithGemini(prompt, llmModel, settings, fetchImpl, systemPrompt, signal);
+    ? generateWithOpenAI(prompt, llmModel, settings, fetchImpl, systemPrompt, boundedSignal)
+    : generateWithGemini(prompt, llmModel, settings, fetchImpl, systemPrompt, boundedSignal);
 }
 
 export function buildPlatformPrompt(platform, input) {
@@ -114,7 +117,10 @@ async function generateWithGemini(prompt, llmModel, settings, fetchImpl, systemP
 async function readJsonResponse(response, fallbackMessage) {
   const body = await response.json().catch(async () => ({ raw: await response.text() }));
   if (!response.ok) {
-    throw new Error(body.error?.message ?? body.message ?? fallbackMessage);
+    void body;
+    const error = new Error(fallbackMessage);
+    error.retryable = response.status === 408 || response.status === 429 || response.status >= 500;
+    throw error;
   }
   return body;
 }
@@ -155,6 +161,11 @@ async function requestProvider(providerName, request) {
   try {
     return await request();
   } catch (error) {
-    throw new Error(`${providerName} API request failed: ${error.message}`);
+    const wrapped = new Error(`${providerName} API request failed: ${error.message}`);
+    wrapped.retryable = error?.retryable === true
+      || error?.name === "AbortError"
+      || error?.name === "TimeoutError"
+      || error instanceof TypeError;
+    throw wrapped;
   }
 }

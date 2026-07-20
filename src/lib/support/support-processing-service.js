@@ -46,7 +46,7 @@ export function createSupportProcessingService({ repository, decisionService, de
         if (error?.retryable === true) return { status: "retryable_provider" };
         return persistHandoff(repository, { ...input, now: currentDate(now) }, "invalid_ai_decision");
       }
-      if (!decision || decision.action !== "reply") {
+      if (!decision || !["reply", "clarify"].includes(decision.action)) {
         return persistHandoff(repository, { ...input, now: currentDate(now) }, decision?.handoffReasonCode ?? "invalid_ai_decision");
       }
 

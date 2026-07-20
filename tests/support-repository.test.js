@@ -184,6 +184,94 @@ test("LINE ingress persists encrypted identities atomically and cancels only the
   });
 });
 
+test("human-owned inbound stays human-owned and cannot be replayed after return to AI", async () => {
+  await withDatabase(async (db) => {
+    const connectionId = "11111111-1111-4111-8111-111111111111";
+    const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });
+    await db.insert(platformConnections).values(connection(connectionId, "owner@example.com"));
+    const initial = await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com", connectionId, eventId: "evt-human-initial",
+      externalUserId: "private-user-id", replyToken: "reply-token",
+      message: { type: "text", text: "initial", safeMetadata: {} }, receivedAt: NOW,
+    });
+    await db.update(supportConversations).set({ status: "human_active" })
+      .where(eq(supportConversations.id, initial.conversationId));
+
+    const pending = await repository.requestSupportTransition(
+      "owner@example.com", initial.conversationId, "resolve", 0, NOW, "transition-resolve",
+    );
+    assert.ok(pending);
+    await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com", connectionId, eventId: "evt-during-pending",
+      externalUserId: "private-user-id", replyToken: "reply-token-2",
+      message: { type: "text", text: "human-owned pending", safeMetadata: {} }, receivedAt: LATER,
+    });
+
+    let [conversation] = await db.select().from(supportConversations)
+      .where(eq(supportConversations.id, initial.conversationId));
+    assert.equal(conversation.status, "human_active");
+    assert.equal(conversation.pendingTransitionId, null);
+    let [pendingMessage] = await db.select().from(supportMessages)
+      .where(eq(supportMessages.idempotencyKey, `${connectionId}:evt-during-pending`));
+    assert.equal(pendingMessage.processedAt.toISOString(), LATER.toISOString());
+    let [pendingEvent] = await db.select().from(supportWebhookEvents)
+      .where(eq(supportWebhookEvents.webhookEventId, "evt-during-pending"));
+    assert.equal(pendingEvent.processingStatus, "processed");
+    assert.equal((await repository.claimLineWorkflowDispatch({
+      connectionId, eventId: "evt-during-pending", now: LATER,
+    })).claimed, false);
+
+    await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com", connectionId, eventId: "evt-human-active",
+      externalUserId: "private-user-id", replyToken: "reply-token-3",
+      message: { type: "text", text: "still human-owned", safeMetadata: {} }, receivedAt: LATER,
+    });
+    const [humanMessage] = await db.select().from(supportMessages)
+      .where(eq(supportMessages.idempotencyKey, `${connectionId}:evt-human-active`));
+    assert.ok(humanMessage.processedAt);
+
+    await db.update(supportConversations).set({ status: "resolved" })
+      .where(eq(supportConversations.id, initial.conversationId));
+    await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com", connectionId, eventId: "evt-reopen",
+      externalUserId: "private-user-id", replyToken: "reply-token-4",
+      message: { type: "text", text: "new AI turn", safeMetadata: {} }, receivedAt: LATER,
+    });
+    [conversation] = await db.select().from(supportConversations)
+      .where(eq(supportConversations.id, initial.conversationId));
+    assert.equal(conversation.status, "ai_active");
+    const [reopenedMessage] = await db.select().from(supportMessages)
+      .where(eq(supportMessages.idempotencyKey, `${connectionId}:evt-reopen`));
+    assert.equal(reopenedMessage.processedAt, null);
+  });
+});
+
+test("support transitions require an unfenced human-active conversation", async () => {
+  await withDatabase(async (db) => {
+    const connectionId = "11111111-1111-4111-8111-111111111111";
+    const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });
+    await db.insert(platformConnections).values(connection(connectionId, "owner@example.com"));
+    const ingested = await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com", connectionId, eventId: "evt-transition-matrix",
+      externalUserId: "private-user-id", replyToken: "reply-token",
+      message: { type: "text", text: "question", safeMetadata: {} }, receivedAt: NOW,
+    });
+
+    for (const status of ["ai_active", "waiting_human", "resolved"]) {
+      await db.update(supportConversations).set({ status, pendingTransitionId: null })
+        .where(eq(supportConversations.id, ingested.conversationId));
+      assert.equal(await repository.requestSupportTransition(
+        "owner@example.com", ingested.conversationId, "resolve", 0, NOW, `transition-${status}`,
+      ), null);
+    }
+    await db.update(supportConversations).set({ status: "human_active" })
+      .where(eq(supportConversations.id, ingested.conversationId));
+    assert.ok(await repository.requestSupportTransition(
+      "owner@example.com", ingested.conversationId, "return_to_ai", 0, NOW, "transition-valid",
+    ));
+  });
+});
+
 test("workflow dispatch claims are retryable, exclusive, and safely recover after lease expiry", async () => {
   await withDatabase(async (db) => {
     const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });

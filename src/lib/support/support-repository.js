@@ -103,17 +103,24 @@ export function createSupportRepository(db = createDbClient(), {
           eq(supportConversations.customerLookupKey, event.customerLookupKey),
         )).limit(1);
         let conversation;
+        let processWithAi;
         if (existing) {
+          let cancelledTransition = null;
           if (existing.pendingTransitionId) {
-            await tx.update(supportConversationTransitions).set({ cancelledAt: event.receivedAt }).where(and(
+            [cancelledTransition] = await tx.update(supportConversationTransitions).set({ cancelledAt: event.receivedAt }).where(and(
               eq(supportConversationTransitions.id, existing.pendingTransitionId),
               eq(supportConversationTransitions.conversationId, existing.id),
               isNull(supportConversationTransitions.cancelledAt),
-            ));
+              isNull(supportConversationTransitions.committedAt),
+            )).returning({ fromStatus: supportConversationTransitions.fromStatus });
           }
+          const restoredStatus = cancelledTransition?.fromStatus ?? existing.status;
+          const nextStatus = event.message.handoffReasonCode
+            ? "waiting_human"
+            : restoredStatus === "resolved" ? "ai_active" : restoredStatus;
+          processWithAi = nextStatus === "ai_active";
           [conversation] = await tx.update(supportConversations).set({
-            status: event.message.handoffReasonCode ? "waiting_human"
-              : (existing.pendingTransitionId || existing.status === "resolved" ? "ai_active" : existing.status),
+            status: nextStatus,
             ...(event.message.handoffReasonCode ? { handoffReasonCode: event.message.handoffReasonCode } : {}),
             unreadCount: existing.unreadCount + 1,
             pendingTransitionId: null,
@@ -128,6 +135,7 @@ export function createSupportRepository(db = createDbClient(), {
             eq(supportConversations.platformConnectionId, event.connectionId),
           )).returning();
         } else {
+          processWithAi = !event.message.handoffReasonCode;
           [conversation] = await tx.insert(supportConversations).values({
             id: randomUUID(),
             ownerEmail: event.ownerEmail,
@@ -165,9 +173,17 @@ export function createSupportRepository(db = createDbClient(), {
           sentAt: null,
           failedAt: null,
           safeErrorCode: null,
-          processedAt: null,
+          processedAt: processWithAi ? null : event.receivedAt,
           createdAt: event.receivedAt,
         });
+        if (!processWithAi) {
+          await tx.update(supportWebhookEvents).set({
+            processingStatus: "processed",
+            encryptedReplyToken: null,
+            replyTokenExpiresAt: null,
+            processedAt: event.receivedAt,
+          }).where(eq(supportWebhookEvents.id, claimed.id));
+        }
         return { inserted: true, eventId: event.eventId, conversationId: conversation.id };
       }));
     },
@@ -382,10 +398,11 @@ export function createSupportRepository(db = createDbClient(), {
       if (!toStatus || !Number.isInteger(expectedVersion) || expectedVersion < 0) throw unavailablePersistenceError();
       return retryBusyOperation(() => db.transaction(async (tx) => {
         const [current] = await tx.select().from(supportConversations).where(and(eq(supportConversations.id, id), eq(supportConversations.ownerEmail, owner))).limit(1);
-        if (!current || current.version !== expectedVersion || current.pendingTransitionId) return null;
+        if (!current || current.status !== "human_active"
+          || current.version !== expectedVersion || current.pendingTransitionId) return null;
         const effectiveAt = new Date(timestamp.getTime() + 10_000);
         await tx.insert(supportConversationTransitions).values({ id: transition, conversationId: id, requestedAction: action, fromStatus: current.status, toStatus, requestedByOwnerEmail: owner, expectedVersion, requestedAt: timestamp, effectiveAt, cancelledAt: null, committedAt: null, createdAt: timestamp });
-        const [updated] = await tx.update(supportConversations).set({ status: `${action}_pending`, pendingTransitionId: transition, pendingAction: action, pendingActionEffectiveAt: effectiveAt, version: current.version + 1, updatedAt: timestamp }).where(and(eq(supportConversations.id, id), eq(supportConversations.ownerEmail, owner), eq(supportConversations.version, expectedVersion), isNull(supportConversations.pendingTransitionId))).returning({ id: supportConversations.id });
+        const [updated] = await tx.update(supportConversations).set({ status: `${action}_pending`, pendingTransitionId: transition, pendingAction: action, pendingActionEffectiveAt: effectiveAt, version: current.version + 1, updatedAt: timestamp }).where(and(eq(supportConversations.id, id), eq(supportConversations.ownerEmail, owner), eq(supportConversations.status, "human_active"), eq(supportConversations.version, expectedVersion), isNull(supportConversations.pendingTransitionId))).returning({ id: supportConversations.id });
         if (!updated) throw unavailablePersistenceError();
         return { id: transition, conversationId: id, requestedAction: action, effectiveAt };
       }));
@@ -1449,7 +1466,9 @@ function validateOutboundDeliveryInput({
 }
 
 function validateIgnoredLineEvent({ connectionId, eventId, sourceType, receivedAt }) {
-  if (sourceType !== "group" && sourceType !== "room") throw unavailablePersistenceError();
+  if (sourceType !== "group" && sourceType !== "room" && sourceType !== "user_event") {
+    throw unavailablePersistenceError();
+  }
   return {
     connectionId: requiredBoundedText(connectionId, "Connection ID", 100),
     eventId: requiredBoundedText(eventId, "Webhook event ID", 256),

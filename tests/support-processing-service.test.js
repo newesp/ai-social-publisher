@@ -82,6 +82,39 @@ test("decision persistence loads current protected context and atomically create
   assert.deepEqual(persisted[0].decision, { action: "reply", answer: "Use reset.", category: "account", handoffReasonCode: null, knowledgeSourceIds: ["faq-1"] });
 });
 
+test("a grounded clarification is persisted and delivered as an AI turn", async () => {
+  const persisted = [];
+  const context = {
+    supportState: "enabled", conversationStatus: "ai_active", aiTurnsInLastFiveMinutes: 0,
+    configuration: { llmProvider: "openai", llmModel: "gpt-test" },
+    settings: { openAiApiKey: "private-key" },
+    faqs: [{ id: "faq-1", question: "Which account do you mean?", answer: "Use reset.", category: "account", keywords: ["account"] }],
+    customerTexts: ["account help"], messages: [{ senderType: "customer", text: "account help" }],
+    recipient: "U-private",
+  };
+  const service = createSupportProcessingService({
+    repository: {
+      loadCurrentProcessingContext: async () => context,
+      persistDecisionAndOutbound: async (value) => {
+        persisted.push(value);
+        return { deliveryId: "delivery-clarify" };
+      },
+    },
+    decisionService: {
+      decide: async () => ({
+        action: "clarify", answer: "Which account do you mean?", category: "account",
+        handoffReasonCode: null, knowledgeSourceIds: ["faq-1"],
+      }),
+    },
+  });
+
+  assert.deepEqual(await service.decideAndPersist({
+    ...IDS, claimId: "claim-1", eventClaimId: "event-claim",
+    inboundMessageId: "message-1", now: NOW,
+  }), { status: "pending_delivery", deliveryId: "delivery-clarify" });
+  assert.equal(persisted[0].decision.action, "clarify");
+});
+
 test("configuration that becomes unready hands off before any provider decision", async () => {
   let decisionCalls = 0;
   const handoffs = [];

@@ -25,7 +25,7 @@ export function createSupportDecisionService({ generateTextImpl, now = () => new
     async decide({ configuration = {}, settings, messages = [], faqs = [] } = {}) {
       void now;
       const customerText = customerMessages(messages);
-      const automaticHandoff = automaticHandoffReason(customerText);
+      const automaticHandoff = automaticHandoffReason(customerText, rawCustomerMessages(messages));
       if (automaticHandoff) return handoff(automaticHandoff);
 
       const suppliedFaqs = Array.isArray(faqs) ? faqs.filter(hasFaqId) : [];
@@ -63,8 +63,17 @@ function customerMessages(messages) {
     .trim();
 }
 
-function automaticHandoffReason(text) {
-  if (hasPromptInjection(text)) return "unsupported_request";
+function rawCustomerMessages(messages) {
+  if (!Array.isArray(messages)) return "";
+  return messages
+    .filter((message) => message?.senderType === "customer")
+    .map((message) => String(message.text ?? message.textContent ?? ""))
+    .join("\n")
+    .normalize("NFKC");
+}
+
+function automaticHandoffReason(text, rawText) {
+  if (hasPromptInjection(text, rawText)) return "unsupported_request";
   if (hasExplicitHumanRequest(text)) {
     return "explicit_human_request";
   }
@@ -78,12 +87,17 @@ function automaticHandoffReason(text) {
   if (hasPersonalDataRequest(text)) {
     return "high_risk_personal_data";
   }
+  if (hasDirectSensitiveData(rawText)) return "high_risk_personal_data";
   return null;
 }
 
-function hasPromptInjection(text) {
+function hasPromptInjection(text, rawText) {
+  const compact = String(rawText ?? "").normalize("NFKC").toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, "");
   return /\b(?:ignore|disregard|override|bypass|forget)\s+(?:all\s+)?(?:previous|prior|earlier)?\s*(?:system\s+)?instructions?\b/.test(text)
-    || /\b(?:reveal|show|expose)\s+(?:the\s+)?(?:hidden\s+instructions|system prompt|credentials)\b/.test(text);
+    || /\b(?:reveal|show|expose)\s+(?:the\s+)?(?:hidden\s+instructions|system prompt|credentials)\b/.test(text)
+    || /ignore(?:all)?(?:previous|prior|earlier)(?:system)?instructions?/.test(compact)
+    || /(?:忽略|無視|无视).{0,12}(?:指示|指令|規則|规则)/.test(rawText)
+    || /(?:顯示|显示|輸出|输出).{0,12}(?:系統提示|系统提示|隱藏提示|隐藏提示)/.test(rawText);
 }
 
 function hasExplicitHumanRequest(text) {
@@ -97,6 +111,14 @@ function hasPersonalDataRequest(text) {
     || (personalData.test(text) && /\b(?:exposed|leaked|breached|compromised|accessed|stolen)\b/.test(text))
     || /\bprivacy\s+(?:issue|incident|breach|concern|problem)\b[\s\w]{0,40}\b(?:my\s+)?account\b/.test(text)
     || /(?:刪除|删除|查詢|查询|更新).{0,16}(?:個人資料|个人资料)/.test(text);
+}
+
+function hasDirectSensitiveData(text) {
+  const value = String(text ?? "");
+  return /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(value)
+    || /(?:\+?\d[\s().-]*){8,}/.test(value)
+    || /\b(?:api[_ -]?key|access[_ -]?token|secret)\b/i.test(value)
+    || /(?:我的?|本人).{0,8}(?:地址|住址|電話|电话|手機|手机|身分證|身份证)/.test(value);
 }
 
 function includesAny(text, terms) {
@@ -169,6 +191,11 @@ function parseDecision(text, faqs) {
     if (!parsed.answer.trim() || citations.length === 0 || parsed.handoffReasonCode !== null) {
       throw new Error("Ungrounded decision.");
     }
+    const citedFaqs = faqs.filter((faq) => citations.includes(faq.id));
+    const allowedAnswers = parsed.action === "reply"
+      ? citedFaqs.map((faq) => string(faq.answer).trim())
+      : citedFaqs.map((faq) => string(faq.question).trim());
+    if (!allowedAnswers.includes(parsed.answer.trim())) throw new Error("Unsupported answer.");
   } else if (parsed.answer.trim() || parsed.category !== null || citations.length || !parsed.handoffReasonCode) {
     throw new Error("Unsafe handoff.");
   }

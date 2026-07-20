@@ -5,8 +5,11 @@ const RESPONSES = Object.freeze({
   notFound: { error: "Webhook endpoint was not found." },
   unauthorized: { error: "Webhook signature was not accepted." },
   malformed: { error: "Webhook payload was invalid." },
+  tooLarge: { error: "Webhook payload was too large." },
   unavailable: { error: "Webhook ingestion is temporarily unavailable." },
 });
+const MAX_BODY_BYTES = 1_000_000;
+const MAX_EVENTS = 100;
 
 export function createLineWebhookHandler({
   findConnection,
@@ -26,11 +29,19 @@ export function createLineWebhookHandler({
       return safeResponse(respond, RESPONSES.notFound, 404);
     }
 
+    const contentLength = Number(request.headers.get("content-length"));
+    if (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES) {
+      return safeResponse(respond, RESPONSES.tooLarge, 413);
+    }
+
     let rawBody;
     try {
       rawBody = await request.text();
     } catch {
       return safeResponse(respond, RESPONSES.malformed, 400);
+    }
+    if (Buffer.byteLength(rawBody, "utf8") > MAX_BODY_BYTES) {
+      return safeResponse(respond, RESPONSES.tooLarge, 413);
     }
     if (!lineAdapter?.verifySignature?.({
       channelSecret: connection.channelSecret,
@@ -51,7 +62,7 @@ export function createLineWebhookHandler({
 
     try {
       for (const event of events) {
-        if (event.sourceType === "group" || event.sourceType === "room") {
+        if (event.sourceType === "group" || event.sourceType === "room" || event.sourceType === "user_event") {
           await eventStore.recordIgnoredEvent({
             connectionId: connection.id,
             eventId: event.eventId,
@@ -102,7 +113,8 @@ export function createLineWebhookHandler({
 }
 
 function parseEvents(payload) {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload) || !Array.isArray(payload.events)) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload) || !Array.isArray(payload.events)
+    || payload.events.length > MAX_EVENTS) {
     throw new Error("Invalid LINE payload.");
   }
   return payload.events.map(parseEvent);
@@ -116,6 +128,7 @@ function parseEvent(event) {
     throw new Error("Invalid LINE event source.");
   }
   if (sourceType !== "user") return { eventId, sourceType };
+  if (event.type !== "message") return { eventId, sourceType: "user_event" };
 
   const externalUserId = boundedText(event.source?.userId, 256);
   const replyToken = optionalText(event.replyToken, 512);

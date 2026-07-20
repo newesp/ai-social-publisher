@@ -117,6 +117,31 @@ test("the raw body is read once and verified before any JSON parsing", async () 
   assert.equal(harness.store.userEvents.length, 0);
 });
 
+test("oversized webhook bodies are rejected before signature verification or persistence", async () => {
+  const harness = createHarness();
+  const declaredOversized = signedRawRequest("{}");
+  declaredOversized.headers.set("content-length", "1000001");
+  let reads = 0;
+  declaredOversized.text = async () => { reads += 1; return "{}"; };
+
+  assert.equal((await harness.handler(declaredOversized, "opaque-key")).status, 413);
+  assert.equal(reads, 0);
+
+  const actualOversized = signedRawRequest("x".repeat(1_000_001));
+  assert.equal((await harness.handler(actualOversized, "opaque-key")).status, 413);
+  assert.equal(harness.verifiedBodies.length, 0);
+  assert.equal(harness.store.userEvents.length, 0);
+});
+
+test("verified webhook deliveries cap the number of events processed", async () => {
+  const harness = createHarness();
+  const events = Array.from({ length: 101 }, (_, index) => userEvent({ webhookEventId: `evt-${index}` }));
+
+  assert.equal((await harness.handler(signedRequest({ events }), "opaque-key")).status, 400);
+  assert.equal(harness.store.userEvents.length, 0);
+  assert.equal(harness.startCalls.length, 0);
+});
+
 test("an invalid signature persists nothing and starts no workflow", async () => {
   const harness = createHarness();
   const response = await harness.handler(unsignedRequest({ events: [userEvent()] }), "opaque-key");
@@ -178,6 +203,25 @@ test("group and room events are recorded only as ignored safe identities", async
     { connectionId: CONNECTION_ID, eventId: "evt-room-1", sourceType: "room" },
   ]);
   assert.equal(JSON.stringify(harness.store.ignoredEvents).includes("private"), false);
+  assert.equal(harness.startCalls.length, 0);
+});
+
+test("non-message user events are deduplicated without creating support conversations", async () => {
+  const harness = createHarness();
+  const follow = {
+    type: "follow",
+    webhookEventId: "evt-follow-1",
+    timestamp: 1_784_332_800_000,
+    source: { type: "user", userId: "private-user-id" },
+  };
+
+  assert.equal((await harness.handler(signedRequest({ events: [follow] }), "opaque-key")).status, 200);
+  assert.deepEqual(harness.store.ignoredEvents, [{
+    connectionId: CONNECTION_ID,
+    eventId: "evt-follow-1",
+    sourceType: "user_event",
+  }]);
+  assert.equal(harness.store.userEvents.length, 0);
   assert.equal(harness.startCalls.length, 0);
 });
 

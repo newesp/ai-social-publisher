@@ -109,6 +109,22 @@ test("middleware excludes NextAuth and cron endpoints", async () => {
   assert.equal(middlewareSource.includes("api/auth|api/cron"), true);
 });
 
+test("middleware lets sessionless LINE webhooks reach route signature verification", async () => {
+  const middlewareSource = await readFile(new URL("../src/middleware.js", import.meta.url), "utf8");
+  const [, matcher] = middlewareSource.match(/matcher:\s*\["([^"]+)"\]/) ?? [];
+
+  assert.ok(matcher, "middleware matcher must be discoverable");
+  const matchesMiddleware = new RegExp(`^${matcher}$`);
+  assert.equal(matchesMiddleware.test("/api/webhooks/line/opaque-key"), false);
+  assert.equal(matchesMiddleware.test("/api/webhooks/lineage/opaque-key"), true);
+  assert.equal(matchesMiddleware.test("/api/webhooks/other/opaque-key"), true);
+  assert.equal(matchesMiddleware.test("/.well-known/workflow/v1/flow"), false);
+  assert.equal(matchesMiddleware.test("/.well-known/workflow/v1/step"), false);
+  assert.equal(matchesMiddleware.test("/.well-known/workflow/v1/webhook/token"), false);
+  assert.equal(matchesMiddleware.test("/.well-known/other"), true);
+  assert.equal(matchesMiddleware.test("/api/support/configuration"), true);
+});
+
 test("the local auth bypass cannot disable production middleware", () => {
   assert.equal(
     isLocalAuthBypassEnabled({ DISABLE_AUTH_FOR_LOCAL_DEV: "true", NODE_ENV: "development" }),
