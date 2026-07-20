@@ -182,6 +182,94 @@ test("LINE ingress persists encrypted identities atomically and cancels only the
   });
 });
 
+test("workflow dispatch claims are retryable, exclusive, and safely recover after lease expiry", async () => {
+  await withDatabase(async (db) => {
+    const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });
+    await db.insert(platformConnections).values(
+      connection("11111111-1111-4111-8111-111111111111", "owner@example.com"),
+    );
+    await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com",
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      eventId: "evt-dispatch-1",
+      externalUserId: "private-user-id",
+      replyToken: "private-reply-token",
+      message: { type: "text", text: "private message", safeMetadata: {} },
+      receivedAt: NOW,
+    });
+
+    const first = await repository.claimLineWorkflowDispatch({
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      eventId: "evt-dispatch-1",
+      now: NOW,
+    });
+    assert.equal(first.claimed, true);
+    assert.equal((await repository.claimLineWorkflowDispatch({
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      eventId: "evt-dispatch-1",
+      now: NOW,
+    })).claimed, false);
+    await repository.releaseLineWorkflowDispatch({
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      eventId: "evt-dispatch-1",
+      claimId: first.claimId,
+    });
+
+    const retry = await repository.claimLineWorkflowDispatch({
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      eventId: "evt-dispatch-1",
+      now: LATER,
+    });
+    assert.equal(retry.claimed, true);
+    await repository.markLineWorkflowDispatched({
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      eventId: "evt-dispatch-1",
+      claimId: retry.claimId,
+      now: LATER,
+    });
+    assert.equal((await repository.claimLineWorkflowDispatch({
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      eventId: "evt-dispatch-1",
+      now: LATER,
+    })).claimed, false);
+
+    await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com",
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      eventId: "evt-dispatch-stale",
+      externalUserId: "private-user-2",
+      replyToken: "private-reply-token-2",
+      message: { type: "text", text: "private message", safeMetadata: {} },
+      receivedAt: NOW,
+    });
+    const stale = await repository.claimLineWorkflowDispatch({
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      eventId: "evt-dispatch-stale",
+      now: NOW,
+    });
+    const reclaimed = await repository.claimLineWorkflowDispatch({
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      eventId: "evt-dispatch-stale",
+      now: new Date(NOW.getTime() + 31_000),
+    });
+    assert.equal(reclaimed.claimed, true);
+    assert.notEqual(reclaimed.claimId, stale.claimId);
+    await repository.releaseLineWorkflowDispatch({
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      eventId: "evt-dispatch-stale",
+      claimId: stale.claimId,
+    });
+    await repository.markLineWorkflowDispatched({
+      connectionId: "11111111-1111-4111-8111-111111111111",
+      eventId: "evt-dispatch-stale",
+      claimId: reclaimed.claimId,
+      now: LATER,
+    });
+    const events = await db.select().from(supportWebhookEvents);
+    assert.deepEqual(events.map(({ processingStatus }) => processingStatus).sort(), ["dispatched", "dispatched"]);
+  });
+});
+
 test("FAQ mutations require both normalized owner and FAQ id", async () => {
   await withDatabase(async (db) => {
     const repository = createSupportRepository(db);

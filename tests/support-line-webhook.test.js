@@ -78,6 +78,32 @@ test("an invalid signature persists nothing and starts no workflow", async () =>
   assert.equal(harness.startCalls.length, 0);
 });
 
+test("a verified event with an unusable Unix-millisecond timestamp is rejected before persistence", async () => {
+  const harness = createHarness();
+  const response = await harness.handler(signedRequest({
+    events: [userEvent({ timestamp: 100_000_000_000_000_000_000 })],
+  }), "opaque-key");
+
+  assert.equal(response.status, 400);
+  assert.equal(harness.store.userEvents.length, 0);
+  assert.equal(harness.startCalls.length, 0);
+});
+
+test("LINE timestamps require positive safe Unix milliseconds within the Date range", async () => {
+  const maximumUnixMilliseconds = 8_640_000_000_000_000;
+  const valid = createHarness();
+  assert.equal((await valid.handler(signedRequest({
+    events: [userEvent({ timestamp: maximumUnixMilliseconds })],
+  }), "opaque-key")).status, 200);
+
+  for (const timestamp of [0, -1, 1.5, maximumUnixMilliseconds + 1]) {
+    const harness = createHarness();
+    const response = await harness.handler(signedRequest({ events: [userEvent({ timestamp })] }), "opaque-key");
+    assert.equal(response.status, 400);
+    assert.equal(harness.store.userEvents.length, 0);
+  }
+});
+
 test("a verified malformed payload and an empty verification event list have fixed responses", async () => {
   const harness = createHarness();
 
@@ -138,6 +164,59 @@ test("persistence failures are bounded and never expose the provider body or sta
   assert.equal(harness.startCalls.length, 0);
 });
 
+test("a redelivery retries a persisted event after workflow start failure without duplicating persistence", async () => {
+  let failuresRemaining = 1;
+  const harness = createHarness({
+    startWorkflow: async () => {
+      if (failuresRemaining > 0) {
+        failuresRemaining -= 1;
+        throw new Error("temporary workflow outage");
+      }
+    },
+  });
+
+  const first = await harness.handler(signedRequest({ events: [userEvent()] }), "opaque-key");
+  const second = await harness.handler(signedRequest({ events: [userEvent()] }), "opaque-key");
+
+  assert.equal(first.status, 503);
+  assert.equal(second.status, 200);
+  assert.equal(harness.store.userEvents.length, 1);
+  assert.equal(harness.startCalls.length, 2);
+});
+
+test("a dispatch completion persistence failure is returned as a bounded retryable response", async () => {
+  const store = createStore();
+  store.markWorkflowDispatched = async () => false;
+  const harness = createHarness({ store });
+
+  const response = await harness.handler(signedRequest({ events: [userEvent()] }), "opaque-key");
+
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error, "Webhook ingestion is temporarily unavailable.");
+  assert.equal(harness.startCalls.length, 1);
+});
+
+test("concurrent redeliveries claim a retryable event for only one workflow start", async () => {
+  let failuresRemaining = 1;
+  const harness = createHarness({
+    startWorkflow: async () => {
+      if (failuresRemaining > 0) {
+        failuresRemaining -= 1;
+        throw new Error("temporary workflow outage");
+      }
+    },
+  });
+  assert.equal((await harness.handler(signedRequest({ events: [userEvent()] }), "opaque-key")).status, 503);
+
+  const responses = await Promise.all([
+    harness.handler(signedRequest({ events: [userEvent()] }), "opaque-key"),
+    harness.handler(signedRequest({ events: [userEvent()] }), "opaque-key"),
+  ]);
+
+  assert.deepEqual(responses.map(({ status }) => status), [200, 200]);
+  assert.equal(harness.startCalls.length, 2);
+});
+
 test("concurrent duplicate deliveries still start exactly one workflow", async () => {
   const harness = createHarness({ store: createConcurrentStore() });
   const responses = await Promise.all([
@@ -149,7 +228,7 @@ test("concurrent duplicate deliveries still start exactly one workflow", async (
   assert.equal(harness.startCalls.length, 1);
 });
 
-function createHarness({ findConnection, store = createStore() } = {}) {
+function createHarness({ findConnection, store = createStore(), startWorkflow } = {}) {
   const verifiedBodies = [];
   const adapter = createLineSupportAdapter({ fetchImpl: async () => new Response("{}") });
   const lineAdapter = {
@@ -169,7 +248,10 @@ function createHarness({ findConnection, store = createStore() } = {}) {
         : null),
       lineAdapter,
       eventStore: store,
-      startWorkflow: async (input) => { startCalls.push(input); },
+      startWorkflow: async (input) => {
+        startCalls.push(input);
+        return startWorkflow?.(input);
+      },
       respond: (body, init) => Response.json(body, init),
     }),
   };
@@ -177,6 +259,7 @@ function createHarness({ findConnection, store = createStore() } = {}) {
 
 function createStore() {
   const seen = new Set();
+  const dispatches = new Map();
   const userEvents = [];
   const ignoredEvents = [];
   return {
@@ -187,6 +270,7 @@ function createStore() {
       if (seen.has(key)) return { inserted: false };
       seen.add(key);
       userEvents.push(input);
+      dispatches.set(key, { state: "queued", conversationId: `conversation-${userEvents.length}` });
       return { inserted: true, eventId: input.eventId, conversationId: `conversation-${userEvents.length}` };
     },
     async recordIgnoredEvent(input) {
@@ -195,6 +279,27 @@ function createStore() {
       seen.add(key);
       ignoredEvents.push(input);
       return { inserted: true };
+    },
+    async claimWorkflowDispatch({ connectionId, eventId }) {
+      const dispatch = dispatches.get(`${connectionId}:${eventId}`);
+      if (!dispatch || dispatch.state === "dispatching" || dispatch.state === "dispatched") {
+        return { claimed: false };
+      }
+      dispatch.state = "dispatching";
+      dispatch.claimId = `claim-${eventId}`;
+      return { claimed: true, eventId, connectionId, conversationId: dispatch.conversationId, claimId: dispatch.claimId };
+    },
+    async markWorkflowDispatched({ connectionId, eventId, claimId }) {
+      const dispatch = dispatches.get(`${connectionId}:${eventId}`);
+      if (dispatch?.claimId === claimId) {
+        dispatch.state = "dispatched";
+        return true;
+      }
+      return false;
+    },
+    async releaseWorkflowDispatch({ connectionId, eventId, claimId }) {
+      const dispatch = dispatches.get(`${connectionId}:${eventId}`);
+      if (dispatch?.claimId === claimId) dispatch.state = "retryable";
     },
   };
 }

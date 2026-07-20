@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-import { and, desc, eq, exists, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, exists, isNull, lte, or, sql } from "drizzle-orm";
 
 import { getLLMModelOptions } from "../ai/model-config.js";
 import { createDbClient } from "../db/index.js";
@@ -26,6 +26,7 @@ const PROVIDER_KEY_BY_NAME = Object.freeze({
   google: "googleAiApiKey",
   openai: "openAiApiKey",
 });
+const DISPATCH_LEASE_MS = 30_000;
 
 export function createSupportRepository(db = createDbClient(), {
   encryptionKey,
@@ -161,6 +162,86 @@ export function createSupportRepository(db = createDbClient(), {
         });
         return { inserted: true, eventId: event.eventId, conversationId: conversation.id };
       }));
+    },
+
+    async claimLineWorkflowDispatch({ connectionId, eventId, now = new Date() }) {
+      const dispatch = validateDispatchInput({ connectionId, eventId, now });
+      return retryBusyOperation(() => db.transaction(async (tx) => {
+        const claimId = randomUUID();
+        const leaseExpiresAt = new Date(dispatch.now.getTime() + DISPATCH_LEASE_MS);
+        const [claimed] = await tx.update(supportWebhookEvents).set({
+          processingStatus: "dispatching",
+          safeErrorCode: claimId,
+          processedAt: leaseExpiresAt,
+        }).where(and(
+          eq(supportWebhookEvents.platformConnectionId, dispatch.connectionId),
+          eq(supportWebhookEvents.webhookEventId, dispatch.eventId),
+          or(
+            eq(supportWebhookEvents.processingStatus, "queued"),
+            eq(supportWebhookEvents.processingStatus, "retryable"),
+            and(
+              eq(supportWebhookEvents.processingStatus, "dispatching"),
+              lte(supportWebhookEvents.processedAt, dispatch.now),
+            ),
+          ),
+        )).returning({ id: supportWebhookEvents.id });
+        if (!claimed) return { claimed: false };
+
+        const [message] = await tx.select({ conversationId: supportMessages.conversationId })
+          .from(supportMessages).where(eq(
+            supportMessages.idempotencyKey,
+            `${dispatch.connectionId}:${dispatch.eventId}`,
+          )).limit(1);
+        if (!message) {
+          await tx.update(supportWebhookEvents).set({
+            processingStatus: "retryable",
+            safeErrorCode: null,
+            processedAt: null,
+          }).where(and(
+            eq(supportWebhookEvents.id, claimed.id),
+            eq(supportWebhookEvents.processingStatus, "dispatching"),
+            eq(supportWebhookEvents.safeErrorCode, claimId),
+          ));
+          throw unavailablePersistenceError();
+        }
+        return {
+          claimed: true,
+          claimId,
+          connectionId: dispatch.connectionId,
+          eventId: dispatch.eventId,
+          conversationId: message.conversationId,
+        };
+      }));
+    },
+
+    async markLineWorkflowDispatched({ connectionId, eventId, claimId, now = new Date() }) {
+      const dispatch = validateDispatchInput({ connectionId, eventId, claimId, now });
+      const [updated] = await retryBusyOperation(() => db.update(supportWebhookEvents).set({
+        processingStatus: "dispatched",
+        safeErrorCode: null,
+        processedAt: dispatch.now,
+      }).where(and(
+        eq(supportWebhookEvents.platformConnectionId, dispatch.connectionId),
+        eq(supportWebhookEvents.webhookEventId, dispatch.eventId),
+        eq(supportWebhookEvents.processingStatus, "dispatching"),
+        eq(supportWebhookEvents.safeErrorCode, dispatch.claimId),
+      )).returning({ id: supportWebhookEvents.id }));
+      return Boolean(updated);
+    },
+
+    async releaseLineWorkflowDispatch({ connectionId, eventId, claimId }) {
+      const dispatch = validateDispatchInput({ connectionId, eventId, claimId, now: new Date() });
+      const [released] = await retryBusyOperation(() => db.update(supportWebhookEvents).set({
+        processingStatus: "retryable",
+        safeErrorCode: null,
+        processedAt: null,
+      }).where(and(
+        eq(supportWebhookEvents.platformConnectionId, dispatch.connectionId),
+        eq(supportWebhookEvents.webhookEventId, dispatch.eventId),
+        eq(supportWebhookEvents.processingStatus, "dispatching"),
+        eq(supportWebhookEvents.safeErrorCode, dispatch.claimId),
+      )).returning({ id: supportWebhookEvents.id }));
+      return Boolean(released);
     },
 
     async recordIgnoredLineEvent({ connectionId, eventId, sourceType, receivedAt = new Date() }) {
@@ -442,6 +523,15 @@ function validateIgnoredLineEvent({ connectionId, eventId, sourceType, receivedA
     eventId: requiredBoundedText(eventId, "Webhook event ID", 256),
     sourceType,
     receivedAt: validDate(receivedAt),
+  };
+}
+
+function validateDispatchInput({ connectionId, eventId, claimId, now }) {
+  return {
+    connectionId: requiredBoundedText(connectionId, "Connection ID", 100),
+    eventId: requiredBoundedText(eventId, "Webhook event ID", 256),
+    ...(claimId == null ? {} : { claimId: requiredBoundedText(claimId, "Dispatch claim", 100) }),
+    now: validDate(now),
   };
 }
 

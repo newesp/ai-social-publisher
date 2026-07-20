@@ -58,3 +58,48 @@ The Task 5 route must start `lineMessageWorkflow`, while the durable workflow im
 ## Remaining external prerequisites
 
 - No live webhook, Workflow deployment, or dedicated LINE-account smoke test was performed; each requires separate explicit authorization and test resources.
+
+## Review-fix addendum: recoverable workflow dispatch and timestamp schema
+
+An independent review identified that a persisted unique event could be permanently skipped when the first Workflow start failed. The root cause was that `inserted: false` duplicates were acknowledged without a dispatch state or re-claim path. It also identified that a finite but unusable timestamp could reach repository validation and produce `503` rather than public schema `400`.
+
+### RED evidence
+
+`node --test tests/support-line-webhook.test.js tests/support-repository.test.js`
+
+- Exit 1 before the fix.
+- Verified timestamp `100000000000000000000` incorrectly returned `200` in the handler harness.
+- Verified the reviewer sequence: first delivery `503`, second delivery `200`, workflow starts `1` instead of the required retry start `2`.
+- The repository claim test failed with `TypeError: repository.claimLineWorkflowDispatch is not a function`.
+
+### Fix
+
+- Existing `support_webhook_events` fields now implement a migration-free outbox/dispatch state:
+  - `processing_status`: `queued` → `dispatching` → `dispatched`, or `retryable` after start failure.
+  - `processed_at`: a 30-second lease expiration while `dispatching`, then the actual dispatched timestamp.
+  - `safe_error_code`: an opaque UUID claim ID while dispatching; compare-and-set completion/release prevents a stale claimant from overwriting a newer reclaim.
+- Every delivery, including a duplicate, attempts an atomic claim. Only the successful claim invokes `startWorkflow`; success marks it dispatched and failure releases it as retryable before returning a fixed `503`.
+- Expired dispatch leases are atomically reclaimable; concurrent redeliveries cannot both claim the same event.
+- Handler timestamp validation now requires a positive safe integer in `1..8640000000000000`, and a valid JavaScript Date, before any persistence call.
+
+### GREEN / final verification
+
+1. Focused coverage: `node --test tests/support-line-webhook.test.js tests/support-repository.test.js`
+   - Exit 0; 24 tests passed, 0 failed.
+   - Covers failed-start redelivery retry, concurrent retry claim, durable claim/release/complete, stale lease reclaim, stale release fencing, and timestamp lower/upper/fractional boundaries.
+2. Full suite: `npm.cmd test`
+   - Exit 0; 375 tests passed, 0 failed.
+3. Production build with the same command-scoped disposable demo values documented above: `npm.cmd run build`
+   - Exit 0; compiled and includes `/api/webhooks/line/[webhookKey]`.
+4. No migration or live LINE/LLM/database/deployment action was used.
+
+### Final completion-record guard
+
+One additional RED/GREEN cycle covered the case where `startWorkflow` succeeds but the compare-and-set `dispatched` write does not report success. Before the guard, the handler returned `200`; it now returns the same bounded `503` retryable response rather than acknowledging an unrecorded dispatch.
+
+- Focused command: `node --test tests/support-line-webhook.test.js tests/support-repository.test.js`
+  - Exit 0; 25 tests passed, 0 failed.
+- Fresh full suite: `npm.cmd test`
+  - Exit 0; 376 tests passed, 0 failed.
+- Fresh production build with the disposable command-scoped demo values
+  - Exit 0; build passed.

@@ -68,12 +68,31 @@ export function createLineWebhookHandler({
           message: event.message,
           receivedAt: event.receivedAt,
         });
-        if (result?.inserted !== true) continue;
-        await startWorkflow({
-          eventId: result.eventId,
+        const dispatch = await eventStore.claimWorkflowDispatch({
           connectionId: connection.id,
-          conversationId: result.conversationId,
+          eventId: result?.eventId ?? event.eventId,
         });
+        if (dispatch?.claimed !== true) continue;
+        try {
+          await startWorkflow({
+            eventId: dispatch.eventId,
+            connectionId: dispatch.connectionId,
+            conversationId: dispatch.conversationId,
+          });
+        } catch {
+          await eventStore.releaseWorkflowDispatch({
+            connectionId: dispatch.connectionId,
+            eventId: dispatch.eventId,
+            claimId: dispatch.claimId,
+          });
+          throw new Error("Workflow start failed.");
+        }
+        const marked = await eventStore.markWorkflowDispatched({
+          connectionId: dispatch.connectionId,
+          eventId: dispatch.eventId,
+          claimId: dispatch.claimId,
+        });
+        if (marked !== true) throw new Error("Workflow dispatch could not be recorded.");
       }
     } catch {
       return safeResponse(respond, RESPONSES.unavailable, 503);
@@ -120,8 +139,13 @@ function safeMessage(message, eventType) {
 }
 
 function timestamp(value) {
-  if (!Number.isFinite(value) || value < 0) throw new Error("Invalid LINE timestamp.");
-  return new Date(value);
+  const maximumUnixMilliseconds = 8_640_000_000_000_000;
+  if (!Number.isSafeInteger(value) || value <= 0 || value > maximumUnixMilliseconds) {
+    throw new Error("Invalid LINE timestamp.");
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) throw new Error("Invalid LINE timestamp.");
+  return date;
 }
 
 function boundedText(value, maxLength) {

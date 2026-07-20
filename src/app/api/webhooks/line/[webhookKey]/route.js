@@ -28,6 +28,9 @@ function createHandler(env = process.env) {
     eventStore: {
       ingestUserEvent: (input) => repository.ingestLineUserEvent(input),
       recordIgnoredEvent: (input) => repository.recordIgnoredLineEvent(input),
+      claimWorkflowDispatch: (input) => repository.claimLineWorkflowDispatch(input),
+      markWorkflowDispatched: (input) => repository.markLineWorkflowDispatched(input),
+      releaseWorkflowDispatch: (input) => repository.releaseLineWorkflowDispatch(input),
     },
     startWorkflow: startLineMessageWorkflow,
     respond: (body, init) => NextResponse.json(body, init),
