@@ -116,6 +116,10 @@ test("support schema verifier checks all tables, named indexes, and duplicate ac
     new URL("../drizzle/0006_support_retention_indexes.sql", import.meta.url),
     "utf8",
   );
+  const paginationSql = await readFile(
+    new URL("../drizzle/0007_support_inbox_pagination.sql", import.meta.url),
+    "utf8",
+  );
   const client = createClient({ url: ":memory:" });
   try {
     await client.executeMultiple(`
@@ -124,6 +128,7 @@ test("support schema verifier checks all tables, named indexes, and duplicate ac
       ${migrationSql.replaceAll("--> statement-breakpoint", "")}
       ${outboxSql.replaceAll("--> statement-breakpoint", "")}
       ${retentionSql.replaceAll("--> statement-breakpoint", "")}
+      ${paginationSql.replaceAll("--> statement-breakpoint", "")}
     `);
     assert.deepEqual(await verifySupportSchema(client), { schemaVerified: true });
 
@@ -146,6 +151,16 @@ test("support schema verifier checks all tables, named indexes, and duplicate ac
     assert.match(retentionSqlByName.get("support_webhook_events_retention_reply_token_idx"), /\(reply_token_expires_at, id\)\s*WHERE encrypted_reply_token IS NOT NULL/i);
     assert.match(retentionSqlByName.get("support_outbound_deliveries_retention_status_created_idx"), /\(delivery_status, created_at, id\)\s*WHERE encrypted_canonical_body <> ''/i);
 
+    const inboxIndex = await client.execute(`
+      SELECT sql FROM sqlite_master
+      WHERE type = 'index' AND name = 'support_conversations_inbox_covering_idx'
+    `);
+    assert.match(inboxIndex.rows[0].sql, /\(\s*owner_email,\s*updated_at DESC,\s*id DESC,\s*status,/i);
+    const deliveryIndex = await client.execute(`
+      SELECT sql FROM sqlite_master
+      WHERE type = 'index' AND name = 'support_outbound_deliveries_conversation_status_idx'
+    `);
+    assert.match(deliveryIndex.rows[0].sql, /\(\s*conversation_id,\s*delivery_status\s*\)/i);
     await client.execute("DROP INDEX support_messages_idempotency_unique");
     await client.execute(
       "CREATE INDEX support_messages_idempotency_unique ON support_messages (idempotency_key)",
@@ -200,6 +215,35 @@ test("support schema verifier checks all tables, named indexes, and duplicate ac
       const plan = await client.execute(`EXPLAIN QUERY PLAN ${query}`);
       assert.doesNotMatch(JSON.stringify(plan.rows), /TEMP B-TREE/i);
     }
+    const inboxPlan = await client.execute(`
+      EXPLAIN QUERY PLAN
+      SELECT id, status, unread_count, handoff_reason_code, last_inbound_at,
+        last_outbound_at, updated_at, pending_transition_id
+      FROM support_conversations
+      WHERE owner_email = 'owner@example.com'
+      ORDER BY updated_at DESC, id DESC
+      LIMIT 31
+    `);
+    assert.match(JSON.stringify(inboxPlan.rows), /USING COVERING INDEX support_conversations_inbox_covering_idx/i);
+    assert.doesNotMatch(JSON.stringify(inboxPlan.rows), /TEMP B-TREE/i);
+    const filteredInboxPlan = await client.execute(`
+      EXPLAIN QUERY PLAN
+      SELECT id, status, unread_count, handoff_reason_code, last_inbound_at,
+        last_outbound_at, updated_at, pending_transition_id
+      FROM support_conversations
+      WHERE owner_email = 'owner@example.com' AND status = 'waiting_human'
+      ORDER BY updated_at DESC, id DESC
+      LIMIT 31
+    `);
+    assert.match(JSON.stringify(filteredInboxPlan.rows), /USING COVERING INDEX support_conversations_inbox_covering_idx/i);
+    assert.doesNotMatch(JSON.stringify(filteredInboxPlan.rows), /TEMP B-TREE/i);
+    const deliveryPlan = await client.execute(`
+      EXPLAIN QUERY PLAN
+      SELECT 1 FROM support_outbound_deliveries
+      WHERE conversation_id = 'conversation-1' AND delivery_status = 'failed'
+      LIMIT 1
+    `);
+    assert.match(JSON.stringify(deliveryPlan.rows), /USING COVERING INDEX support_outbound_deliveries_conversation_status_idx/i);
   } finally {
     await client.close();
   }
@@ -219,6 +263,10 @@ test("support schema verifier rejects malformed columns and missing foreign keys
     new URL("../drizzle/0006_support_retention_indexes.sql", import.meta.url),
     "utf8",
   );
+  const paginationSql = await readFile(
+    new URL("../drizzle/0007_support_inbox_pagination.sql", import.meta.url),
+    "utf8",
+  );
 
   const malformedColumnsClient = createClient({ url: ":memory:" });
   try {
@@ -227,6 +275,7 @@ test("support schema verifier rejects malformed columns and missing foreign keys
       ${migrationSql.replaceAll("--> statement-breakpoint", "")}
       ${outboxSql.replaceAll("--> statement-breakpoint", "")}
       ${retentionSql.replaceAll("--> statement-breakpoint", "")}
+      ${paginationSql.replaceAll("--> statement-breakpoint", "")}
       PRAGMA foreign_keys=OFF;
       DROP TABLE support_ai_decisions;
       CREATE TABLE support_ai_decisions (id TEXT PRIMARY KEY NOT NULL);
@@ -243,6 +292,7 @@ test("support schema verifier rejects malformed columns and missing foreign keys
       ${migrationSql.replaceAll("--> statement-breakpoint", "")}
       ${outboxSql.replaceAll("--> statement-breakpoint", "")}
       ${retentionSql.replaceAll("--> statement-breakpoint", "")}
+      ${paginationSql.replaceAll("--> statement-breakpoint", "")}
       PRAGMA foreign_keys=OFF;
       DROP TABLE support_conversation_transitions;
       CREATE TABLE support_conversation_transitions (

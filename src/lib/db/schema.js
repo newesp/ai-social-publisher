@@ -155,6 +155,17 @@ export const supportConversations = sqliteTable("support_conversations", {
   updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
 }, (table) => [
   index("support_conversations_owner_status_updated_idx").on(table.ownerEmail, table.status, table.updatedAt),
+  index("support_conversations_inbox_covering_idx").on(
+    table.ownerEmail,
+    sql`${table.updatedAt} desc`,
+    sql`${table.id} desc`,
+    table.status,
+    table.unreadCount,
+    table.handoffReasonCode,
+    table.lastInboundAt,
+    table.lastOutboundAt,
+    table.pendingTransitionId,
+  ),
   uniqueIndex("support_conversations_customer_unique").on(table.platformConnectionId, table.customerLookupKey),
 ]);
 
@@ -255,6 +266,8 @@ export const supportOutboundDeliveries = sqliteTable("support_outbound_deliverie
   uniqueIndex("support_outbound_deliveries_retry_key_unique").on(table.retryKey),
   index("support_outbound_deliveries_status_next_attempt_idx")
     .on(table.deliveryStatus, table.nextAttemptAt),
+  index("support_outbound_deliveries_conversation_status_idx")
+    .on(table.conversationId, table.deliveryStatus),
   index("support_outbound_deliveries_retention_status_created_idx")
     .on(table.deliveryStatus, table.createdAt, table.id)
     .where(sql`${table.encryptedCanonicalBody} <> ''`),

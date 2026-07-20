@@ -50,6 +50,13 @@
       "when": 1784599200000,
       "tag": "0006_support_retention_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1784685600000,
+      "tag": "0007_support_inbox_pagination",
+      "breakpoints": true
     }
   ]
 }

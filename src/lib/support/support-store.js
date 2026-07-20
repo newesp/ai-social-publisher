@@ -288,14 +288,18 @@ export function createSupportStore({
     async listConversations(ownerEmail, { status, cursor } = {}) {
       const owner = requireOwner(ownerEmail);
       if (status != null && !INBOX_STATUSES.has(status)) throw badRequest("Conversation status is invalid.");
+      const repositoryCursor = decodeInboxCursor(cursor, owner, status, encryptionKey);
       const [records, attentionCount] = await Promise.all([
-        repository.listInboxConversations(owner, { status }),
+        repository.listInboxConversations(owner, { status, cursor: repositoryCursor }),
         repository.countInboxAttention(owner),
       ]);
-      const start = decodeInboxCursor(cursor, records);
-      const conversations = records.slice(start, start + INBOX_PAGE_SIZE).map(toInboxSummary);
-      const next = records[start + INBOX_PAGE_SIZE];
-      return { conversations, nextCursor: next ? encodeInboxCursor(next) : null, attentionCount };
+      const conversations = records.slice(0, INBOX_PAGE_SIZE).map(toInboxSummary);
+      const next = records.length > INBOX_PAGE_SIZE ? records[INBOX_PAGE_SIZE - 1] : null;
+      return {
+        conversations,
+        nextCursor: next ? encodeInboxCursor(next, owner, status, encryptionKey) : null,
+        attentionCount,
+      };
     },
 
     async listActivePendingTransitions(ownerEmail) {
@@ -554,21 +558,54 @@ function safePushFailure(status) { return status >= 500 && status < 600 ? "line_
 function toActionConversation(value) { return { id: value.id, status: value.status, version: value.version }; }
 function toHumanMessage(value) { return { id: value?.id ?? "", deliveryStatus: value?.deliveryStatus ?? "failed", safeErrorCode: value?.safeErrorCode ?? "line_push_transport" }; }
 
-function encodeInboxCursor(record) {
-  return Buffer.from(JSON.stringify({ id: record.id, updatedAt: dateCursorValue(record.updatedAt) }), "utf8").toString("base64url");
+function encodeInboxCursor(record, owner, status, encryptionKey) {
+  const payload = {
+    version: 1,
+    updatedAt: dateCursorValue(record.updatedAt),
+    id: record.id,
+  };
+  return Buffer.from(JSON.stringify({
+    ...payload,
+    signature: inboxCursorSignature(payload, owner, status, encryptionKey),
+  }), "utf8").toString("base64url");
 }
 
-function decodeInboxCursor(cursor, records) {
-  if (cursor == null) return 0;
+function decodeInboxCursor(cursor, owner, status, encryptionKey) {
+  if (cursor == null) return null;
   if (typeof cursor !== "string" || cursor.length > 500) throw badRequest("Conversation cursor is invalid.");
   try {
     const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
-    const index = records.findIndex((record) => record.id === value.id && dateCursorValue(record.updatedAt) === value.updatedAt);
-    if (index < 0) throw new Error("missing");
-    return index + 1;
+    const payload = {
+      version: value.version,
+      updatedAt: value.updatedAt,
+      id: value.id,
+    };
+    if (payload.version !== 1
+      || !Number.isSafeInteger(payload.updatedAt) || payload.updatedAt < 0
+      || typeof payload.id !== "string" || !payload.id || payload.id.length > 100
+      || typeof value.signature !== "string") {
+      throw new Error("invalid");
+    }
+    const expected = inboxCursorSignature(payload, owner, status, encryptionKey);
+    const signature = Buffer.from(value.signature, "utf8");
+    const expectedSignature = Buffer.from(expected, "utf8");
+    if (signature.length !== expectedSignature.length
+      || !crypto.timingSafeEqual(signature, expectedSignature)) {
+      throw new Error("scope");
+    }
+    return {
+      updatedAt: payload.updatedAt,
+      id: payload.id,
+    };
   } catch {
     throw badRequest("Conversation cursor is invalid.");
   }
+}
+
+function inboxCursorSignature(payload, owner, status, encryptionKey) {
+  return crypto.createHmac("sha256", encryptionKey)
+    .update(JSON.stringify([owner, status ?? null, payload]))
+    .digest("base64url");
 }
 
 function dateCursorValue(value) {

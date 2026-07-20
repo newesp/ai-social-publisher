@@ -9,6 +9,58 @@ const SECOND_CONNECTION_ID = "22222222-2222-4222-8222-222222222222";
 const WEBHOOK_KEY_HASH = "a".repeat(64);
 const SECOND_WEBHOOK_KEY_HASH = "b".repeat(64);
 
+test("inbox cursors are owner and status scoped while repository pages stay bounded", async () => {
+  const calls = [];
+  const firstPage = Array.from({ length: 31 }, (_, index) => inboxRecord(index + 1));
+  const repository = {
+    async listInboxConversations(ownerEmail, options) {
+      calls.push(["listInboxConversations", ownerEmail, options]);
+      return options.cursor ? [inboxRecord(31), inboxRecord(32)] : firstPage;
+    },
+    async countInboxAttention(ownerEmail) {
+      calls.push(["countInboxAttention", ownerEmail]);
+      return 4;
+    },
+  };
+  const store = createStore(repository);
+
+  const first = await store.listConversations(" OWNER@EXAMPLE.COM ", { status: "ai_active" });
+
+  assert.equal(first.conversations.length, 30);
+  assert.equal(first.conversations[0].id, "conversation-01");
+  assert.equal(first.conversations.at(-1).id, "conversation-30");
+  assert.equal(first.attentionCount, 4);
+  assert.ok(first.nextCursor);
+  assert.equal(Buffer.from(first.nextCursor, "base64url").toString("utf8").includes("owner@example.com"), false);
+
+  const second = await store.listConversations("owner@example.com", {
+    status: "ai_active",
+    cursor: first.nextCursor,
+  });
+
+  assert.deepEqual(second.conversations.map(({ id }) => id), ["conversation-31", "conversation-32"]);
+  assert.equal(second.nextCursor, null);
+  assert.deepEqual(calls[2], [
+    "listInboxConversations",
+    "owner@example.com",
+    {
+      status: "ai_active",
+      cursor: {
+        updatedAt: inboxRecord(30).updatedAt.getTime(),
+        id: "conversation-30",
+      },
+    },
+  ]);
+  await rejectsStatus(store.listConversations("other@example.com", {
+    status: "ai_active",
+    cursor: first.nextCursor,
+  }), 400);
+  await rejectsStatus(store.listConversations("owner@example.com", {
+    status: "resolved",
+    cursor: first.nextCursor,
+  }), 400);
+});
+
 test("configuration validates the complete allowlist and returns only safe readiness fields", async () => {
   const repository = createMemoryRepository();
   const store = createStore(repository);
@@ -636,6 +688,23 @@ function browserConfiguration() {
 function sequenceUuid() {
   let value = 0;
   return () => `00000000-0000-4000-8000-${String(++value).padStart(12, "0")}`;
+}
+
+function inboxRecord(index) {
+  const timestamp = new Date(Date.UTC(2026, 6, 19, 0, 0, index));
+  return {
+    id: `conversation-${String(index).padStart(2, "0")}`,
+    customerLabel: "Customer",
+    status: "ai_active",
+    unreadCount: 0,
+    handoffReason: null,
+    lastMessagePreview: `message ${index}`,
+    deliveryFailed: false,
+    lastInboundAt: timestamp,
+    lastOutboundAt: null,
+    updatedAt: timestamp,
+    pendingTransition: null,
+  };
 }
 
 async function rejectsStatus(promise, status) {

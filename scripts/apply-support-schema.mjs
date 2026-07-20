@@ -67,6 +67,21 @@ const SUPPORT_INDEXES = {
     unique: false,
     columns: ["owner_email", "status", "updated_at"],
   },
+  support_conversations_inbox_covering_idx: {
+    table: "support_conversations",
+    unique: false,
+    columns: [
+      "owner_email",
+      "updated_at",
+      "id",
+      "status",
+      "unread_count",
+      "handoff_reason_code",
+      "last_inbound_at",
+      "last_outbound_at",
+      "pending_transition_id",
+    ],
+  },
   support_conversations_customer_unique: {
     table: "support_conversations",
     unique: true,
@@ -115,6 +130,11 @@ const SUPPORT_INDEXES = {
     table: "support_outbound_deliveries",
     unique: false,
     columns: ["delivery_status", "next_attempt_at"],
+  },
+  support_outbound_deliveries_conversation_status_idx: {
+    table: "support_outbound_deliveries",
+    unique: false,
+    columns: ["conversation_id", "delivery_status"],
   },
   support_outbound_deliveries_retention_status_created_idx: {
     table: "support_outbound_deliveries",

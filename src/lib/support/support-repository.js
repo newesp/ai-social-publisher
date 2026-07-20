@@ -36,6 +36,9 @@ const EVENT_PROCESSING_LEASE_MS = 30_000;
 const OUTBOUND_DELIVERY_LEASE_MS = 30_000;
 const OUTBOUND_REVIEW_WINDOW_MS = 24 * 60 * 60 * 1_000;
 const CONTEXT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
+const INBOX_QUERY_LIMIT = 31;
+const INBOX_MESSAGE_LIMIT = 100;
+const INBOX_DECISION_LIMIT = 50;
 
 export function createSupportRepository(db = createDbClient(), {
   encryptionKey,
@@ -188,35 +191,74 @@ export function createSupportRepository(db = createDbClient(), {
       }));
     },
 
-    async listInboxConversations(ownerEmail, { status } = {}) {
+    async listInboxConversations(ownerEmail, { status, cursor } = {}) {
       const owner = normalizeOwner(ownerEmail);
-      const conversations = await db.select().from(supportConversations).where(and(
+      const deliveryFailed = exists(
+        db.select({ id: supportOutboundDeliveries.id })
+          .from(supportOutboundDeliveries)
+          .where(and(
+            eq(supportOutboundDeliveries.conversationId, supportConversations.id),
+            eq(supportOutboundDeliveries.deliveryStatus, "failed"),
+          )),
+      );
+      const pageCursor = normalizeInboxQueryCursor(cursor);
+      const keyset = pageCursor ? or(
+        lt(supportConversations.updatedAt, new Date(pageCursor.updatedAt)),
+        and(
+          eq(supportConversations.updatedAt, new Date(pageCursor.updatedAt)),
+          lt(supportConversations.id, pageCursor.id),
+        ),
+      ) : undefined;
+      const records = await db.select({
+        id: supportConversations.id,
+        status: supportConversations.status,
+        unreadCount: supportConversations.unreadCount,
+        handoffReason: supportConversations.handoffReasonCode,
+        lastMessagePreview: sql`(
+          SELECT ${supportMessages.textContent}
+          FROM ${supportMessages}
+          WHERE ${supportMessages.conversationId} = ${supportConversations.id}
+          ORDER BY ${supportMessages.createdAt} DESC, ${supportMessages.id} DESC
+          LIMIT 1
+        )`,
+        deliveryFailed,
+        lastInboundAt: supportConversations.lastInboundAt,
+        lastOutboundAt: supportConversations.lastOutboundAt,
+        updatedAt: supportConversations.updatedAt,
+        transitionId: supportConversationTransitions.id,
+        transitionAction: supportConversationTransitions.requestedAction,
+        transitionEffectiveAt: supportConversationTransitions.effectiveAt,
+      }).from(supportConversations).leftJoin(supportConversationTransitions, and(
+        eq(supportConversationTransitions.id, supportConversations.pendingTransitionId),
+        eq(supportConversationTransitions.conversationId, supportConversations.id),
+        eq(supportConversationTransitions.requestedByOwnerEmail, owner),
+        isNull(supportConversationTransitions.cancelledAt),
+        isNull(supportConversationTransitions.committedAt),
+      )).where(and(
         eq(supportConversations.ownerEmail, owner),
         ...(status ? [eq(supportConversations.status, status)] : []),
-      ));
-      const summaries = await Promise.all(conversations.map(async (conversation) => {
-        const [[lastMessage], [delivery], [transition]] = await Promise.all([
-          db.select({ text: supportMessages.textContent }).from(supportMessages).where(eq(supportMessages.conversationId, conversation.id)).orderBy(desc(supportMessages.createdAt)).limit(1),
-          db.select({ id: supportOutboundDeliveries.id }).from(supportOutboundDeliveries).where(and(eq(supportOutboundDeliveries.conversationId, conversation.id), eq(supportOutboundDeliveries.deliveryStatus, "failed"))).limit(1),
-          conversation.pendingTransitionId ? db.select().from(supportConversationTransitions).where(and(eq(supportConversationTransitions.id, conversation.pendingTransitionId), eq(supportConversationTransitions.conversationId, conversation.id), eq(supportConversationTransitions.requestedByOwnerEmail, owner))).limit(1) : [],
-        ]);
-        return {
-          id: conversation.id,
-          customerLabel: "Customer",
-          status: conversation.status,
-          unreadCount: conversation.unreadCount,
-          handoffReason: conversation.handoffReasonCode,
-          lastMessagePreview: lastMessage?.text ?? null,
-          deliveryFailed: Boolean(delivery),
-          lastInboundAt: conversation.lastInboundAt,
-          lastOutboundAt: conversation.lastOutboundAt,
-          updatedAt: conversation.updatedAt,
-          pendingTransition: transition ? { id: transition.id, action: transition.requestedAction, effectiveAt: transition.effectiveAt } : null,
-        };
+        ...(keyset ? [keyset] : []),
+      )).orderBy(
+        desc(supportConversations.updatedAt),
+        desc(supportConversations.id),
+      ).limit(INBOX_QUERY_LIMIT);
+      return records.map((record) => ({
+        id: record.id,
+        customerLabel: "Customer",
+        status: record.status,
+        unreadCount: record.unreadCount,
+        handoffReason: record.handoffReason,
+        lastMessagePreview: record.lastMessagePreview ?? null,
+        deliveryFailed: Boolean(record.deliveryFailed),
+        lastInboundAt: record.lastInboundAt,
+        lastOutboundAt: record.lastOutboundAt,
+        updatedAt: record.updatedAt,
+        pendingTransition: record.transitionId ? {
+          id: record.transitionId,
+          action: record.transitionAction,
+          effectiveAt: record.transitionEffectiveAt,
+        } : null,
       }));
-      return summaries.sort((left, right) => inboxPriority(right) - inboxPriority(left)
-        || dateValue(right.lastInboundAt) - dateValue(left.lastInboundAt)
-        || dateValue(right.updatedAt) - dateValue(left.updatedAt));
     },
 
     async countInboxAttention(ownerEmail) {
@@ -305,24 +347,67 @@ export function createSupportRepository(db = createDbClient(), {
     async getInboxConversation(ownerEmail, conversationId) {
       const owner = normalizeOwner(ownerEmail);
       const id = requiredBoundedText(conversationId, "Conversation ID", 100);
-      const [conversation] = await db.select().from(supportConversations).where(and(
+      const [conversation] = await db.select({
+        id: supportConversations.id,
+        status: supportConversations.status,
+        unreadCount: supportConversations.unreadCount,
+        version: supportConversations.version,
+        handoffReasonCode: supportConversations.handoffReasonCode,
+        pendingTransitionId: supportConversations.pendingTransitionId,
+        lastInboundAt: supportConversations.lastInboundAt,
+        lastOutboundAt: supportConversations.lastOutboundAt,
+        updatedAt: supportConversations.updatedAt,
+      }).from(supportConversations).where(and(
         eq(supportConversations.id, id), eq(supportConversations.ownerEmail, owner),
       )).limit(1);
       if (!conversation) return null;
       const [messages, decisions, faqs, transition, delivery] = await Promise.all([
-        db.select().from(supportMessages).where(eq(supportMessages.conversationId, id)).orderBy(asc(supportMessages.createdAt)),
-        db.select().from(supportAiDecisions).where(eq(supportAiDecisions.conversationId, id)).orderBy(desc(supportAiDecisions.createdAt)),
-        db.select().from(supportFaqs).where(eq(supportFaqs.ownerEmail, owner)),
-        conversation.pendingTransitionId ? db.select().from(supportConversationTransitions).where(and(
+        db.select({
+          id: supportMessages.id,
+          direction: supportMessages.direction,
+          senderType: supportMessages.senderType,
+          messageType: supportMessages.messageType,
+          textContent: supportMessages.textContent,
+          deliveryStatus: supportMessages.deliveryStatus,
+          safeErrorCode: supportMessages.safeErrorCode,
+          createdAt: supportMessages.createdAt,
+          sentAt: supportMessages.sentAt,
+          failedAt: supportMessages.failedAt,
+        }).from(supportMessages).where(eq(supportMessages.conversationId, id))
+          .orderBy(desc(supportMessages.createdAt), desc(supportMessages.id))
+          .limit(INBOX_MESSAGE_LIMIT),
+        db.select({
+          id: supportAiDecisions.id,
+          action: supportAiDecisions.action,
+          category: supportAiDecisions.category,
+          reasonCode: supportAiDecisions.reasonCode,
+          faqIdsJson: supportAiDecisions.faqIdsJson,
+          createdAt: supportAiDecisions.createdAt,
+        }).from(supportAiDecisions).where(eq(supportAiDecisions.conversationId, id))
+          .orderBy(desc(supportAiDecisions.createdAt), desc(supportAiDecisions.id))
+          .limit(INBOX_DECISION_LIMIT),
+        db.select({
+          id: supportFaqs.id,
+          question: supportFaqs.question,
+          category: supportFaqs.category,
+        }).from(supportFaqs).where(eq(supportFaqs.ownerEmail, owner)),
+        conversation.pendingTransitionId ? db.select({
+          id: supportConversationTransitions.id,
+          requestedAction: supportConversationTransitions.requestedAction,
+          effectiveAt: supportConversationTransitions.effectiveAt,
+        }).from(supportConversationTransitions).where(and(
           eq(supportConversationTransitions.id, conversation.pendingTransitionId),
           eq(supportConversationTransitions.conversationId, id),
           eq(supportConversationTransitions.requestedByOwnerEmail, owner),
+          isNull(supportConversationTransitions.cancelledAt),
+          isNull(supportConversationTransitions.committedAt),
         )).limit(1) : [],
         db.select({ id: supportOutboundDeliveries.id }).from(supportOutboundDeliveries).where(and(
           eq(supportOutboundDeliveries.conversationId, id), eq(supportOutboundDeliveries.deliveryStatus, "failed"),
         )).limit(1),
       ]);
       const usedFaqIds = new Set(decisions.flatMap((decision) => parseKeywords(decision.faqIdsJson)));
+      messages.reverse();
       const [lastMessage] = messages.slice(-1);
       return {
         id: conversation.id, customerLabel: "Customer", status: conversation.status, unreadCount: conversation.unreadCount,
@@ -1583,15 +1668,19 @@ function parseKeywords(value) {
   }
 }
 
-function inboxPriority(conversation) {
-  return (conversation.status === "waiting_human" ? 4 : 0)
-    + (conversation.unreadCount > 0 ? 2 : 0)
-    + (conversation.deliveryFailed ? 1 : 0);
-}
-
 function dateValue(value) {
   const date = value instanceof Date ? value : new Date(value);
   return Number.isNaN(date.getTime()) ? 0 : date.getTime();
+}
+
+function normalizeInboxQueryCursor(cursor) {
+  if (cursor == null) return null;
+  if (!cursor || typeof cursor !== "object" || Array.isArray(cursor)
+    || !Number.isSafeInteger(cursor.updatedAt) || cursor.updatedAt < 0
+    || typeof cursor.id !== "string" || !cursor.id || cursor.id.length > 100) {
+    throw unavailablePersistenceError();
+  }
+  return cursor;
 }
 
 function validateInboundMessage(message) {

@@ -28,6 +28,202 @@ const NOW = new Date("2026-07-19T00:00:00.000Z");
 const LATER = new Date("2026-07-19T00:01:00.000Z");
 const SETTINGS_ENCRYPTION_KEY = "support-repository-test-key";
 
+test("inbox pagination is owner scoped, deterministic, and bounded to 31 rows", async () => {
+  await withDatabase(async (db) => {
+    const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });
+    await db.insert(platformConnections).values([
+      connection("11111111-1111-4111-8111-111111111111", "owner@example.com"),
+      connection("22222222-2222-4222-8222-222222222222", "other@example.com"),
+    ]);
+    const conversations = Array.from({ length: 36 }, (_, index) => ({
+      id: `conversation-${String(index + 1).padStart(2, "0")}`,
+      ownerEmail: "owner@example.com",
+      platformConnectionId: "11111111-1111-4111-8111-111111111111",
+      platform: "line",
+      customerLookupKey: `owner-customer-${index + 1}`,
+      encryptedCustomerExternalId: `encrypted-owner-${index + 1}`,
+      status: index === 0 ? "waiting_human" : "ai_active",
+      unreadCount: index === 1 ? 1 : 0,
+      lastInboundAt: new Date(NOW.getTime() + index * 1_000),
+      createdAt: NOW,
+      updatedAt: new Date(NOW.getTime() + index * 1_000),
+    }));
+    await db.insert(supportConversations).values([
+      ...conversations,
+      {
+        id: "other-owner-conversation",
+        ownerEmail: "other@example.com",
+        platformConnectionId: "22222222-2222-4222-8222-222222222222",
+        platform: "line",
+        customerLookupKey: "other-customer",
+        encryptedCustomerExternalId: "encrypted-other",
+        status: "waiting_human",
+        unreadCount: 99,
+        lastInboundAt: LATER,
+        createdAt: NOW,
+        updatedAt: LATER,
+      },
+    ]);
+
+    const firstPage = await repository.listInboxConversations(" OWNER@EXAMPLE.COM ");
+
+    assert.equal(firstPage.length, 31);
+    assert.equal(firstPage[0].id, "conversation-36");
+    assert.equal(firstPage[1].id, "conversation-35");
+    assert.equal(firstPage.some(({ id }) => id === "other-owner-conversation"), false);
+    const lastVisible = firstPage[29];
+    const secondPage = await repository.listInboxConversations("owner@example.com", {
+      cursor: {
+        updatedAt: lastVisible.updatedAt.getTime(),
+        id: lastVisible.id,
+      },
+    });
+    assert.equal(secondPage.length, 6);
+    assert.deepEqual(
+      secondPage.map(({ id }) => id),
+      conversations.map(({ id }) => id)
+        .filter((id) => !firstPage.slice(0, 30).some((row) => row.id === id))
+        .reverse(),
+    );
+  });
+});
+
+test("inbox summaries enrich a bounded page in one query without exposing persistence-only fields", async () => {
+  await withDatabase(async (db, { createLoggedDb }) => {
+    const connectionId = "11111111-1111-4111-8111-111111111111";
+    await db.insert(platformConnections).values(connection(connectionId, "owner@example.com"));
+    await db.insert(supportConversations).values({
+      id: "conversation-summary",
+      ownerEmail: "owner@example.com",
+      platformConnectionId: connectionId,
+      platform: "line",
+      customerLookupKey: "customer-summary",
+      encryptedCustomerExternalId: "encrypted-customer-id",
+      status: "resolve_pending",
+      unreadCount: 2,
+      pendingTransitionId: "transition-summary",
+      lastInboundAt: NOW,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    await db.insert(supportMessages).values([
+      messageRecord("message-old", "conversation-summary", NOW, "old"),
+      messageRecord("message-new", "conversation-summary", LATER, "latest"),
+    ]);
+    await db.insert(supportWebhookEvents).values({
+      id: "event-summary",
+      platformConnectionId: connectionId,
+      webhookEventId: "webhook-summary",
+      sourceType: "user",
+      processingStatus: "processed",
+      receivedAt: NOW,
+      createdAt: NOW,
+    });
+    await db.insert(supportOutboundDeliveries).values({
+      id: "delivery-summary",
+      webhookEventId: "event-summary",
+      conversationId: "conversation-summary",
+      encryptedRecipient: "encrypted-recipient",
+      encryptedCanonicalBody: "encrypted-body",
+      retryKey: "retry-summary",
+      deliveryStatus: "failed",
+      createdAt: NOW,
+    });
+    await db.insert(supportConversationTransitions).values({
+      id: "transition-summary",
+      conversationId: "conversation-summary",
+      requestedAction: "resolve",
+      fromStatus: "human_active",
+      toStatus: "resolve_pending",
+      requestedByOwnerEmail: "owner@example.com",
+      expectedVersion: 0,
+      requestedAt: NOW,
+      effectiveAt: LATER,
+      createdAt: NOW,
+    });
+    const queries = [];
+    const repository = createSupportRepository(createLoggedDb({
+      logQuery(query) {
+        queries.push(query);
+      },
+    }), { encryptionKey: SETTINGS_ENCRYPTION_KEY });
+
+    const [summary] = await repository.listInboxConversations("owner@example.com");
+
+    assert.equal(queries.length, 1);
+    assert.match(queries[0], /limit\s+\?/i);
+    assert.equal(summary.lastMessagePreview, "latest");
+    assert.equal(summary.deliveryFailed, true);
+    assert.deepEqual(summary.pendingTransition, {
+      id: "transition-summary",
+      action: "resolve",
+      effectiveAt: LATER,
+    });
+    for (const forbidden of [
+      "ownerEmail",
+      "platformConnectionId",
+      "customerLookupKey",
+      "encryptedCustomerExternalId",
+      "encryptedRecipient",
+      "encryptedCanonicalBody",
+    ]) {
+      assert.equal(Object.hasOwn(summary, forbidden), false);
+    }
+  });
+});
+
+test("conversation detail returns only the 100 most recent messages and 50 decisions", async () => {
+  await withDatabase(async (db) => {
+    const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });
+    const connectionId = "11111111-1111-4111-8111-111111111111";
+    await db.insert(platformConnections).values(connection(connectionId, "owner@example.com"));
+    await db.insert(supportConversations).values({
+      id: "conversation-detail",
+      ownerEmail: "owner@example.com",
+      platformConnectionId: connectionId,
+      platform: "line",
+      customerLookupKey: "customer-detail",
+      encryptedCustomerExternalId: "encrypted-detail",
+      status: "ai_active",
+      unreadCount: 0,
+      lastInboundAt: NOW,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    const messages = Array.from({ length: 105 }, (_, index) => (
+      messageRecord(
+        `message-${String(index + 1).padStart(3, "0")}`,
+        "conversation-detail",
+        new Date(NOW.getTime() + index * 1_000),
+        `message ${index + 1}`,
+      )
+    ));
+    await db.insert(supportMessages).values(messages);
+    await db.insert(supportAiDecisions).values(Array.from({ length: 55 }, (_, index) => ({
+      id: `decision-${String(index + 1).padStart(3, "0")}`,
+      conversationId: "conversation-detail",
+      inboundMessageId: messages[index].id,
+      action: "reply",
+      category: "general",
+      reasonCode: "faq_match",
+      faqIdsJson: "[]",
+      promptVersion: "v1",
+      createdAt: new Date(NOW.getTime() + index * 1_000),
+    })));
+
+    const detail = await repository.getInboxConversation("owner@example.com", "conversation-detail");
+
+    assert.equal(detail.messages.length, 100);
+    assert.equal(detail.messages[0].id, "message-006");
+    assert.equal(detail.messages.at(-1).id, "message-105");
+    assert.equal(detail.lastMessagePreview, "message 105");
+    assert.equal(detail.decisions.length, 50);
+    assert.equal(detail.decisions[0].id, "decision-055");
+    assert.equal(detail.decisions.at(-1).id, "decision-006");
+    assert.equal(JSON.stringify(detail).includes("encrypted-detail"), false);
+  });
+});
+
 test("configuration lookups and mutations stay scoped to the normalized owner", async () => {
   await withDatabase(async (db) => {
     const repository = createSupportRepository(db);
@@ -983,6 +1179,9 @@ async function withDatabase(run) {
       );
     `);
     await run(drizzle(client), {
+      createLoggedDb(logger) {
+        return drizzle(client, { logger });
+      },
       async createSecondaryDb() {
         const secondaryClient = createClient({ url: databaseUrl });
         secondaryClients.push(secondaryClient);
@@ -1091,5 +1290,20 @@ function faqRecord() {
     priority: 0,
     createdAt: NOW,
     updatedAt: NOW,
+  };
+}
+
+function messageRecord(id, conversationId, createdAt, textContent) {
+  return {
+    id,
+    conversationId,
+    direction: "inbound",
+    senderType: "customer",
+    messageType: "text",
+    textContent,
+    safeMetadataJson: "{}",
+    deliveryStatus: "received",
+    idempotencyKey: `idempotency-${id}`,
+    createdAt,
   };
 }
