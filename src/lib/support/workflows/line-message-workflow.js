@@ -11,12 +11,7 @@ import { createSupportRepository } from "../support-repository.js";
 
 export async function lineMessageWorkflow(input) {
   "use workflow";
-  return runLineMessageWorkflow(input, {
-    eventStore: productionEventStore(),
-    processingService: productionProcessingService(),
-    sleepImpl: sleep,
-    startWorkflow: startNextLineMessageWorkflow,
-  });
+  return runLineMessageWorkflow(input, {});
 }
 
 export function createLineMessageWorkflow({ eventStore, processingService, sleepImpl = sleep, startWorkflow, processEvent, now = () => new Date() } = {}) {
@@ -55,7 +50,7 @@ async function runLineMessageWorkflow({ eventId, connectionId, conversationId },
   startWorkflow,
   now = () => new Date(),
 }) {
-  "use workflow";
+  sleepImpl ??= sleep;
   const claimedAt = await workflowNowStep(now);
   const eventClaim = await claimEventStep(eventStore, { eventId, connectionId, now: claimedAt });
   if (eventClaim?.claimed !== true) return { status: "duplicate" };
@@ -64,8 +59,9 @@ async function runLineMessageWorkflow({ eventId, connectionId, conversationId },
   try {
     conversationClaim = await acquireConversationClaimStep(processingService, { eventId, connectionId, conversationId, now: claimedAt });
     if (conversationClaim?.acquired !== true) {
-      const resolved = typeof processingService.resolveCompetingEvent === "function"
-        && await resolveCompetingEventStep(processingService, { eventId, connectionId, conversationId, claimId: eventClaim.claimId, now: await workflowNowStep(now) });
+      const resolved = await resolveCompetingEventStep(processingService, {
+        eventId, connectionId, conversationId, claimId: eventClaim.claimId, now: await workflowNowStep(now),
+      });
       if (!resolved) await releaseEventStep(eventStore, { eventId, connectionId, claimId: eventClaim.claimId });
       return { status: "already_processing" };
     }
@@ -82,32 +78,44 @@ async function runLineMessageWorkflow({ eventId, connectionId, conversationId },
       cutoff: batchCutoff,
     });
     if (!turn) {
-      await completeEvent(eventStore, { eventId, connectionId, claimId: eventClaim.claimId, now: operationNow });
+      await completeEvent(eventStore, {
+        eventId, connectionId, claimId: eventClaim.claimId, conversationId,
+        conversationClaimId: conversationClaim.claimId, now: operationNow,
+      });
       return { status: "no_messages" };
     }
     operationNow = await workflowNowStep(now);
     await renewFences({ eventStore, processingService, eventId, connectionId, conversationId, eventClaimId: eventClaim.claimId, conversationClaimId: conversationClaim.claimId, now: operationNow });
-    const outcome = await decideAndPersistStep(processingService, {
-      eventId,
-      connectionId,
-      conversationId,
-      claimId: conversationClaim.claimId,
-      eventClaimId: eventClaim.claimId,
-      cutoff: batchCutoff,
-      ...turn,
-      now: operationNow,
-    });
+    let outcome;
+    for (let providerAttempt = 0; providerAttempt < 3; providerAttempt += 1) {
+      operationNow = await workflowNowStep(now);
+      await renewFences({ eventStore, processingService, eventId, connectionId, conversationId, eventClaimId: eventClaim.claimId, conversationClaimId: conversationClaim.claimId, now: operationNow });
+      outcome = await providerAttemptStep(processingService, {
+        eventId, connectionId, conversationId, claimId: conversationClaim.claimId, eventClaimId: eventClaim.claimId,
+        cutoff: batchCutoff, ...turn, now: operationNow,
+      });
+      if (outcome.status !== "retryable_provider") break;
+    }
+    if (outcome?.status === "retryable_provider") {
+      const handoffNow = await workflowNowStep(now);
+      await renewFences({ eventStore, processingService, eventId, connectionId, conversationId, eventClaimId: eventClaim.claimId, conversationClaimId: conversationClaim.claimId, now: handoffNow });
+      outcome = await persistHandoffStep(processingService, {
+        eventId, connectionId, conversationId, claimId: conversationClaim.claimId, eventClaimId: eventClaim.claimId,
+        inboundMessageId: turn.inboundMessageId, reasonCode: "provider_unavailable", now: handoffNow,
+      });
+    }
     if (outcome.deliveryId) {
-      if (typeof processingService.resolveBatchedEvents === "function") {
-        await resolveBatchedEventsStep(processingService, {
-          eventId, connectionId, conversationId, cutoff: batchCutoff,
-        });
-      }
+      await resolveBatchedEventsStep(processingService, {
+        eventId, connectionId, conversationId, cutoff: batchCutoff,
+      });
       let delivery;
       do {
         const deliveryNow = await workflowNowStep(now);
         await renewFences({ eventStore, processingService, eventId, connectionId, conversationId, eventClaimId: eventClaim.claimId, conversationClaimId: conversationClaim.claimId, now: deliveryNow });
-        delivery = await deliverStep(processingService, { deliveryId: outcome.deliveryId, now: deliveryNow });
+        delivery = await deliverStep(processingService, {
+          deliveryId: outcome.deliveryId, eventId, eventClaimId: eventClaim.claimId,
+          connectionId, conversationId, conversationClaimId: conversationClaim.claimId, now: deliveryNow,
+        });
         if (delivery.status === "retryable" && delivery.retryAt) {
           const retryAt = validDate(delivery.retryAt);
           await sleepWithRenewedFences({
@@ -119,12 +127,12 @@ async function runLineMessageWorkflow({ eventId, connectionId, conversationId },
       } while (delivery.status === "retryable" && delivery.retryAt);
       const completionNow = await workflowNowStep(now);
       await renewFences({ eventStore, processingService, eventId, connectionId, conversationId, eventClaimId: eventClaim.claimId, conversationClaimId: conversationClaim.claimId, now: completionNow });
-      await completeEvent(eventStore, { eventId, connectionId, claimId: eventClaim.claimId, now: completionNow });
+      if (!delivery.eventCompleted) await completeEvent(eventStore, { eventId, connectionId, claimId: eventClaim.claimId, conversationId, conversationClaimId: conversationClaim.claimId, now: completionNow });
       return { status: delivery.status };
     }
     const completionNow = await workflowNowStep(now);
     await renewFences({ eventStore, processingService, eventId, connectionId, conversationId, eventClaimId: eventClaim.claimId, conversationClaimId: conversationClaim.claimId, now: completionNow });
-    await completeEvent(eventStore, { eventId, connectionId, claimId: eventClaim.claimId, now: completionNow });
+    if (!outcome.eventCompleted) await completeEvent(eventStore, { eventId, connectionId, claimId: eventClaim.claimId, conversationId, conversationClaimId: conversationClaim.claimId, now: completionNow });
     return { status: outcome.status };
   } catch (error) {
     await releaseEventStep(eventStore, { eventId, connectionId, claimId: eventClaim.claimId });
@@ -133,7 +141,7 @@ async function runLineMessageWorkflow({ eventId, connectionId, conversationId },
     if (conversationClaim?.acquired === true) {
       await releaseConversationClaimStep(processingService, { connectionId, conversationId, claimId: conversationClaim.claimId });
       const followUp = await findFollowUpStep(processingService, { connectionId, conversationId });
-      if (followUp && typeof startWorkflow === "function") await startWorkflow(followUp);
+      if (followUp) await startFollowUpStep(startWorkflow, followUp);
     }
   }
 }
@@ -189,7 +197,7 @@ function durationUntil(from, to) {
 
 async function completeEvent(eventStore, input) {
   "use step";
-  const completed = await eventStore.markEventProcessed(input);
+  const completed = await currentEventStore(eventStore).markEventProcessed(input);
   if (completed !== true) throw new Error("Event processing completion could not be recorded.");
 }
 
@@ -197,12 +205,14 @@ async function renewFences({
   eventStore, processingService, eventId, connectionId, conversationId, eventClaimId, conversationClaimId, now,
 }) {
   "use step";
-  if (typeof eventStore.renewEventProcessing === "function") {
-    const renewed = await eventStore.renewEventProcessing({ eventId, connectionId, claimId: eventClaimId, now });
+  const activeEventStore = currentEventStore(eventStore);
+  const activeProcessingService = currentProcessingService(processingService);
+  if (typeof activeEventStore.renewEventProcessing === "function") {
+    const renewed = await activeEventStore.renewEventProcessing({ eventId, connectionId, claimId: eventClaimId, now });
     if (renewed !== true) throw new Error("Event processing claim was lost.");
   }
-  if (typeof processingService.renewClaim === "function") {
-    await processingService.renewClaim({ eventId, connectionId, conversationId, claimId: conversationClaimId, now });
+  if (typeof activeProcessingService.renewClaim === "function") {
+    await activeProcessingService.renewClaim({ eventId, connectionId, conversationId, claimId: conversationClaimId, now });
   }
 }
 
@@ -231,13 +241,23 @@ async function workflowNowStep(now) {
   return currentDate(now);
 }
 
-async function claimEventStep(eventStore, input) { "use step"; return eventStore.claimEventProcessing(input); }
-async function acquireConversationClaimStep(processingService, input) { "use step"; return processingService.acquireClaim(input); }
-async function resolveCompetingEventStep(processingService, input) { "use step"; return processingService.resolveCompetingEvent(input); }
-async function releaseEventStep(eventStore, input) { "use step"; return eventStore.releaseEventProcessing(input); }
-async function buildTurnStep(processingService, input) { "use step"; return processingService.buildTurn(input); }
-async function resolveBatchedEventsStep(processingService, input) { "use step"; return processingService.resolveBatchedEvents(input); }
-async function decideAndPersistStep(processingService, input) { "use step"; return processingService.decideAndPersist(input); }
-async function deliverStep(processingService, input) { "use step"; return processingService.deliver(input); }
-async function releaseConversationClaimStep(processingService, input) { "use step"; return processingService.releaseClaim(input); }
-async function findFollowUpStep(processingService, input) { "use step"; return processingService.findFollowUp(input); }
+async function claimEventStep(eventStore, input) { "use step"; return currentEventStore(eventStore).claimEventProcessing(input); }
+async function acquireConversationClaimStep(processingService, input) { "use step"; return currentProcessingService(processingService).acquireClaim(input); }
+async function resolveCompetingEventStep(processingService, input) { "use step"; const service = currentProcessingService(processingService); return typeof service.resolveCompetingEvent === "function" && service.resolveCompetingEvent(input); }
+async function releaseEventStep(eventStore, input) { "use step"; return currentEventStore(eventStore).releaseEventProcessing(input); }
+async function buildTurnStep(processingService, input) { "use step"; return currentProcessingService(processingService).buildTurn(input); }
+async function resolveBatchedEventsStep(processingService, input) { "use step"; const service = currentProcessingService(processingService); return typeof service.resolveBatchedEvents === "function" && service.resolveBatchedEvents(input); }
+async function providerAttemptStep(processingService, input) { "use step"; return currentProcessingService(processingService).decideAndPersist(input); }
+async function persistHandoffStep(processingService, input) { "use step"; return currentProcessingService(processingService).persistHandoff(input); }
+async function deliverStep(processingService, input) { "use step"; return currentProcessingService(processingService).deliver(input); }
+async function releaseConversationClaimStep(processingService, input) { "use step"; return currentProcessingService(processingService).releaseClaim(input); }
+async function findFollowUpStep(processingService, input) { "use step"; return currentProcessingService(processingService).findFollowUp(input); }
+async function startFollowUpStep(startWorkflow, input) { "use step"; return typeof startWorkflow === "function" ? startWorkflow(input) : startNextLineMessageWorkflow(input); }
+
+function currentEventStore(eventStore) {
+  return eventStore ?? productionEventStore();
+}
+
+function currentProcessingService(processingService) {
+  return processingService ?? productionProcessingService();
+}

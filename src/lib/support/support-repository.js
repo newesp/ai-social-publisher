@@ -235,7 +235,7 @@ export function createSupportRepository(db = createDbClient(), {
         eq(supportWebhookEvents.processingStatus, "dispatching"),
         eq(supportWebhookEvents.safeErrorCode, dispatch.claimId),
       )).returning({ id: supportWebhookEvents.id }));
-      return Boolean(updated);
+       return Boolean(updated);
     },
 
     async releaseLineWorkflowDispatch({ connectionId, eventId, claimId }) {
@@ -284,8 +284,16 @@ export function createSupportRepository(db = createDbClient(), {
       }));
     },
 
-    async markLineEventProcessed({ connectionId, eventId, claimId, now = new Date() }) {
+    async markLineEventProcessed({ connectionId, eventId, claimId, conversationId, conversationClaimId, now = new Date() }) {
       const processing = validateDispatchInput({ connectionId, eventId, claimId, now });
+      if ((conversationId == null) !== (conversationClaimId == null)) throw unavailablePersistenceError();
+      const conversationPredicate = conversationId == null ? null : exists(db.select({ one: sql`1` }).from(supportConversations).where(and(
+        eq(supportConversations.id, requiredBoundedText(conversationId, "Conversation ID", 100)),
+        eq(supportConversations.platformConnectionId, processing.connectionId),
+        eq(supportConversations.processingClaimId, requiredBoundedText(conversationClaimId, "Conversation claim", 100)),
+        eq(supportConversations.status, "ai_active"),
+        gt(supportConversations.processingClaimExpiresAt, processing.now),
+      )));
       const [updated] = await retryBusyOperation(() => db.update(supportWebhookEvents).set({
         processingStatus: "processed",
         safeErrorCode: null,
@@ -296,6 +304,7 @@ export function createSupportRepository(db = createDbClient(), {
         eq(supportWebhookEvents.processingStatus, "processing"),
         eq(supportWebhookEvents.safeErrorCode, processing.claimId),
         gt(supportWebhookEvents.processedAt, processing.now),
+        ...(conversationPredicate ? [conversationPredicate] : []),
       )).returning({ id: supportWebhookEvents.id }));
       return Boolean(updated);
     },
@@ -521,16 +530,30 @@ export function createSupportRepository(db = createDbClient(), {
         eq(supportWebhookEvents.safeErrorCode, requiredBoundedText(eventClaimId, "Event processing claim", 100)),
         gt(supportWebhookEvents.processedAt, claim.now),
       ))) : undefined;
-      const [updated] = await retryBusyOperation(() => db.update(supportConversations).set({
-        status: "waiting_human", handoffReasonCode: requiredBoundedText(reasonCode, "Handoff reason", 100),
-        processingClaimId: null, processingClaimExpiresAt: null, updatedAt: claim.now,
-      }).where(and(
-        eq(supportConversations.id, claim.conversationId), eq(supportConversations.platformConnectionId, claim.connectionId),
-        eq(supportConversations.processingClaimId, claim.claimId),
-        gt(supportConversations.processingClaimExpiresAt, claim.now),
-        ...(eventPredicate ? [eventPredicate] : []),
-      )).returning({ id: supportConversations.id }));
-      return Boolean(updated);
+      return retryBusyOperation(() => db.transaction(async (tx) => {
+        const [updated] = await tx.update(supportConversations).set({
+          status: "waiting_human", handoffReasonCode: requiredBoundedText(reasonCode, "Handoff reason", 100),
+          processingClaimId: null, processingClaimExpiresAt: null, updatedAt: claim.now,
+        }).where(and(
+          eq(supportConversations.id, claim.conversationId), eq(supportConversations.platformConnectionId, claim.connectionId),
+          eq(supportConversations.processingClaimId, claim.claimId),
+          gt(supportConversations.processingClaimExpiresAt, claim.now),
+          ...(eventPredicate ? [eventPredicate] : []),
+        )).returning({ id: supportConversations.id });
+        if (!updated) return false;
+        if (!eventPredicate) return true;
+        const [completed] = await tx.update(supportWebhookEvents).set({
+          processingStatus: "processed", safeErrorCode: null, processedAt: claim.now,
+        }).where(and(
+          eq(supportWebhookEvents.platformConnectionId, claim.connectionId),
+          eq(supportWebhookEvents.webhookEventId, requiredBoundedText(eventId, "Webhook event ID", 256)),
+          eq(supportWebhookEvents.processingStatus, "processing"),
+          eq(supportWebhookEvents.safeErrorCode, requiredBoundedText(eventClaimId, "Event processing claim", 100)),
+          gt(supportWebhookEvents.processedAt, claim.now),
+        )).returning({ id: supportWebhookEvents.id });
+        if (!completed) throw unavailablePersistenceError();
+        return { eventCompleted: true };
+      }));
     },
 
     async releaseConversationClaim({ connectionId, conversationId, claimId }) {
@@ -572,7 +595,8 @@ export function createSupportRepository(db = createDbClient(), {
           eq(supportWebhookEvents.platformConnectionId, input.connectionId),
           eq(supportWebhookEvents.webhookEventId, input.eventId),
           eq(supportWebhookEvents.processingStatus, "processing"),
-          eq(supportWebhookEvents.safeErrorCode, input.claimId),
+           eq(supportWebhookEvents.safeErrorCode, input.claimId),
+           gt(supportWebhookEvents.processedAt, input.now),
         )).returning({ id: supportWebhookEvents.id });
         return Boolean(resolved);
       }));
@@ -632,11 +656,30 @@ export function createSupportRepository(db = createDbClient(), {
       return Boolean(updated);
     },
 
-    async handleLineCredentialRejected({ connectionId, conversationId, now = new Date() }) {
-      const input = validateConversationClaimInput({ connectionId, conversationId, now });
+    async handleLineCredentialRejected({ connectionId, conversationId, eventId, eventClaimId, claimId, now = new Date() }) {
+      const input = {
+        ...validateConversationClaimInput({ connectionId, conversationId, claimId, now }),
+        eventId: requiredBoundedText(eventId, "Webhook event ID", 256),
+        eventClaimId: requiredBoundedText(eventClaimId, "Event processing claim", 100),
+      };
       return retryBusyOperation(() => db.transaction(async (tx) => {
+        const eventPredicate = exists(tx.select({ one: sql`1` }).from(supportWebhookEvents).where(and(
+          eq(supportWebhookEvents.platformConnectionId, input.connectionId),
+          eq(supportWebhookEvents.webhookEventId, input.eventId),
+          eq(supportWebhookEvents.processingStatus, "processing"),
+          eq(supportWebhookEvents.safeErrorCode, input.eventClaimId),
+          gt(supportWebhookEvents.processedAt, input.now),
+        )));
         await tx.update(platformConnections).set({ state: "needs_reconnect", updatedAt: input.now }).where(and(
           eq(platformConnections.id, input.connectionId), eq(platformConnections.platform, "line"), eq(platformConnections.state, "active"),
+          exists(tx.select({ one: sql`1` }).from(supportConversations).where(and(
+            eq(supportConversations.id, input.conversationId),
+            eq(supportConversations.platformConnectionId, input.connectionId),
+            eq(supportConversations.processingClaimId, input.claimId),
+            eq(supportConversations.status, "ai_active"),
+            gt(supportConversations.processingClaimExpiresAt, input.now),
+          ))),
+          eventPredicate,
         ));
         const [handoff] = await tx.update(supportConversations).set({
           status: "waiting_human", handoffReasonCode: "credential_rejected",
@@ -644,8 +687,22 @@ export function createSupportRepository(db = createDbClient(), {
         }).where(and(
           eq(supportConversations.id, input.conversationId), eq(supportConversations.platformConnectionId, input.connectionId),
           eq(supportConversations.status, "ai_active"),
+          eq(supportConversations.processingClaimId, input.claimId),
+          gt(supportConversations.processingClaimExpiresAt, input.now),
+          eventPredicate,
         )).returning({ id: supportConversations.id });
-        return Boolean(handoff);
+        if (!handoff) return false;
+        const [completed] = await tx.update(supportWebhookEvents).set({
+          processingStatus: "processed", safeErrorCode: null, processedAt: input.now,
+        }).where(and(
+          eq(supportWebhookEvents.platformConnectionId, input.connectionId),
+          eq(supportWebhookEvents.webhookEventId, input.eventId),
+          eq(supportWebhookEvents.processingStatus, "processing"),
+          eq(supportWebhookEvents.safeErrorCode, input.eventClaimId),
+          gt(supportWebhookEvents.processedAt, input.now),
+        )).returning({ id: supportWebhookEvents.id });
+        if (!completed) throw unavailablePersistenceError();
+        return { eventCompleted: true };
       }));
     },
 

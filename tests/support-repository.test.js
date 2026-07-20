@@ -650,17 +650,19 @@ test("processing claims batch current protected data and atomically persist one 
       connectionId, eventId: "evt-turn-2", claimId: competingEventClaim.claimId, now: NOW,
     }), false);
     assert.equal(await repository.loadLineAccessToken(connectionId), "private-line-token");
-    assert.equal(await repository.handleLineCredentialRejected({
-      connectionId, conversationId: ingested.conversationId, now: NOW,
-    }), true);
+    assert.deepEqual(await repository.handleLineCredentialRejected({
+      connectionId, conversationId: ingested.conversationId, eventId: "evt-turn-1", eventClaimId: eventClaim.claimId,
+      claimId: conversationClaim.claimId, now: NOW,
+    }), { eventCompleted: true });
     assert.equal((await db.select().from(platformConnections).where(eq(platformConnections.id, connectionId)))[0].state, "needs_reconnect");
     const [handoffConversation] = await db.select().from(supportConversations).where(eq(supportConversations.id, ingested.conversationId));
     assert.equal(handoffConversation.status, "waiting_human");
     assert.equal(handoffConversation.handoffReasonCode, "credential_rejected");
     assert.equal(await repository.handleLineCredentialRejected({
-      connectionId, conversationId: ingested.conversationId, now: NOW,
+      connectionId, conversationId: ingested.conversationId, eventId: "evt-turn-1", eventClaimId: eventClaim.claimId,
+      claimId: conversationClaim.claimId, now: NOW,
     }), false);
-    assert.equal(await repository.markLineEventProcessed({ connectionId, eventId: "evt-turn-1", claimId: eventClaim.claimId, now: NOW }), true);
+    assert.equal(await repository.markLineEventProcessed({ connectionId, eventId: "evt-turn-1", claimId: eventClaim.claimId, now: NOW }), false);
   });
 });
 
@@ -685,6 +687,11 @@ test("a consumed losing event is completed once by its repository resolution", a
       supportMessages.idempotencyKey,
       `${connectionId}:evt-loser`,
     ));
+
+    assert.equal(await repository.resolveLineEventAfterConversationLoss({
+      connectionId, eventId: "evt-loser", conversationId: ingested.conversationId, claimId: eventClaim.claimId,
+      now: new Date(NOW.getTime() + 31_000),
+    }), false);
 
     assert.equal(await repository.resolveLineEventAfterConversationLoss({
       connectionId, eventId: "evt-loser", conversationId: ingested.conversationId, claimId: eventClaim.claimId, now: NOW,
@@ -725,6 +732,17 @@ test("an expired event fence blocks decision and outbox persistence even if the 
       connectionId, conversationId: ingested.conversationId, claimId: conversationClaim.claimId, now: renewedAt,
     }), true);
     const afterEventExpiry = new Date(NOW.getTime() + 31_000);
+
+    assert.equal(await repository.handleLineCredentialRejected({
+      connectionId, conversationId: ingested.conversationId, eventId: "evt-expired-event",
+      eventClaimId: eventClaim.claimId, claimId: conversationClaim.claimId, now: afterEventExpiry,
+    }), false);
+    assert.equal((await db.select().from(platformConnections).where(eq(platformConnections.id, connectionId)))[0].state, "active");
+    assert.equal((await db.select().from(supportConversations).where(eq(supportConversations.id, ingested.conversationId)))[0].status, "ai_active");
+    assert.equal(await repository.markLineEventProcessed({
+      connectionId, eventId: "evt-expired-event", claimId: eventClaim.claimId,
+      conversationId: ingested.conversationId, conversationClaimId: conversationClaim.claimId, now: afterEventExpiry,
+    }), false);
 
     await assert.rejects(repository.persistDecisionAndOutbound({
       connectionId, eventId: "evt-expired-event", conversationId: ingested.conversationId, claimId: conversationClaim.claimId,

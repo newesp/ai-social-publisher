@@ -78,3 +78,28 @@ Implemented durable LINE support processing with a three-second conversation bat
 - Rechecked ownership of the competing-event path: repository resolution is terminal and its workflow caller only releases an unresolved event.
 - Rechecked Task 7 invariants: exact `windowStart + 3s` cutoff, owner-scoped current configuration, Push-only immutable outbox/retry path, credential-rejection handoff, 30-day context filter, follow-up discovery, and the Task 5 test seam remain in place.
 - No providers, LINE endpoints, migrations, deployments, secrets, or external messages were invoked.
+
+## Third and Final Combined Fix Wave (2026-07-20)
+
+### Root-cause trace and architecture
+
+- A delivery claim identified only the immutable outbox record. On a Push 401 the transport callback therefore had no event or conversation claim IDs, and `handleLineCredentialRejected` updated both connection and conversation with no current-lease predicates. The delivery workflow now passes both claims to the delivery step; the repository changes the connection only when the current event and conversation claims are unexpired, and changes the conversation using the same predicates. A stale 401 is a terminal outbox failure only.
+- Event completion previously proved only the event claim. Normal workflow completion now supplies both event and conversation claim IDs; `markLineEventProcessed` applies the two unexpired predicates in one SQL update. Handoff and credential-rejection transactions complete the event as part of their fenced terminal transition, so the workflow cannot double-complete after clearing the conversation claim. The losing-event resolver is its separate repository-atomic ownership contract: it can complete only an already-consumed message while its own event claim remains unexpired, so a loser never needs or impersonates the winner's conversation claim.
+- The first readiness read protected only the start of provider work. The provider-attempt service now reloads current owner-scoped connection/provider/model/key readiness after provider work and before it writes the decision/outbox. If it changed, the fenced result is `configuration_unready`; inactive LINE token loading cannot be translated into a generic delivery error.
+- The shared durable-boundary flaw was that `decideWithRetry` made three external provider calls inside one `"use step"`. The workflow now owns exactly three provider-attempt iterations, each calling `providerAttemptStep` (`"use step"`); retryable provider errors return an opaque status, and the third result is persisted through its own `persistHandoffStep`. Provider request context and response text stay inside the provider step and are never workflow arguments. The production workflow entry takes only `{ eventId, connectionId, conversationId }`; its step functions construct protected services server-side.
+
+### RED evidence
+
+- `node --test tests/support-message-workflow.test.js tests/support-processing-service.test.js tests/support-outbox-delivery.test.js` exited 1 before implementation: 20 passed, 3 failed. The expected failures were the absent provider-attempt step/loop shape, 401 callback ownership data, and post-provider readiness fence.
+
+### GREEN evidence
+
+- `node --test tests/support-message-workflow.test.js tests/support-processing-service.test.js tests/support-repository.test.js tests/support-outbox-delivery.test.js tests/support-decision-service.test.js tests/line-support-adapter.test.js tests/support-line-webhook.test.js` exited 0: 72 passed, 0 failed.
+- `AUTH_MODE=demo` with disposable command-scoped build values, then `npm.cmd run build`, exited 0. The installed Workflow SDK build reported `workflows build complete (4 steps, 1 workflow)` and Next compiled successfully. Local SDK documentation confirms that `"use workflow"` is the deterministic orchestration boundary, `"use step"` is the Node/side-effect boundary whose result is persisted, and `sleep("3s")` is a direct durable workflow call.
+- `git diff --check` exited 0.
+
+### Self-review
+
+- Reviewed every terminal write after delivery/provider work: decision/outbox and handoff are jointly fenced; regular completion is jointly fenced; losing-event completion is an explicit event-lease-plus-consumed-message atomic contract; credential reconnect/handoff uses both leases and remains idempotent.
+- Rechecked the Task 7 invariants: exact three-second cutoff/sleep, owner scope, 30-day context, exactly three provider attempts then handoff, Push-only immutable UUID-key delivery, 409/24-hour behavior, inbound dedupe, follow-up scheduling, and the Task 5 `processEvent` seam remain present.
+- No real LINE or LLM provider, remote database, migration, deployment, secret write, or message was used.

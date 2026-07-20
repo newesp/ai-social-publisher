@@ -18,7 +18,9 @@ export function createLineOutboundDeliveryService({
   validateDelay(maxRetryDelayMs, "Maximum retry delay");
 
   return {
-    async attemptDelivery({ deliveryId, now = new Date() } = {}) {
+    async attemptDelivery({
+      deliveryId, now = new Date(), eventId, eventClaimId, connectionId, conversationId, conversationClaimId,
+    } = {}) {
       const attemptedAt = validDate(now);
       const claim = await outboxStore.claimDelivery({ deliveryId: requiredId(deliveryId), now: attemptedAt });
       if (!claim?.claimed) return { status: claim?.status ?? "duplicate" };
@@ -73,12 +75,13 @@ export function createLineOutboundDeliveryService({
           safeErrorCode: "line_push_5xx",
         });
       }
+      let credentialHandoff;
       if (status === 401 && claim.connectionId) {
-        await onCredentialRejected({
-          connectionId: claim.connectionId,
-          ...(claim.conversationId ? { conversationId: claim.conversationId } : {}),
-          now: attemptedAt,
-        });
+        if (eventId && eventClaimId && conversationClaimId && connectionId && conversationId) {
+          credentialHandoff = await onCredentialRejected({
+            connectionId, conversationId, eventId, eventClaimId, claimId: conversationClaimId, now: attemptedAt,
+          });
+        }
       }
       await outboxStore.markDeliveryFailed({
         deliveryId,
@@ -86,7 +89,7 @@ export function createLineOutboundDeliveryService({
         safeErrorCode: "line_push_4xx",
         now: attemptedAt,
       });
-      return { status: "failed" };
+      return { status: "failed", ...(credentialHandoff?.eventCompleted === true ? { eventCompleted: true } : {}) };
     },
   };
 }

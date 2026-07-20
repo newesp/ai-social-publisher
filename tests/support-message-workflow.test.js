@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { createLineMessageWorkflow } from "../src/lib/support/workflows/line-message-workflow.js";
+import { readFile } from "node:fs/promises";
 
 const IDS = Object.freeze({ eventId: "event-1", connectionId: "connection-1", conversationId: "conversation-1" });
 const START = new Date("2026-07-20T00:00:00.000Z");
@@ -30,7 +31,10 @@ test("messages inside one three-second workflow window become one AI turn", asyn
   assert.deepEqual(result, { status: "sent" });
   assert.deepEqual(calls[0], { name: "build", input: { ...IDS, claimId: "conversation-claim", cutoff: new Date(START.getTime() + 3_000) } });
   assert.deepEqual(calls[1].input.customerTexts, ["first", "second"]);
-  assert.deepEqual(calls[2], { name: "deliver", input: { deliveryId: "delivery-1", now: START } });
+  assert.deepEqual(calls[2], { name: "deliver", input: {
+    deliveryId: "delivery-1", eventId: IDS.eventId, eventClaimId: "event-claim", connectionId: IDS.connectionId,
+    conversationId: IDS.conversationId, conversationClaimId: "conversation-claim", now: START,
+  } });
   assert.equal(calls.filter(({ name }) => name === "decide").length, 1);
 });
 
@@ -60,7 +64,7 @@ test("the workflow renews both fences after batching and uses current attempt ti
   const calls = [];
   const afterBatch = new Date(START.getTime() + 3_100);
   const attemptAt = new Date(START.getTime() + 3_200);
-  const times = [START, afterBatch, afterBatch, attemptAt, attemptAt];
+  const times = [START, afterBatch, afterBatch, afterBatch, attemptAt, attemptAt];
   const workflow = createLineMessageWorkflow({
     eventStore,
     processingService: {
@@ -86,7 +90,7 @@ test("the workflow renews both fences again after a long decision before it can 
   const renewals = [];
   const afterBatch = new Date(START.getTime() + 3_100);
   const afterDecision = new Date(START.getTime() + 35_000);
-  const times = [START, afterBatch, afterBatch, afterDecision, afterDecision];
+  const times = [START, afterBatch, afterBatch, afterBatch, afterDecision, afterDecision];
   const workflow = createLineMessageWorkflow({
     eventStore,
     processingService: {
@@ -144,11 +148,28 @@ test("the winning batch resolves every competing event it consumed before follow
   assert.deepEqual(resolved, [{ ...IDS, cutoff: new Date(START.getTime() + 3_000) }]);
 });
 
+test("an atomically handoff-completed event is not completed a second time by the workflow", async () => {
+  const eventStore = claimedEventStore();
+  const workflow = createLineMessageWorkflow({
+    eventStore,
+    processingService: {
+      acquireClaim: async () => ({ acquired: true, claimId: "conversation-claim", windowStart: START }),
+      buildTurn: async () => ({ inboundMessageId: "message-1", customerTexts: ["first"] }),
+      decideAndPersist: async () => ({ status: "waiting_human", handoffReasonCode: "configuration_unready", eventCompleted: true }),
+      releaseClaim: async () => {}, findFollowUp: async () => null,
+    },
+    sleepImpl: async () => {}, now: () => START,
+  });
+
+  assert.deepEqual(await workflow(IDS), { status: "waiting_human" });
+  assert.equal(eventStore.completed.length, 0);
+});
+
 test("a retryable Push delivery waits for its persisted retry time and reuses the same outbox delivery", async () => {
   const deliveryCalls = [];
   const sleeps = [];
   const retryAt = new Date(START.getTime() + 1_000);
-  const times = [START, START, START, START, retryAt, retryAt, retryAt];
+  const times = [START, START, START, START, START, retryAt, retryAt, retryAt];
   const workflow = createLineMessageWorkflow({
     eventStore: claimedEventStore(),
     processingService: {
@@ -170,9 +191,16 @@ test("a retryable Push delivery waits for its persisted retry time and reuses th
   assert.deepEqual(await workflow(IDS), { status: "sent" });
   assert.deepEqual(sleeps, ["3s", "1s"]);
   assert.deepEqual(deliveryCalls, [
-    { deliveryId: "delivery-1", now: START },
-    { deliveryId: "delivery-1", now: new Date(START.getTime() + 1_000) },
+    { deliveryId: "delivery-1", eventId: IDS.eventId, eventClaimId: "event-claim", connectionId: IDS.connectionId, conversationId: IDS.conversationId, conversationClaimId: "conversation-claim", now: START },
+    { deliveryId: "delivery-1", eventId: IDS.eventId, eventClaimId: "event-claim", connectionId: IDS.connectionId, conversationId: IDS.conversationId, conversationClaimId: "conversation-claim", now: new Date(START.getTime() + 1_000) },
   ]);
+});
+
+test("the durable orchestration exposes one provider attempt per step instead of a retry loop inside one step", async () => {
+  const source = await readFile(new URL("../src/lib/support/workflows/line-message-workflow.js", import.meta.url), "utf8");
+  assert.match(source, /async function providerAttemptStep[\s\S]*?"use step"/);
+  assert.doesNotMatch(source, /async function decideAndPersistStep[\s\S]*?decideWithRetry/);
+  assert.match(source, /for \(let providerAttempt = 0; providerAttempt < 3; providerAttempt \+= 1\)/);
 });
 
 function claimedEventStore() {

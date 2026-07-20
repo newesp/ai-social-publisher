@@ -101,7 +101,7 @@ test("configuration that becomes unready hands off before any provider decision"
   assert.equal(handoffs[0].reasonCode, "configuration_unready");
 });
 
-test("retryable decision failures are bounded at three attempts and then fail closed", async () => {
+test("a retryable provider result is surfaced so the workflow owns its three durable attempt boundaries", async () => {
   let attempts = 0;
   const handoffs = [];
   const service = createSupportProcessingService({
@@ -118,9 +118,37 @@ test("retryable decision failures are bounded at three attempts and then fail cl
 
   const result = await service.decideAndPersist({ ...IDS, claimId: "claim-1", inboundMessageId: "message-1", customerTexts: ["question"], now: NOW });
 
-  assert.deepEqual(result, { status: "waiting_human", handoffReasonCode: "provider_unavailable" });
-  assert.equal(attempts, 3);
-  assert.equal(handoffs[0].reasonCode, "provider_unavailable");
+  assert.deepEqual(result, { status: "retryable_provider" });
+  assert.equal(attempts, 1);
+  assert.equal(handoffs.length, 0);
+});
+
+test("readiness is rechecked after a provider result before an outbox can be created", async () => {
+  let reads = 0;
+  let persisted = 0;
+  const handoffs = [];
+  const service = createSupportProcessingService({
+    repository: {
+      loadCurrentProcessingContext: async () => {
+        reads += 1;
+        return {
+          supportState: "enabled", conversationStatus: "ai_active", configurationReady: reads === 1,
+          aiTurnsInLastFiveMinutes: 0, configuration: { llmProvider: "openai", llmModel: "gpt-test" },
+          settings: { openAiApiKey: "private-key" }, recipient: "U-private", faqs: [{ id: "faq-1", question: "q", answer: "a", category: "general", keywords: ["q"] }], messages: [],
+        };
+      },
+      persistDecisionAndOutbound: async () => { persisted += 1; },
+      persistHandoff: async (input) => handoffs.push(input),
+    },
+    decisionService: { decide: async () => ({ action: "reply", answer: "answer", category: "general", knowledgeSourceIds: ["faq-1"] }) },
+  });
+
+  const result = await service.decideAndPersist({ ...IDS, claimId: "claim-1", eventClaimId: "event-claim", inboundMessageId: "message-1", customerTexts: ["q"], now: NOW });
+
+  assert.deepEqual(result, { status: "waiting_human", handoffReasonCode: "configuration_unready" });
+  assert.equal(reads, 2);
+  assert.equal(persisted, 0);
+  assert.equal(handoffs[0].reasonCode, "configuration_unready");
 });
 
 test("a stale claimed turn cannot finalize after its conversation fence has been lost", async () => {

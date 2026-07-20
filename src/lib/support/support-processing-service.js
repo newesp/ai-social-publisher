@@ -1,7 +1,6 @@
 import { retrieveFaqs } from "./knowledge/faq-retrieval.js";
 
 const MAX_AI_TURNS_PER_WINDOW = 10;
-const MAX_DECISION_ATTEMPTS = 3;
 
 export function createSupportProcessingService({ repository, decisionService, deliveryService, now = () => new Date() } = {}) {
   return {
@@ -20,7 +19,7 @@ export function createSupportProcessingService({ repository, decisionService, de
     },
 
     async decideAndPersist(input) {
-      const context = await repository.loadCurrentProcessingContext(input);
+      let context = await repository.loadCurrentProcessingContext(input);
       const failClosedReason = stateFailure(context);
       if (failClosedReason) return persistHandoff(repository, input, failClosedReason);
       if (Number(context.aiTurnsInLastFiveMinutes) >= MAX_AI_TURNS_PER_WINDOW) {
@@ -36,17 +35,27 @@ export function createSupportProcessingService({ repository, decisionService, de
       });
       let decision;
       try {
-        decision = await decideWithRetry(decisionService, {
+        decision = await decisionService.decide({
           configuration: context.configuration,
           settings: context.settings,
           messages: context.messages,
           faqs,
         });
       } catch (error) {
-        return persistHandoff(repository, { ...input, now: currentDate(now) }, error?.retryable ? "provider_unavailable" : "invalid_ai_decision");
+        if (error?.retryable === true) return { status: "retryable_provider" };
+        return persistHandoff(repository, { ...input, now: currentDate(now) }, "invalid_ai_decision");
       }
       if (!decision || decision.action !== "reply") {
         return persistHandoff(repository, { ...input, now: currentDate(now) }, decision?.handoffReasonCode ?? "invalid_ai_decision");
+      }
+
+      // Provider work may outlive a lease and configuration can be changed while it runs.
+      // Reload protected state immediately before the fenced decision/outbox transaction.
+      context = await repository.loadCurrentProcessingContext({ ...input, now: currentDate(now) });
+      const afterProviderFailure = stateFailure(context);
+      if (afterProviderFailure) return persistHandoff(repository, { ...input, now: currentDate(now) }, afterProviderFailure);
+      if (context.configurationReady === false || !context.configuration || !context.settings || !context.recipient) {
+        return persistHandoff(repository, { ...input, now: currentDate(now) }, "configuration_unready");
       }
 
       const canonicalBody = JSON.stringify({
@@ -81,18 +90,11 @@ export function createSupportProcessingService({ repository, decisionService, de
     async resolveBatchedEvents(input) {
       return repository.resolveProcessedCompetingEvents(input);
     },
-  };
-}
 
-async function decideWithRetry(decisionService, input) {
-  for (let attempt = 0; attempt < MAX_DECISION_ATTEMPTS; attempt += 1) {
-    try {
-      return await decisionService.decide(input);
-    } catch (error) {
-      if (error?.retryable !== true || attempt === MAX_DECISION_ATTEMPTS - 1) throw error;
-    }
-  }
-  throw new Error("Decision attempts exhausted.");
+    async persistHandoff(input) {
+      return persistHandoff(repository, input, input.reasonCode);
+    },
+  };
 }
 
 function stateFailure(context) {
@@ -102,7 +104,7 @@ function stateFailure(context) {
 }
 
 async function persistHandoff(repository, input, reasonCode) {
-  await repository.persistHandoff({
+  const persisted = await repository.persistHandoff({
     eventId: input.eventId,
     ...(input.eventClaimId ? { eventClaimId: input.eventClaimId } : {}),
     connectionId: input.connectionId,
@@ -112,7 +114,10 @@ async function persistHandoff(repository, input, reasonCode) {
     reasonCode,
     now: input.now,
   });
-  return { status: "waiting_human", handoffReasonCode: reasonCode };
+  return {
+    status: "waiting_human", handoffReasonCode: reasonCode,
+    ...(persisted?.eventCompleted === true ? { eventCompleted: true } : {}),
+  };
 }
 
 function currentDate(now) {

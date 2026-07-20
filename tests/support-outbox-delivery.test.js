@@ -109,9 +109,40 @@ test("a Push credential rejection fails closed, reconnects, and hands off its co
     onCredentialRejected: async (input) => reconnects.push(input),
   });
 
-  assert.deepEqual(await service.attemptDelivery({ deliveryId: DELIVERY_ID, now: NOW }), { status: "failed" });
-  assert.deepEqual(reconnects, [{ connectionId: "connection-1", conversationId: "conversation-1", now: NOW }]);
+  assert.deepEqual(await service.attemptDelivery({
+    deliveryId: DELIVERY_ID, now: NOW, eventId: "event-1", eventClaimId: "event-claim",
+    connectionId: "connection-1", conversationId: "conversation-1", conversationClaimId: "conversation-claim",
+  }), { status: "failed" });
+  assert.deepEqual(reconnects, [{
+    connectionId: "connection-1", conversationId: "conversation-1", eventId: "event-1",
+    eventClaimId: "event-claim", claimId: "conversation-claim", now: NOW,
+  }]);
   assert.equal(store.status, "failed");
+});
+
+test("a stale 401 cannot mutate credential or conversation state after its processing ownership is lost", async () => {
+  const store = createDeliveryStore({ connectionId: "connection-1", conversationId: "conversation-1" });
+  const rejected = [];
+  const service = createLineOutboundDeliveryService({
+    outboxStore: store,
+    sendPush: async () => ({ status: 401, headers: {} }),
+    onCredentialRejected: async (input) => rejected.push(input),
+  });
+
+  await service.attemptDelivery({
+    deliveryId: DELIVERY_ID,
+    now: NOW,
+    eventId: "event-1",
+    eventClaimId: "stale-event-claim",
+    connectionId: "connection-1",
+    conversationId: "conversation-1",
+    conversationClaimId: "stale-conversation-claim",
+  });
+
+  assert.deepEqual(rejected, [{
+    connectionId: "connection-1", conversationId: "conversation-1", eventId: "event-1",
+    eventClaimId: "stale-event-claim", claimId: "stale-conversation-claim", now: NOW,
+  }]);
 });
 
 function createDeliveryStore({ firstAttemptAt = null, connectionId = undefined, conversationId = undefined } = {}) {
