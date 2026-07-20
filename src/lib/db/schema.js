@@ -222,6 +222,37 @@ export const supportWebhookEvents = sqliteTable("support_webhook_events", {
     .on(table.platformConnectionId, table.webhookEventId),
 ]);
 
+export const supportOutboundDeliveries = sqliteTable("support_outbound_deliveries", {
+  id: text("id").primaryKey(),
+  webhookEventId: text("webhook_event_id")
+    .notNull()
+    .references(() => supportWebhookEvents.id),
+  conversationId: text("conversation_id")
+    .notNull()
+    .references(() => supportConversations.id),
+  encryptedRecipient: text("encrypted_recipient").notNull(),
+  encryptedCanonicalBody: text("encrypted_canonical_body").notNull(),
+  retryKey: text("retry_key").notNull(),
+  deliveryStatus: text("delivery_status").notNull(),
+  deliveryClaimId: text("delivery_claim_id"),
+  deliveryClaimExpiresAt: integer("delivery_claim_expires_at", { mode: "timestamp" }),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  firstAttemptAt: integer("first_attempt_at", { mode: "timestamp" }),
+  lastAttemptAt: integer("last_attempt_at", { mode: "timestamp" }),
+  nextAttemptAt: integer("next_attempt_at", { mode: "timestamp" }),
+  acceptedRequestId: text("accepted_request_id"),
+  safeErrorCode: text("safe_error_code"),
+  sentAt: integer("sent_at", { mode: "timestamp" }),
+  failedAt: integer("failed_at", { mode: "timestamp" }),
+  humanReviewAt: integer("human_review_at", { mode: "timestamp" }),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  uniqueIndex("support_outbound_deliveries_event_unique").on(table.webhookEventId),
+  uniqueIndex("support_outbound_deliveries_retry_key_unique").on(table.retryKey),
+  index("support_outbound_deliveries_status_next_attempt_idx")
+    .on(table.deliveryStatus, table.nextAttemptAt),
+]);
+
 export const supportConversationTransitions = sqliteTable("support_conversation_transitions", {
   id: text("id").primaryKey(),
   conversationId: text("conversation_id")

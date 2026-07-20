@@ -16,6 +16,7 @@ import {
   supportConversations,
   supportFaqs,
   supportMessages,
+  supportOutboundDeliveries,
   supportWebhookEvents,
   userSettings,
 } from "../src/lib/db/schema.js";
@@ -334,6 +335,54 @@ test("event-processing claims fence duplicate workflow runs, release failures, a
   });
 });
 
+test("an expired duplicate workflow reuses one immutable UUID outbound delivery and routes a 24-hour unknown to review", async () => {
+  await withDatabase(async (db) => {
+    const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });
+    const connectionId = "11111111-1111-4111-8111-111111111111";
+    const eventId = "evt-outbox-1";
+    const body = "{\"to\":\"private-user-id\",\"messages\":[{\"type\":\"text\",\"text\":\"first decision\"}]}";
+    await db.insert(platformConnections).values(connection(connectionId, "owner@example.com"));
+    const ingested = await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com", connectionId, eventId,
+      externalUserId: "private-user-id", replyToken: "private-reply-token",
+      message: { type: "text", text: "private message", safeMetadata: {} }, receivedAt: NOW,
+    });
+    const dispatch = await repository.claimLineWorkflowDispatch({ connectionId, eventId, now: NOW });
+    await repository.markLineWorkflowDispatched({ ...dispatch, now: NOW });
+    const firstProcessing = await repository.claimLineEventProcessing({ connectionId, eventId, now: NOW });
+    const first = await repository.createLineOutboundDelivery({
+      connectionId, eventId, conversationId: ingested.conversationId, claimId: firstProcessing.claimId,
+      recipient: "private-user-id", canonicalBody: body, now: NOW,
+    });
+    assert.equal(first.created, true);
+    assert.match(first.retryKey, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+
+    const resumedAt = new Date(NOW.getTime() + 31_000);
+    const resumedProcessing = await repository.claimLineEventProcessing({ connectionId, eventId, now: resumedAt });
+    const duplicate = await repository.createLineOutboundDelivery({
+      connectionId, eventId, conversationId: ingested.conversationId, claimId: resumedProcessing.claimId,
+      recipient: "private-user-id",
+      canonicalBody: "{\"to\":\"private-user-id\",\"messages\":[{\"type\":\"text\",\"text\":\"second decision must not replace first\"}]}",
+      now: resumedAt,
+    });
+    assert.deepEqual(duplicate, { created: false, deliveryId: first.deliveryId, retryKey: first.retryKey });
+    assert.equal((await db.select().from(supportOutboundDeliveries)).length, 1);
+    const [stored] = await db.select().from(supportOutboundDeliveries);
+    assert.equal(stored.encryptedRecipient.includes("private-user-id"), false);
+    assert.equal(stored.encryptedCanonicalBody.includes("first decision"), false);
+
+    const delivery = await repository.claimLineOutboundDelivery({ deliveryId: first.deliveryId, now: NOW });
+    assert.equal(delivery.claimed, true);
+    assert.equal(delivery.retryKey, first.retryKey);
+    assert.equal(delivery.canonicalBody, body);
+    assert.equal((await repository.claimLineOutboundDelivery({
+      deliveryId: first.deliveryId,
+      now: new Date(NOW.getTime() + (24 * 60 * 60 * 1_000) + 1),
+    })).status, "human_review");
+    assert.equal((await db.select().from(supportOutboundDeliveries))[0].retryKey, first.retryKey);
+  });
+});
+
 test("FAQ mutations require both normalized owner and FAQ id", async () => {
   await withDatabase(async (db) => {
     const repository = createSupportRepository(db);
@@ -584,6 +633,19 @@ async function withDatabase(run) {
         processed_at INTEGER, created_at INTEGER NOT NULL,
         UNIQUE (platform_connection_id, webhook_event_id)
       );
+      CREATE TABLE support_outbound_deliveries (
+        id TEXT PRIMARY KEY NOT NULL, webhook_event_id TEXT NOT NULL UNIQUE,
+        conversation_id TEXT NOT NULL, encrypted_recipient TEXT NOT NULL,
+        encrypted_canonical_body TEXT NOT NULL, retry_key TEXT NOT NULL UNIQUE,
+        delivery_status TEXT NOT NULL, delivery_claim_id TEXT, delivery_claim_expires_at INTEGER,
+        attempt_count INTEGER NOT NULL DEFAULT 0, first_attempt_at INTEGER, last_attempt_at INTEGER,
+        next_attempt_at INTEGER, accepted_request_id TEXT, safe_error_code TEXT,
+        sent_at INTEGER, failed_at INTEGER, human_review_at INTEGER, created_at INTEGER NOT NULL,
+        FOREIGN KEY (webhook_event_id) REFERENCES support_webhook_events(id),
+        FOREIGN KEY (conversation_id) REFERENCES support_conversations(id)
+      );
+      CREATE INDEX support_outbound_deliveries_status_next_attempt_idx
+        ON support_outbound_deliveries(delivery_status, next_attempt_at);
       CREATE TABLE support_conversation_transitions (
         id TEXT PRIMARY KEY NOT NULL, conversation_id TEXT NOT NULL, requested_action TEXT NOT NULL,
         from_status TEXT NOT NULL, to_status TEXT NOT NULL, requested_by_owner_email TEXT NOT NULL,

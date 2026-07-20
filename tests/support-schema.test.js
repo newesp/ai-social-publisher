@@ -43,6 +43,13 @@ const SUPPORT_TABLES = {
     "processingStatus", "encryptedReplyToken", "replyTokenExpiresAt",
     "safeErrorCode", "receivedAt", "processedAt", "createdAt",
   ],
+  supportOutboundDeliveries: [
+    "id", "webhookEventId", "conversationId", "encryptedRecipient",
+    "encryptedCanonicalBody", "retryKey", "deliveryStatus", "deliveryClaimId",
+    "deliveryClaimExpiresAt", "attemptCount", "firstAttemptAt", "lastAttemptAt",
+    "nextAttemptAt", "acceptedRequestId", "safeErrorCode", "sentAt", "failedAt",
+    "humanReviewAt", "createdAt",
+  ],
   supportConversationTransitions: [
     "id", "conversationId", "requestedAction", "fromStatus", "toStatus",
     "requestedByOwnerEmail", "expectedVersion", "requestedAt", "effectiveAt",
@@ -59,15 +66,19 @@ const REQUIRED_INDEXES = [
   "support_messages_conversation_created_idx",
   "support_messages_idempotency_unique",
   "support_webhook_events_connection_event_unique",
+  "support_outbound_deliveries_event_unique",
+  "support_outbound_deliveries_retry_key_unique",
+  "support_outbound_deliveries_status_next_attempt_idx",
   "support_transitions_conversation_created_idx",
 ];
 
 test("support migration creates tenant, idempotency, claim, and transition indexes", async () => {
   const sql = await readFile(new URL("../drizzle/0004_line_ai_customer_support.sql", import.meta.url), "utf8");
-  for (const name of REQUIRED_INDEXES) assert.match(sql, new RegExp(name));
+  const outboxSql = await readFile(new URL("../drizzle/0005_line_outbound_delivery_outbox.sql", import.meta.url), "utf8");
+  for (const name of REQUIRED_INDEXES) assert.match(`${sql}\n${outboxSql}`, new RegExp(name));
 });
 
-test("support schema exports all seven UUID-backed tables with the required fields", () => {
+test("support schema exports all eight UUID-backed tables with the required fields", () => {
   for (const [exportName, expectedColumns] of Object.entries(SUPPORT_TABLES)) {
     assert.ok(schema[exportName], `${exportName} must be exported`);
     const columns = getTableColumns(schema[exportName]);
@@ -106,12 +117,13 @@ test("pending transitions preserve the circular conversation foreign keys", asyn
   );
 });
 
-test("support migration is journaled after 0003 and enforces customer and delivery idempotency", async () => {
+test("support migrations journal immutable outbound delivery and enforce idempotency", async () => {
   const sql = await readFile(new URL("../drizzle/0004_line_ai_customer_support.sql", import.meta.url), "utf8");
+  const outboxSql = await readFile(new URL("../drizzle/0005_line_outbound_delivery_outbox.sql", import.meta.url), "utf8");
   const journal = JSON.parse(await readFile(new URL("../drizzle/meta/_journal.json", import.meta.url), "utf8"));
   const snapshot = JSON.parse(await readFile(new URL("../drizzle/meta/0004_snapshot.json", import.meta.url), "utf8"));
-  assert.equal(journal.entries.at(-1).idx, 4);
-  assert.equal(journal.entries.at(-1).tag, "0004_line_ai_customer_support");
+  assert.equal(journal.entries.at(-1).idx, 5);
+  assert.equal(journal.entries.at(-1).tag, "0005_line_outbound_delivery_outbox");
   for (const tableName of [
     "support_configurations",
     "support_faqs",
@@ -139,6 +151,7 @@ test("support migration is journaled after 0003 and enforces customer and delive
       CREATE TABLE platform_connections (id TEXT PRIMARY KEY NOT NULL);
       INSERT INTO platform_connections (id) VALUES ('line-1');
       ${sql.replaceAll("--> statement-breakpoint", "")}
+      ${outboxSql.replaceAll("--> statement-breakpoint", "")}
     `);
     const conversation = (id) => ({
       id,

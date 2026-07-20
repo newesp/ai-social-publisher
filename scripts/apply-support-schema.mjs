@@ -8,6 +8,7 @@ import {
   supportConversations,
   supportFaqs,
   supportMessages,
+  supportOutboundDeliveries,
   supportWebhookEvents,
 } from "../src/lib/db/schema.js";
 import { isDirectExecution } from "./remove-legacy-platform-credentials.mjs";
@@ -19,6 +20,7 @@ const SUPPORT_TABLES = Object.fromEntries([
   supportFaqs,
   supportConversations,
   supportMessages,
+  supportOutboundDeliveries,
   supportAiDecisions,
   supportWebhookEvents,
   supportConversationTransitions,
@@ -84,6 +86,21 @@ const SUPPORT_INDEXES = {
     table: "support_webhook_events",
     unique: true,
     columns: ["platform_connection_id", "webhook_event_id"],
+  },
+  support_outbound_deliveries_event_unique: {
+    table: "support_outbound_deliveries",
+    unique: true,
+    columns: ["webhook_event_id"],
+  },
+  support_outbound_deliveries_retry_key_unique: {
+    table: "support_outbound_deliveries",
+    unique: true,
+    columns: ["retry_key"],
+  },
+  support_outbound_deliveries_status_next_attempt_idx: {
+    table: "support_outbound_deliveries",
+    unique: false,
+    columns: ["delivery_status", "next_attempt_at"],
   },
   support_transitions_conversation_created_idx: {
     table: "support_conversation_transitions",

@@ -80,6 +80,34 @@ export function createLineSupportAdapter({
       });
       return { delivered: true };
     },
+
+    async pushCanonical({ accessToken, canonicalBody, retryKey }) {
+      const headers = providerHeaders(accessToken);
+      headers["X-Line-Retry-Key"] = requireRetryKey(retryKey);
+      try {
+        return await fetchWithDeadline(
+          fetchImpl,
+          `${LINE_API_BASE}/v2/bot/message/push`,
+          { method: "POST", headers, body: requireCanonicalPushBody(canonicalBody) },
+          requestTimeoutMs,
+          async (response) => {
+            try {
+              if (typeof response?.arrayBuffer === "function") await response.arrayBuffer();
+            } catch {
+              // The delivery classifier uses the response status; provider bodies are never surfaced.
+            }
+            return {
+              status: Number(response?.status),
+              headers: {
+                "x-line-accepted-request-id": response?.headers?.get("x-line-accepted-request-id") ?? "",
+              },
+            };
+          },
+        );
+      } catch {
+        throw providerError();
+      }
+    },
   };
 }
 
@@ -140,6 +168,30 @@ function requireText(value, label) {
   const text = value.trim();
   if (!text) throw inputError(`${label} is required.`);
   return text;
+}
+
+function requireRetryKey(value) {
+  const retryKey = requireText(value, "LINE retry key");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(retryKey)) {
+    throw inputError("LINE retry key must be an RFC 4122 UUID.");
+  }
+  return retryKey;
+}
+
+function requireCanonicalPushBody(value) {
+  if (typeof value !== "string" || !value || value.length > 20_000) {
+    throw inputError("LINE canonical Push body is required.");
+  }
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
+      || typeof parsed.to !== "string" || !Array.isArray(parsed.messages) || !parsed.messages.length) {
+      throw new Error("invalid payload");
+    }
+  } catch {
+    throw inputError("LINE canonical Push body is required.");
+  }
+  return value;
 }
 
 function cryptographicText(value) {

@@ -139,6 +139,33 @@ test("sends reply and push text with bounded inputs and retry-key support", asyn
   ]);
 });
 
+test("sends a stored canonical Push payload byte-for-byte and preserves LINE acceptance headers", async () => {
+  const canonicalBody = "{\"to\":\"customer-id\",\"messages\":[{\"type\":\"text\",\"text\":\"kept  exactly\"}]}";
+  const calls = [];
+  const adapter = createLineSupportAdapter({
+    fetchImpl: async (_url, options) => {
+      calls.push(options);
+      return new Response("", {
+        status: 409,
+        headers: { "x-line-accepted-request-id": "accepted-request-id" },
+      });
+    },
+  });
+
+  const result = await adapter.pushCanonical({
+    accessToken: "line-access-token",
+    canonicalBody,
+    retryKey: "11111111-1111-4111-8111-111111111111",
+  });
+
+  assert.equal(calls[0].body, canonicalBody);
+  assert.equal(calls[0].headers["X-Line-Retry-Key"], "11111111-1111-4111-8111-111111111111");
+  assert.deepEqual(result, {
+    status: 409,
+    headers: { "x-line-accepted-request-id": "accepted-request-id" },
+  });
+});
+
 test("provider errors and deadlines expose only a fixed retryable adapter error", async () => {
   const providerBody = "private provider body with line-access-token";
   const failing = createLineSupportAdapter({

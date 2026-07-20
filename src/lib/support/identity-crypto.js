@@ -5,6 +5,7 @@ import { decryptJson, encryptJson } from "../settings/credential-crypto.js";
 const CUSTOMER_LOOKUP_PURPOSE = "support.customer-lookup.v1";
 const EXTERNAL_ID_PURPOSE = "support.customer-external-id.v1";
 const REPLY_TOKEN_PURPOSE = "support.reply-token.v1";
+const OUTBOUND_BODY_PURPOSE = "support.outbound-body.v1";
 
 export function hashWebhookKey(key) {
   return crypto.createHash("sha256").update(requireText(key, "Webhook key")).digest("hex");
@@ -44,6 +45,17 @@ export function encryptReplyToken(replyToken, encryptionKey) {
 
 export function decryptReplyToken(encryptedReplyToken, encryptionKey) {
   return decryptPurposeText(encryptedReplyToken, encryptionKey, REPLY_TOKEN_PURPOSE, "replyToken", "Stored reply token");
+}
+
+export function encryptOutboundCanonicalBody(canonicalBody, encryptionKey) {
+  return encryptJson({
+    purpose: OUTBOUND_BODY_PURPOSE,
+    canonicalBody: requireText(canonicalBody, "Outbound canonical body"),
+  }, encryptionKey);
+}
+
+export function decryptOutboundCanonicalBody(encryptedBody, encryptionKey) {
+  return decryptPurposeText(encryptedBody, encryptionKey, OUTBOUND_BODY_PURPOSE, "canonicalBody", "Stored outbound body");
 }
 
 function decryptPurposeText(encryptedValue, encryptionKey, purpose, field, label) {

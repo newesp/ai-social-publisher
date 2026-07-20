@@ -108,12 +108,17 @@ test("support schema verifier checks all tables, named indexes, and duplicate ac
     new URL("../drizzle/0004_line_ai_customer_support.sql", import.meta.url),
     "utf8",
   );
+  const outboxSql = await readFile(
+    new URL("../drizzle/0005_line_outbound_delivery_outbox.sql", import.meta.url),
+    "utf8",
+  );
   const client = createClient({ url: ":memory:" });
   try {
     await client.executeMultiple(`
       CREATE TABLE platform_connections (id TEXT PRIMARY KEY NOT NULL);
       INSERT INTO platform_connections (id) VALUES ('line-1');
       ${migrationSql.replaceAll("--> statement-breakpoint", "")}
+      ${outboxSql.replaceAll("--> statement-breakpoint", "")}
     `);
     assert.deepEqual(await verifySupportSchema(client), { schemaVerified: true });
 
@@ -171,12 +176,17 @@ test("support schema verifier rejects malformed columns and missing foreign keys
     new URL("../drizzle/0004_line_ai_customer_support.sql", import.meta.url),
     "utf8",
   );
+  const outboxSql = await readFile(
+    new URL("../drizzle/0005_line_outbound_delivery_outbox.sql", import.meta.url),
+    "utf8",
+  );
 
   const malformedColumnsClient = createClient({ url: ":memory:" });
   try {
     await malformedColumnsClient.executeMultiple(`
       CREATE TABLE platform_connections (id TEXT PRIMARY KEY NOT NULL);
       ${migrationSql.replaceAll("--> statement-breakpoint", "")}
+      ${outboxSql.replaceAll("--> statement-breakpoint", "")}
       PRAGMA foreign_keys=OFF;
       DROP TABLE support_ai_decisions;
       CREATE TABLE support_ai_decisions (id TEXT PRIMARY KEY NOT NULL);
@@ -191,6 +201,7 @@ test("support schema verifier rejects malformed columns and missing foreign keys
     await missingForeignKeyClient.executeMultiple(`
       CREATE TABLE platform_connections (id TEXT PRIMARY KEY NOT NULL);
       ${migrationSql.replaceAll("--> statement-breakpoint", "")}
+      ${outboxSql.replaceAll("--> statement-breakpoint", "")}
       PRAGMA foreign_keys=OFF;
       DROP TABLE support_conversation_transitions;
       CREATE TABLE support_conversation_transitions (

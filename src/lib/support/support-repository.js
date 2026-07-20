@@ -11,6 +11,7 @@ import {
   supportConversations,
   supportFaqs,
   supportMessages,
+  supportOutboundDeliveries,
   supportWebhookEvents,
   userSettings,
 } from "../db/schema.js";
@@ -18,7 +19,9 @@ import { normalizeEmail } from "../auth/policy.js";
 import { decryptJson } from "../settings/credential-crypto.js";
 import {
   customerLookupKey,
+  decryptOutboundCanonicalBody,
   encryptExternalId,
+  encryptOutboundCanonicalBody,
   encryptReplyToken,
 } from "./identity-crypto.js";
 
@@ -28,6 +31,8 @@ const PROVIDER_KEY_BY_NAME = Object.freeze({
 });
 const DISPATCH_LEASE_MS = 30_000;
 const EVENT_PROCESSING_LEASE_MS = 30_000;
+const OUTBOUND_DELIVERY_LEASE_MS = 30_000;
+const OUTBOUND_REVIEW_WINDOW_MS = 24 * 60 * 60 * 1_000;
 
 export function createSupportRepository(db = createDbClient(), {
   encryptionKey,
@@ -306,6 +311,154 @@ export function createSupportRepository(db = createDbClient(), {
       return Boolean(released);
     },
 
+    async createLineOutboundDelivery(input) {
+      const delivery = validateOutboundDeliveryInput(input);
+      return retryBusyOperation(() => db.transaction(async (tx) => {
+        const [event] = await tx.select({ id: supportWebhookEvents.id }).from(supportWebhookEvents).where(and(
+          eq(supportWebhookEvents.platformConnectionId, delivery.connectionId),
+          eq(supportWebhookEvents.webhookEventId, delivery.eventId),
+          eq(supportWebhookEvents.processingStatus, "processing"),
+          eq(supportWebhookEvents.safeErrorCode, delivery.claimId),
+        )).limit(1);
+        if (!event) throw unavailablePersistenceError();
+        const [inboundMessage] = await tx.select({ id: supportMessages.id }).from(supportMessages).where(and(
+          eq(supportMessages.conversationId, delivery.conversationId),
+          eq(supportMessages.idempotencyKey, `${delivery.connectionId}:${delivery.eventId}`),
+        )).limit(1);
+        if (!inboundMessage) throw unavailablePersistenceError();
+
+        const retryKey = randomUUID();
+        const deliveryId = randomUUID();
+        const [created] = await tx.insert(supportOutboundDeliveries).values({
+          id: deliveryId,
+          webhookEventId: event.id,
+          conversationId: delivery.conversationId,
+          encryptedRecipient: encryptExternalId(delivery.recipient, encryptionKey),
+          encryptedCanonicalBody: encryptOutboundCanonicalBody(delivery.canonicalBody, encryptionKey),
+          retryKey,
+          deliveryStatus: "pending",
+          deliveryClaimId: null,
+          deliveryClaimExpiresAt: null,
+          attemptCount: 0,
+          firstAttemptAt: null,
+          lastAttemptAt: null,
+          nextAttemptAt: null,
+          acceptedRequestId: null,
+          safeErrorCode: null,
+          sentAt: null,
+          failedAt: null,
+          humanReviewAt: null,
+          createdAt: delivery.now,
+        }).onConflictDoNothing({
+          target: supportOutboundDeliveries.webhookEventId,
+        }).returning({
+          id: supportOutboundDeliveries.id,
+          retryKey: supportOutboundDeliveries.retryKey,
+        });
+        if (created) return { created: true, deliveryId: created.id, retryKey: created.retryKey };
+
+        const [existing] = await tx.select({
+          id: supportOutboundDeliveries.id,
+          retryKey: supportOutboundDeliveries.retryKey,
+        }).from(supportOutboundDeliveries).where(eq(supportOutboundDeliveries.webhookEventId, event.id)).limit(1);
+        if (!existing) throw unavailablePersistenceError();
+        return { created: false, deliveryId: existing.id, retryKey: existing.retryKey };
+      }));
+    },
+
+    async claimLineOutboundDelivery({ deliveryId, now = new Date() }) {
+      const delivery = { deliveryId: requiredBoundedText(deliveryId, "Outbound delivery ID", 100), now: validDate(now) };
+      return retryBusyOperation(() => db.transaction(async (tx) => {
+        const [existing] = await tx.select().from(supportOutboundDeliveries)
+          .where(eq(supportOutboundDeliveries.id, delivery.deliveryId)).limit(1);
+        if (!existing) return { claimed: false, status: "duplicate" };
+        if (["sent", "failed", "human_review"].includes(existing.deliveryStatus)) {
+          return { claimed: false, status: existing.deliveryStatus };
+        }
+        if (existing.firstAttemptAt
+          && delivery.now.getTime() - existing.firstAttemptAt.getTime() > OUTBOUND_REVIEW_WINDOW_MS) {
+          await tx.update(supportOutboundDeliveries).set({
+            deliveryStatus: "human_review",
+            deliveryClaimId: null,
+            deliveryClaimExpiresAt: null,
+            nextAttemptAt: null,
+            humanReviewAt: delivery.now,
+            safeErrorCode: "line_push_review_required",
+          }).where(and(
+            eq(supportOutboundDeliveries.id, delivery.deliveryId),
+            or(
+              eq(supportOutboundDeliveries.deliveryStatus, "pending"),
+              eq(supportOutboundDeliveries.deliveryStatus, "retryable"),
+              eq(supportOutboundDeliveries.deliveryStatus, "sending"),
+            ),
+          ));
+          return { claimed: false, status: "human_review" };
+        }
+        if (existing.nextAttemptAt && existing.nextAttemptAt > delivery.now) {
+          return { claimed: false, status: "retryable" };
+        }
+        const claimId = randomUUID();
+        const [claimed] = await tx.update(supportOutboundDeliveries).set({
+          deliveryStatus: "sending",
+          deliveryClaimId: claimId,
+          deliveryClaimExpiresAt: new Date(delivery.now.getTime() + OUTBOUND_DELIVERY_LEASE_MS),
+          attemptCount: existing.attemptCount + 1,
+          firstAttemptAt: existing.firstAttemptAt ?? delivery.now,
+          lastAttemptAt: delivery.now,
+          nextAttemptAt: null,
+          safeErrorCode: null,
+        }).where(and(
+          eq(supportOutboundDeliveries.id, delivery.deliveryId),
+          or(
+            eq(supportOutboundDeliveries.deliveryStatus, "pending"),
+            and(
+              eq(supportOutboundDeliveries.deliveryStatus, "retryable"),
+              or(
+                isNull(supportOutboundDeliveries.nextAttemptAt),
+                lte(supportOutboundDeliveries.nextAttemptAt, delivery.now),
+              ),
+            ),
+            and(
+              eq(supportOutboundDeliveries.deliveryStatus, "sending"),
+              lte(supportOutboundDeliveries.deliveryClaimExpiresAt, delivery.now),
+            ),
+          ),
+        )).returning();
+        if (!claimed) return { claimed: false, status: "duplicate" };
+        return {
+          claimed: true,
+          claimId,
+          retryKey: claimed.retryKey,
+          canonicalBody: decryptOutboundCanonicalBody(claimed.encryptedCanonicalBody, encryptionKey),
+          attemptCount: claimed.attemptCount,
+        };
+      }));
+    },
+
+    async markLineOutboundDeliverySent({ deliveryId, claimId, acceptedRequestId = null, now = new Date() }) {
+      return updateOutboundDelivery(db, {
+        deliveryId, claimId, now, status: "sent", acceptedRequestId,
+        changes: { sentAt: validDate(now), safeErrorCode: null, nextAttemptAt: null },
+      });
+    },
+
+    async markLineOutboundDeliveryRetryable({ deliveryId, claimId, retryAt, safeErrorCode, now = new Date() }) {
+      return updateOutboundDelivery(db, {
+        deliveryId, claimId, now, status: "retryable",
+        changes: {
+          nextAttemptAt: validDate(retryAt),
+          safeErrorCode: safeOutboundErrorCode(safeErrorCode),
+        },
+      });
+    },
+
+    async markLineOutboundDeliveryFailed({ deliveryId, claimId, safeErrorCode, now = new Date() }) {
+      return updateOutboundDelivery(db, {
+        deliveryId, claimId, now, status: "failed",
+        changes: { failedAt: validDate(now), safeErrorCode: safeOutboundErrorCode(safeErrorCode), nextAttemptAt: null },
+      });
+    },
+
     async recordIgnoredLineEvent({ connectionId, eventId, sourceType, receivedAt = new Date() }) {
       const event = validateIgnoredLineEvent({ connectionId, eventId, sourceType, receivedAt });
       return retryBusyOperation(async () => {
@@ -522,6 +675,37 @@ async function retryBusyOperation(operation, attempts = 8) {
   }
 }
 
+async function updateOutboundDelivery(db, {
+  deliveryId,
+  claimId,
+  now,
+  status,
+  acceptedRequestId = undefined,
+  changes,
+}) {
+  validDate(now);
+  const safeDeliveryId = requiredBoundedText(deliveryId, "Outbound delivery ID", 100);
+  const safeClaimId = requiredBoundedText(claimId, "Outbound delivery claim", 100);
+  const [updated] = await retryBusyOperation(() => db.update(supportOutboundDeliveries).set({
+    deliveryStatus: status,
+    deliveryClaimId: null,
+    deliveryClaimExpiresAt: null,
+    ...(acceptedRequestId === undefined ? {} : {
+      acceptedRequestId: acceptedRequestId == null ? null : requiredBoundedText(
+        acceptedRequestId,
+        "LINE accepted request ID",
+        256,
+      ),
+    }),
+    ...changes,
+  }).where(and(
+    eq(supportOutboundDeliveries.id, safeDeliveryId),
+    eq(supportOutboundDeliveries.deliveryStatus, "sending"),
+    eq(supportOutboundDeliveries.deliveryClaimId, safeClaimId),
+  )).returning({ id: supportOutboundDeliveries.id }));
+  return Boolean(updated);
+}
+
 async function findOwnedLineConnection(db, ownerEmail, connectionId) {
   const [record] = await db.select({
     id: platformConnections.id,
@@ -578,6 +762,38 @@ function validateLineUserEvent(input, encryptionKey) {
   };
 }
 
+function validateOutboundDeliveryInput({
+  connectionId,
+  eventId,
+  conversationId,
+  claimId,
+  recipient,
+  canonicalBody,
+  now,
+} = {}) {
+  const safeRecipient = requiredBoundedText(recipient, "LINE recipient", 256);
+  const safeCanonicalBody = boundedText(canonicalBody, "LINE canonical body", 20_000);
+  let payload;
+  try {
+    payload = JSON.parse(safeCanonicalBody);
+  } catch {
+    throw unavailablePersistenceError();
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)
+    || payload.to !== safeRecipient || !Array.isArray(payload.messages) || payload.messages.length < 1) {
+    throw unavailablePersistenceError();
+  }
+  return {
+    connectionId: requiredBoundedText(connectionId, "Connection ID", 100),
+    eventId: requiredBoundedText(eventId, "Webhook event ID", 256),
+    conversationId: requiredBoundedText(conversationId, "Conversation ID", 100),
+    claimId: requiredBoundedText(claimId, "Dispatch claim", 100),
+    recipient: safeRecipient,
+    canonicalBody: safeCanonicalBody,
+    now: validDate(now),
+  };
+}
+
 function validateIgnoredLineEvent({ connectionId, eventId, sourceType, receivedAt }) {
   if (sourceType !== "group" && sourceType !== "room") throw unavailablePersistenceError();
   return {
@@ -623,6 +839,10 @@ function optionalBoundedText(value, label, maxLength) {
 function boundedText(value, label, maxLength) {
   if (typeof value !== "string" || value.length > maxLength) throw unavailablePersistenceError();
   return value;
+}
+
+function safeOutboundErrorCode(value) {
+  return requiredBoundedText(value, "Outbound delivery error code", 100);
 }
 
 function validDate(value) {

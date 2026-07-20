@@ -134,3 +134,27 @@ GREEN command: `node --test tests/support-line-webhook.test.js tests/support-rep
 - `npm.cmd test`: exit 0; 379 tests passed, 0 failed.
 - `npm.cmd run build` using the documented command-scoped disposable demo values: exit 0.
 - No migration, live LINE/LLM/database call, deployment, batching, retrieval, or delivery action was performed.
+
+## Transactional outbound-delivery amendment
+
+The approved delivery-reliability prerequisite is implemented as the smallest reusable seam; Task 7 remains responsible for decision generation and the production caller that supplies connection credentials.
+
+### Durable contract
+
+- Migration `0005_line_outbound_delivery_outbox` adds `support_outbound_deliveries`, keyed once per inbound webhook-event row. It persists a canonical RFC 4122 UUID retry key, encrypted recipient, encrypted exact canonical Push JSON body, claim lease, attempt timestamps, retry time, terminal status, acceptance ID, and review timestamp.
+- Creation requires the active durable event-processing claim. On a later claimant after lease expiry, the event-unique constraint returns the original delivery ID/retry key and never overwrites the originally encrypted recipient or body.
+- Delivery claims are fenced with their own 30-second lease. The first attempt starts the 24-hour review window. Expired uncertain work moves to `human_review` and never receives a new retry key.
+- `createLineOutboundDeliveryService` classifies the persisted Push record: timeout/transport failures and 5xx become bounded exponential retryable work; 2xx and 409 with `x-line-accepted-request-id` are terminal `sent`; every other 4xx is terminal `failed`.
+- `pushCanonical` transmits the persisted body string unchanged with the stored UUID in `X-Line-Retry-Key`, returning only response status and the accepted-request header. No live request was made.
+
+### RED / GREEN evidence
+
+- RED: `node --test tests/support-outbox-delivery.test.js` initially failed because the delivery seam did not exist.
+- GREEN focused verification: `node --test tests/line-support-adapter.test.js tests/support-outbox-delivery.test.js tests/support-repository.test.js tests/support-schema.test.js tests/support-migration-entrypoint.test.js tests/support-line-webhook.test.js`
+  - Exit 0; 49 tests passed, 0 failed.
+  - Covers lease-expiry duplicate creation returning one immutable outbox row, encrypted-at-rest recipient/body, same-body/same-key retries, 2xx/accepted-409 success, terminal other-4xx, and 24-hour human review.
+- Full suite: `npm.cmd test`
+  - Exit 0; 385 tests passed, 0 failed.
+- Production build: `npm.cmd run build` with command-scoped disposable `AUTH_MODE=demo`, Turso, encryption, and blob values
+  - Exit 0; optimized build passed.
+- `git diff --check` passed. Repository scans found only documented placeholder/example credential names; no newly added secret was found. No remote migration, live LINE/LLM/database call, deployment, or delivery action was performed.
