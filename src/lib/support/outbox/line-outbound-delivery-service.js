@@ -74,7 +74,11 @@ export function createLineOutboundDeliveryService({
         });
       }
       if (status === 401 && claim.connectionId) {
-        await onCredentialRejected({ connectionId: claim.connectionId, now: attemptedAt });
+        await onCredentialRejected({
+          connectionId: claim.connectionId,
+          ...(claim.conversationId ? { conversationId: claim.conversationId } : {}),
+          now: attemptedAt,
+        });
       }
       await outboxStore.markDeliveryFailed({
         deliveryId,

@@ -100,6 +100,19 @@ test("retryable decision failures are bounded at three attempts and then fail cl
   assert.equal(handoffs[0].reasonCode, "provider_unavailable");
 });
 
+test("a stale claimed turn cannot finalize after its conversation fence has been lost", async () => {
+  const service = createSupportProcessingService({
+    repository: {
+      renewConversationClaim: async () => false,
+    },
+  });
+
+  await assert.rejects(
+    service.renewClaim({ ...IDS, claimId: "claim-1", now: NOW }),
+    /Conversation processing claim was lost/,
+  );
+});
+
 test("delivery uses the immutable outbox record and Push-only transport", async () => {
   const calls = [];
   const service = createSupportProcessingService({

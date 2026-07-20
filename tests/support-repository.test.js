@@ -601,18 +601,42 @@ test("processing claims batch current protected data and atomically persist one 
     const conversationClaim = await repository.acquireConversationClaim({ connectionId, conversationId: ingested.conversationId, now: NOW });
     assert.equal(conversationClaim.acquired, true);
     assert.equal((await repository.acquireConversationClaim({ connectionId, conversationId: ingested.conversationId, now: NOW })).acquired, false);
+    await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com", connectionId, eventId: "evt-turn-2", externalUserId: "U-private",
+      replyToken: "reply-token-2", message: { type: "text", text: "Second question", safeMetadata: {} },
+      receivedAt: new Date(NOW.getTime() + 1_000),
+    });
+    const dispatchTwo = await repository.claimLineWorkflowDispatch({ connectionId, eventId: "evt-turn-2", now: NOW });
+    await repository.markLineWorkflowDispatched({ ...dispatchTwo, now: NOW });
+    const competingEventClaim = await repository.claimLineEventProcessing({ connectionId, eventId: "evt-turn-2", now: NOW });
 
     const turn = await repository.buildClaimedTurn({
       connectionId, eventId: "evt-turn-1", conversationId: ingested.conversationId, claimId: conversationClaim.claimId,
       cutoff: new Date(NOW.getTime() + 3_000),
     });
-    assert.deepEqual(turn.customerTexts, ["Question"]);
+    assert.deepEqual(turn.customerTexts, ["Question", "Second question"]);
+    assert.equal(await repository.resolveProcessedCompetingEvents({
+      connectionId, eventId: "evt-turn-1", conversationId: ingested.conversationId, cutoff: new Date(NOW.getTime() + 3_000),
+    }), 1);
+    assert.equal(await repository.markLineEventProcessed({
+      connectionId, eventId: "evt-turn-2", claimId: competingEventClaim.claimId, now: NOW,
+    }), false);
     const context = await repository.loadCurrentProcessingContext({
       connectionId, eventId: "evt-turn-1", conversationId: ingested.conversationId, claimId: conversationClaim.claimId,
     });
     assert.equal(context.settings.googleAiApiKey, "private-ai-key");
     assert.equal(context.recipient, "U-private");
     assert.deepEqual(context.faqs.map(({ id }) => id), ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]);
+    await db.insert(supportMessages).values({
+      id: "old-context-message", conversationId: ingested.conversationId, direction: "inbound", senderType: "customer",
+      messageType: "text", textContent: "outside retention", safeMetadataJson: "{}", providerMessageId: null,
+      deliveryStatus: "received", idempotencyKey: "old-context-event", sentAt: null, failedAt: null,
+      safeErrorCode: null, processedAt: NOW, createdAt: new Date(NOW.getTime() - (31 * 24 * 60 * 60 * 1_000)),
+    });
+    const retainedContext = await repository.loadCurrentProcessingContext({
+      connectionId, conversationId: ingested.conversationId, claimId: conversationClaim.claimId, now: NOW,
+    });
+    assert.equal(retainedContext.messages.some(({ text }) => text === "outside retention"), false);
 
     const persisted = await repository.persistDecisionAndOutbound({
       connectionId, eventId: "evt-turn-1", conversationId: ingested.conversationId, claimId: conversationClaim.claimId,
@@ -625,6 +649,16 @@ test("processing claims batch current protected data and atomically persist one 
     assert.equal((await db.select().from(supportAiDecisions)).length, 1);
     assert.equal((await db.select().from(supportOutboundDeliveries)).length, 1);
     assert.equal(await repository.loadLineAccessToken(connectionId), "private-line-token");
+    assert.equal(await repository.handleLineCredentialRejected({
+      connectionId, conversationId: ingested.conversationId, now: NOW,
+    }), true);
+    assert.equal((await db.select().from(platformConnections).where(eq(platformConnections.id, connectionId)))[0].state, "needs_reconnect");
+    const [handoffConversation] = await db.select().from(supportConversations).where(eq(supportConversations.id, ingested.conversationId));
+    assert.equal(handoffConversation.status, "waiting_human");
+    assert.equal(handoffConversation.handoffReasonCode, "credential_rejected");
+    assert.equal(await repository.handleLineCredentialRejected({
+      connectionId, conversationId: ingested.conversationId, now: NOW,
+    }), false);
     assert.equal(await repository.markLineEventProcessed({ connectionId, eventId: "evt-turn-1", claimId: eventClaim.claimId, now: NOW }), true);
   });
 });

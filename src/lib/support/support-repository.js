@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-import { and, asc, desc, eq, exists, gte, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, exists, gt, gte, isNull, lte, or, sql } from "drizzle-orm";
 
 import { getLLMModelOptions } from "../ai/model-config.js";
 import { createDbClient } from "../db/index.js";
@@ -35,6 +35,7 @@ const DISPATCH_LEASE_MS = 30_000;
 const EVENT_PROCESSING_LEASE_MS = 30_000;
 const OUTBOUND_DELIVERY_LEASE_MS = 30_000;
 const OUTBOUND_REVIEW_WINDOW_MS = 24 * 60 * 60 * 1_000;
+const CONTEXT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 
 export function createSupportRepository(db = createDbClient(), {
   encryptionKey,
@@ -294,8 +295,23 @@ export function createSupportRepository(db = createDbClient(), {
         eq(supportWebhookEvents.webhookEventId, processing.eventId),
         eq(supportWebhookEvents.processingStatus, "processing"),
         eq(supportWebhookEvents.safeErrorCode, processing.claimId),
+        gt(supportWebhookEvents.processedAt, processing.now),
       )).returning({ id: supportWebhookEvents.id }));
       return Boolean(updated);
+    },
+
+    async renewLineEventProcessing({ connectionId, eventId, claimId, now = new Date() }) {
+      const processing = validateDispatchInput({ connectionId, eventId, claimId, now });
+      const [renewed] = await retryBusyOperation(() => db.update(supportWebhookEvents).set({
+        processedAt: new Date(processing.now.getTime() + EVENT_PROCESSING_LEASE_MS),
+      }).where(and(
+        eq(supportWebhookEvents.platformConnectionId, processing.connectionId),
+        eq(supportWebhookEvents.webhookEventId, processing.eventId),
+        eq(supportWebhookEvents.processingStatus, "processing"),
+        eq(supportWebhookEvents.safeErrorCode, processing.claimId),
+        gt(supportWebhookEvents.processedAt, processing.now),
+      )).returning({ id: supportWebhookEvents.id }));
+      return Boolean(renewed);
     },
 
     async releaseLineEventProcessing({ connectionId, eventId, claimId }) {
@@ -333,6 +349,21 @@ export function createSupportRepository(db = createDbClient(), {
       return claimed ? { acquired: true, claimId, windowStart: claim.now } : { acquired: false };
     },
 
+    async renewConversationClaim({ connectionId, conversationId, claimId, now = new Date() }) {
+      const claim = validateConversationClaimInput({ connectionId, conversationId, claimId, now });
+      const [renewed] = await retryBusyOperation(() => db.update(supportConversations).set({
+        processingClaimExpiresAt: new Date(claim.now.getTime() + EVENT_PROCESSING_LEASE_MS),
+        updatedAt: claim.now,
+      }).where(and(
+        eq(supportConversations.id, claim.conversationId),
+        eq(supportConversations.platformConnectionId, claim.connectionId),
+        eq(supportConversations.processingClaimId, claim.claimId),
+        eq(supportConversations.status, "ai_active"),
+        gt(supportConversations.processingClaimExpiresAt, claim.now),
+      )).returning({ id: supportConversations.id }));
+      return Boolean(renewed);
+    },
+
     async buildClaimedTurn({ connectionId, eventId, conversationId, claimId, cutoff }) {
       const turn = validateClaimedTurnInput({ connectionId, eventId, conversationId, claimId, cutoff });
       return retryBusyOperation(() => db.transaction(async (tx) => {
@@ -341,6 +372,7 @@ export function createSupportRepository(db = createDbClient(), {
           eq(supportConversations.platformConnectionId, turn.connectionId),
           eq(supportConversations.processingClaimId, turn.claimId),
           eq(supportConversations.status, "ai_active"),
+          gt(supportConversations.processingClaimExpiresAt, turn.cutoff),
         )).limit(1);
         if (!conversation) return null;
         const messages = await tx.select({ id: supportMessages.id, text: supportMessages.textContent }).from(supportMessages)
@@ -389,7 +421,10 @@ export function createSupportRepository(db = createDbClient(), {
           eq(supportFaqs.ownerEmail, conversation.ownerEmail), eq(supportFaqs.enabled, true),
         )).orderBy(desc(supportFaqs.priority), desc(supportFaqs.updatedAt)),
         db.select({ senderType: supportMessages.senderType, text: supportMessages.textContent, createdAt: supportMessages.createdAt })
-          .from(supportMessages).where(eq(supportMessages.conversationId, current.conversationId))
+          .from(supportMessages).where(and(
+            eq(supportMessages.conversationId, current.conversationId),
+            gte(supportMessages.createdAt, new Date(current.now.getTime() - CONTEXT_RETENTION_MS)),
+          ))
           .orderBy(desc(supportMessages.createdAt)).limit(20),
         db.select({ count: sql`count(*)` }).from(supportAiDecisions).where(and(
           eq(supportAiDecisions.conversationId, current.conversationId),
@@ -431,6 +466,7 @@ export function createSupportRepository(db = createDbClient(), {
           eq(supportConversations.platformConnectionId, decision.connectionId),
           eq(supportConversations.processingClaimId, decision.claimId),
           eq(supportConversations.status, "ai_active"),
+          gt(supportConversations.processingClaimExpiresAt, decision.now),
         )).limit(1);
         if (!event || !conversation) throw unavailablePersistenceError();
         const [existing] = await tx.select({ id: supportOutboundDeliveries.id }).from(supportOutboundDeliveries)
@@ -476,6 +512,7 @@ export function createSupportRepository(db = createDbClient(), {
       }).where(and(
         eq(supportConversations.id, claim.conversationId), eq(supportConversations.platformConnectionId, claim.connectionId),
         eq(supportConversations.processingClaimId, claim.claimId),
+        gt(supportConversations.processingClaimExpiresAt, claim.now),
       )).returning({ id: supportConversations.id }));
       return Boolean(updated);
     },
@@ -502,6 +539,61 @@ export function createSupportRepository(db = createDbClient(), {
       return { connectionId: input.connectionId, conversationId: input.conversationId, eventId: message.idempotencyKey.slice(prefix.length) };
     },
 
+    async resolveLineEventAfterConversationLoss({ connectionId, eventId, conversationId, claimId, now = new Date() }) {
+      const input = {
+        ...validateConversationClaimInput({ connectionId, conversationId, claimId, now }),
+        eventId: requiredBoundedText(eventId, "Webhook event ID", 256),
+      };
+      return retryBusyOperation(() => db.transaction(async (tx) => {
+        const [message] = await tx.select({ processedAt: supportMessages.processedAt }).from(supportMessages).where(and(
+          eq(supportMessages.conversationId, input.conversationId),
+          eq(supportMessages.idempotencyKey, `${input.connectionId}:${input.eventId}`),
+        )).limit(1);
+        if (!message?.processedAt) return false;
+        const [resolved] = await tx.update(supportWebhookEvents).set({
+          processingStatus: "processed", safeErrorCode: null, processedAt: input.now,
+        }).where(and(
+          eq(supportWebhookEvents.platformConnectionId, input.connectionId),
+          eq(supportWebhookEvents.webhookEventId, input.eventId),
+          eq(supportWebhookEvents.processingStatus, "processing"),
+          eq(supportWebhookEvents.safeErrorCode, input.claimId),
+        )).returning({ id: supportWebhookEvents.id });
+        return Boolean(resolved);
+      }));
+    },
+
+    async resolveProcessedCompetingEvents({ connectionId, eventId, conversationId, cutoff }) {
+      const input = {
+        ...validateConversationClaimInput({ connectionId, conversationId, now: cutoff }),
+        eventId: requiredBoundedText(eventId, "Webhook event ID", 256),
+        cutoff: validDate(cutoff),
+      };
+      return retryBusyOperation(() => db.transaction(async (tx) => {
+        const messages = await tx.select({ idempotencyKey: supportMessages.idempotencyKey }).from(supportMessages).where(and(
+          eq(supportMessages.conversationId, input.conversationId),
+          eq(supportMessages.direction, "inbound"),
+          eq(supportMessages.processedAt, input.cutoff),
+        ));
+        const prefix = `${input.connectionId}:`;
+        const eventIds = messages.map(({ idempotencyKey }) => idempotencyKey?.startsWith(prefix)
+          ? idempotencyKey.slice(prefix.length) : null).filter((id) => id && id !== input.eventId);
+        for (const competingEventId of eventIds) {
+          await tx.update(supportWebhookEvents).set({
+            processingStatus: "processed", safeErrorCode: null, processedAt: input.cutoff,
+          }).where(and(
+            eq(supportWebhookEvents.platformConnectionId, input.connectionId),
+            eq(supportWebhookEvents.webhookEventId, competingEventId),
+            eq(supportWebhookEvents.sourceType, "user"),
+            or(
+              eq(supportWebhookEvents.processingStatus, "dispatched"),
+              eq(supportWebhookEvents.processingStatus, "processing"),
+            ),
+          ));
+        }
+        return eventIds.length;
+      }));
+    },
+
     async loadLineAccessToken(connectionId) {
       const id = requiredBoundedText(connectionId, "Connection ID", 100);
       const [connection] = await db.select({ encryptedCredentials: platformConnections.encryptedCredentials }).from(platformConnections)
@@ -522,6 +614,23 @@ export function createSupportRepository(db = createDbClient(), {
         eq(platformConnections.id, id), eq(platformConnections.platform, "line"), eq(platformConnections.state, "active"),
       )).returning({ id: platformConnections.id }));
       return Boolean(updated);
+    },
+
+    async handleLineCredentialRejected({ connectionId, conversationId, now = new Date() }) {
+      const input = validateConversationClaimInput({ connectionId, conversationId, now });
+      return retryBusyOperation(() => db.transaction(async (tx) => {
+        await tx.update(platformConnections).set({ state: "needs_reconnect", updatedAt: input.now }).where(and(
+          eq(platformConnections.id, input.connectionId), eq(platformConnections.platform, "line"), eq(platformConnections.state, "active"),
+        ));
+        const [handoff] = await tx.update(supportConversations).set({
+          status: "waiting_human", handoffReasonCode: "credential_rejected",
+          processingClaimId: null, processingClaimExpiresAt: null, updatedAt: input.now,
+        }).where(and(
+          eq(supportConversations.id, input.conversationId), eq(supportConversations.platformConnectionId, input.connectionId),
+          eq(supportConversations.status, "ai_active"),
+        )).returning({ id: supportConversations.id });
+        return Boolean(handoff);
+      }));
     },
 
     async createLineOutboundDelivery(input) {
@@ -645,6 +754,7 @@ export function createSupportRepository(db = createDbClient(), {
           canonicalBody: decryptOutboundCanonicalBody(claimed.encryptedCanonicalBody, encryptionKey),
           connectionId: (await tx.select({ connectionId: supportConversations.platformConnectionId }).from(supportConversations)
             .where(eq(supportConversations.id, claimed.conversationId)).limit(1))[0]?.connectionId,
+          conversationId: claimed.conversationId,
           attemptCount: claimed.attemptCount,
         };
       }));

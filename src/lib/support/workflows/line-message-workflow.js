@@ -19,7 +19,7 @@ export async function lineMessageWorkflow(input) {
   });
 }
 
-export function createLineMessageWorkflow({ eventStore, processingService, sleepImpl = sleep, startWorkflow, processEvent } = {}) {
+export function createLineMessageWorkflow({ eventStore, processingService, sleepImpl = sleep, startWorkflow, processEvent, now = () => new Date() } = {}) {
   if (!processingService && typeof processEvent === "function") {
     return async function legacyTestableLineMessageWorkflow(input) {
       "use workflow";
@@ -28,7 +28,7 @@ export function createLineMessageWorkflow({ eventStore, processingService, sleep
   }
   return async function testableLineMessageWorkflow(input) {
     "use workflow";
-    return runLineMessageWorkflow(input, { eventStore, processingService, sleepImpl, startWorkflow });
+    return runLineMessageWorkflow(input, { eventStore, processingService, sleepImpl, startWorkflow, now });
   };
 }
 
@@ -53,21 +53,27 @@ async function runLineMessageWorkflow({ eventId, connectionId, conversationId },
   processingService,
   sleepImpl,
   startWorkflow,
+  now = () => new Date(),
 }) {
   "use step";
-  const eventClaim = await eventStore.claimEventProcessing({ eventId, connectionId });
+  const claimedAt = currentDate(now);
+  const eventClaim = await eventStore.claimEventProcessing({ eventId, connectionId, now: claimedAt });
   if (eventClaim?.claimed !== true) return { status: "duplicate" };
 
   let conversationClaim;
   try {
-    conversationClaim = await processingService.acquireClaim({ eventId, connectionId, conversationId, now: new Date() });
+    conversationClaim = await processingService.acquireClaim({ eventId, connectionId, conversationId, now: claimedAt });
     if (conversationClaim?.acquired !== true) {
-      await eventStore.releaseEventProcessing({ eventId, connectionId, claimId: eventClaim.claimId });
+      const resolved = typeof processingService.resolveCompetingEvent === "function"
+        && await processingService.resolveCompetingEvent({ eventId, connectionId, conversationId, claimId: eventClaim.claimId, now: currentDate(now) });
+      if (resolved) await completeEvent(eventStore, { eventId, connectionId, claimId: eventClaim.claimId, now: currentDate(now) });
+      else await eventStore.releaseEventProcessing({ eventId, connectionId, claimId: eventClaim.claimId });
       return { status: "already_processing" };
     }
     const windowStart = validDate(conversationClaim.windowStart);
     await sleepImpl("3s");
-    const now = windowStart;
+    let operationNow = currentDate(now);
+    await renewFences({ eventStore, processingService, eventId, connectionId, conversationId, eventClaimId: eventClaim.claimId, conversationClaimId: conversationClaim.claimId, now: operationNow });
     const turn = await processingService.buildTurn({
       eventId,
       connectionId,
@@ -76,9 +82,16 @@ async function runLineMessageWorkflow({ eventId, connectionId, conversationId },
       cutoff: new Date(windowStart.getTime() + 3_000),
     });
     if (!turn) {
-      await eventStore.markEventProcessed({ eventId, connectionId, claimId: eventClaim.claimId });
+      await completeEvent(eventStore, { eventId, connectionId, claimId: eventClaim.claimId, now: operationNow });
       return { status: "no_messages" };
     }
+    if (typeof processingService.resolveBatchedEvents === "function") {
+      await processingService.resolveBatchedEvents({
+        eventId, connectionId, conversationId, cutoff: new Date(windowStart.getTime() + 3_000),
+      });
+    }
+    operationNow = currentDate(now);
+    await renewFences({ eventStore, processingService, eventId, connectionId, conversationId, eventClaimId: eventClaim.claimId, conversationClaimId: conversationClaim.claimId, now: operationNow });
     const outcome = await processingService.decideAndPersist({
       eventId,
       connectionId,
@@ -86,23 +99,27 @@ async function runLineMessageWorkflow({ eventId, connectionId, conversationId },
       claimId: conversationClaim.claimId,
       eventClaimId: eventClaim.claimId,
       ...turn,
-      now,
+      now: operationNow,
     });
     if (outcome.deliveryId) {
-      let deliveryNow = now;
       let delivery;
       do {
+        const deliveryNow = currentDate(now);
+        await renewFences({ eventStore, processingService, eventId, connectionId, conversationId, eventClaimId: eventClaim.claimId, conversationClaimId: conversationClaim.claimId, now: deliveryNow });
         delivery = await processingService.deliver({ deliveryId: outcome.deliveryId, now: deliveryNow });
         if (delivery.status === "retryable" && delivery.retryAt) {
           const retryAt = validDate(delivery.retryAt);
-          await sleepImpl(durationUntil(deliveryNow, retryAt));
-          deliveryNow = retryAt;
+          await sleepWithRenewedFences({
+            from: deliveryNow, to: retryAt, sleepImpl, eventStore, processingService,
+            eventId, connectionId, conversationId, eventClaimId: eventClaim.claimId,
+            conversationClaimId: conversationClaim.claimId, now,
+          });
         }
       } while (delivery.status === "retryable" && delivery.retryAt);
-      await eventStore.markEventProcessed({ eventId, connectionId, claimId: eventClaim.claimId });
+      await completeEvent(eventStore, { eventId, connectionId, claimId: eventClaim.claimId, now: currentDate(now) });
       return { status: delivery.status };
     }
-    await eventStore.markEventProcessed({ eventId, connectionId, claimId: eventClaim.claimId });
+    await completeEvent(eventStore, { eventId, connectionId, claimId: eventClaim.claimId, now: currentDate(now) });
     return { status: outcome.status };
   } catch (error) {
     await eventStore.releaseEventProcessing({ eventId, connectionId, claimId: eventClaim.claimId });
@@ -120,6 +137,7 @@ function productionEventStore(env = process.env) {
   const repository = createSupportRepository(createDbClient(env), { encryptionKey: env.SETTINGS_ENCRYPTION_KEY });
   return {
     claimEventProcessing: (input) => repository.claimLineEventProcessing(input),
+    renewEventProcessing: (input) => repository.renewLineEventProcessing(input),
     markEventProcessed: (input) => repository.markLineEventProcessed(input),
     releaseEventProcessing: (input) => repository.releaseLineEventProcessing(input),
   };
@@ -139,7 +157,7 @@ function productionProcessingService(env = process.env) {
       const accessToken = await repository.loadLineAccessToken(connectionId);
       return adapter.pushCanonical({ accessToken, canonicalBody: body, retryKey });
     },
-    onCredentialRejected: ({ connectionId, now }) => repository.markLineConnectionNeedsReconnect(connectionId, now),
+    onCredentialRejected: (input) => repository.handleLineCredentialRejected(input),
   });
   return createSupportProcessingService({
     repository,
@@ -162,4 +180,40 @@ function durationUntil(from, to) {
   const milliseconds = to.getTime() - from.getTime();
   if (!Number.isSafeInteger(milliseconds) || milliseconds < 1) throw new Error("Outbound retry time must be in the future.");
   return milliseconds % 1_000 === 0 ? `${milliseconds / 1_000}s` : `${milliseconds}ms`;
+}
+
+async function completeEvent(eventStore, input) {
+  const completed = await eventStore.markEventProcessed(input);
+  if (completed !== true) throw new Error("Event processing completion could not be recorded.");
+}
+
+async function renewFences({
+  eventStore, processingService, eventId, connectionId, conversationId, eventClaimId, conversationClaimId, now,
+}) {
+  if (typeof eventStore.renewEventProcessing === "function") {
+    const renewed = await eventStore.renewEventProcessing({ eventId, connectionId, claimId: eventClaimId, now });
+    if (renewed !== true) throw new Error("Event processing claim was lost.");
+  }
+  if (typeof processingService.renewClaim === "function") {
+    await processingService.renewClaim({ eventId, connectionId, conversationId, claimId: conversationClaimId, now });
+  }
+}
+
+async function sleepWithRenewedFences({
+  from, to, sleepImpl, eventStore, processingService, eventId, connectionId, conversationId, eventClaimId, conversationClaimId, now,
+}) {
+  let cursor = from;
+  while (cursor < to) {
+    const next = new Date(Math.min(to.getTime(), cursor.getTime() + 25_000));
+    await sleepImpl(durationUntil(cursor, next));
+    cursor = next;
+    await renewFences({
+      eventStore, processingService, eventId, connectionId, conversationId, eventClaimId, conversationClaimId,
+      now: currentDate(now),
+    });
+  }
+}
+
+function currentDate(now) {
+  return validDate(now());
 }

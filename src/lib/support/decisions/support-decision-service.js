@@ -40,7 +40,10 @@ export function createSupportDecisionService({ generateTextImpl, now = () => new
           prompt: buildDecisionPrompt(configuration, messages, suppliedFaqs),
         });
         return parseDecision(text, suppliedFaqs);
-      } catch {
+      } catch (error) {
+        if (error?.retryable === true) {
+          throw Object.assign(new Error("AI decision provider is temporarily unavailable."), { retryable: true });
+        }
         return handoff("invalid_ai_decision");
       }
     },

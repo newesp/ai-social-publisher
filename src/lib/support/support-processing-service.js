@@ -13,6 +13,12 @@ export function createSupportProcessingService({ repository, decisionService, de
       return repository.buildClaimedTurn(input);
     },
 
+    async renewClaim(input) {
+      const renewed = await repository.renewConversationClaim(input);
+      if (renewed !== true) throw new Error("Conversation processing claim was lost.");
+      return true;
+    },
+
     async decideAndPersist(input) {
       const context = await repository.loadCurrentProcessingContext(input);
       const failClosedReason = stateFailure(context);
@@ -66,6 +72,14 @@ export function createSupportProcessingService({ repository, decisionService, de
 
     async findFollowUp(input) {
       return repository.findNextUnprocessedEvent(input);
+    },
+
+    async resolveCompetingEvent(input) {
+      return repository.resolveLineEventAfterConversationLoss(input);
+    },
+
+    async resolveBatchedEvents(input) {
+      return repository.resolveProcessedCompetingEvents(input);
     },
   };
 }

@@ -81,6 +81,13 @@ test("invalid JSON, schema violations, and provider errors fail closed without p
   }
 });
 
+test("retryable provider failures remain retryable so the processing service can exhaust its bounded attempts", async () => {
+  const retryable = Object.assign(new Error("provider timeout"), { retryable: true });
+  const service = createSupportDecisionService({ generateTextImpl: async () => { throw retryable; } });
+
+  await assert.rejects(service.decide(input), (error) => error?.retryable === true && error.message !== retryable.message);
+});
+
 test("rejects answers above 2,000 characters and clarification without evidence", async () => {
   const overlong = await createSupportDecisionService({
     generateTextImpl: async () => JSON.stringify({
