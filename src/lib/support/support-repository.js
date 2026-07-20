@@ -173,6 +173,85 @@ export function createSupportRepository(db = createDbClient(), {
       }));
     },
 
+    async listInboxConversations(ownerEmail, { status } = {}) {
+      const owner = normalizeOwner(ownerEmail);
+      const conversations = await db.select().from(supportConversations).where(and(
+        eq(supportConversations.ownerEmail, owner),
+        ...(status ? [eq(supportConversations.status, status)] : []),
+      ));
+      const summaries = await Promise.all(conversations.map(async (conversation) => {
+        const [lastMessage] = await db.select({ text: supportMessages.textContent }).from(supportMessages)
+          .where(eq(supportMessages.conversationId, conversation.id)).orderBy(desc(supportMessages.createdAt)).limit(1);
+        const [delivery] = await db.select({ id: supportOutboundDeliveries.id }).from(supportOutboundDeliveries)
+          .where(and(eq(supportOutboundDeliveries.conversationId, conversation.id), eq(supportOutboundDeliveries.deliveryStatus, "failed"))).limit(1);
+        return {
+          id: conversation.id,
+          customerLabel: "Customer",
+          status: conversation.status,
+          unreadCount: conversation.unreadCount,
+          handoffReason: conversation.handoffReasonCode,
+          lastMessagePreview: lastMessage?.text ?? null,
+          deliveryFailed: Boolean(delivery),
+          lastInboundAt: conversation.lastInboundAt,
+          lastOutboundAt: conversation.lastOutboundAt,
+          updatedAt: conversation.updatedAt,
+        };
+      }));
+      return summaries.sort((left, right) => inboxPriority(right) - inboxPriority(left)
+        || dateValue(right.lastInboundAt) - dateValue(left.lastInboundAt)
+        || dateValue(right.updatedAt) - dateValue(left.updatedAt));
+    },
+
+    async getInboxConversation(ownerEmail, conversationId) {
+      const owner = normalizeOwner(ownerEmail);
+      const id = requiredBoundedText(conversationId, "Conversation ID", 100);
+      const [conversation] = await db.select().from(supportConversations).where(and(
+        eq(supportConversations.id, id), eq(supportConversations.ownerEmail, owner),
+      )).limit(1);
+      if (!conversation) return null;
+      const [messages, decisions, faqs, transition, delivery] = await Promise.all([
+        db.select().from(supportMessages).where(eq(supportMessages.conversationId, id)).orderBy(asc(supportMessages.createdAt)),
+        db.select().from(supportAiDecisions).where(eq(supportAiDecisions.conversationId, id)).orderBy(desc(supportAiDecisions.createdAt)),
+        db.select().from(supportFaqs).where(eq(supportFaqs.ownerEmail, owner)),
+        conversation.pendingTransitionId ? db.select().from(supportConversationTransitions).where(and(
+          eq(supportConversationTransitions.id, conversation.pendingTransitionId),
+          eq(supportConversationTransitions.conversationId, id),
+          eq(supportConversationTransitions.requestedByOwnerEmail, owner),
+        )).limit(1) : [],
+        db.select({ id: supportOutboundDeliveries.id }).from(supportOutboundDeliveries).where(and(
+          eq(supportOutboundDeliveries.conversationId, id), eq(supportOutboundDeliveries.deliveryStatus, "failed"),
+        )).limit(1),
+      ]);
+      const usedFaqIds = new Set(decisions.flatMap((decision) => parseKeywords(decision.faqIdsJson)));
+      const [lastMessage] = messages.slice(-1);
+      return {
+        id: conversation.id, customerLabel: "Customer", status: conversation.status, unreadCount: conversation.unreadCount,
+        handoffReason: conversation.handoffReasonCode, lastMessagePreview: lastMessage?.textContent ?? null,
+        deliveryFailed: Boolean(delivery[0]), lastInboundAt: conversation.lastInboundAt, lastOutboundAt: conversation.lastOutboundAt,
+        updatedAt: conversation.updatedAt,
+        messages: messages.map((message) => ({
+          id: message.id, direction: message.direction, senderType: message.senderType, messageType: message.messageType,
+          text: message.textContent, deliveryStatus: message.deliveryStatus, safeErrorCode: message.safeErrorCode,
+          createdAt: message.createdAt, sentAt: message.sentAt, failedAt: message.failedAt,
+        })),
+        decisions: decisions.map((decision) => ({
+          id: decision.id, action: decision.action, category: decision.category, reasonCode: decision.reasonCode,
+          faqSourceIds: parseKeywords(decision.faqIdsJson), createdAt: decision.createdAt,
+        })),
+        faqSources: faqs.filter((faq) => usedFaqIds.has(faq.id)).map((faq) => ({ id: faq.id, question: faq.question, category: faq.category })),
+        pendingTransition: transition[0] ? { id: transition[0].id, action: transition[0].requestedAction, effectiveAt: transition[0].effectiveAt } : null,
+      };
+    },
+
+    async markInboxConversationRead(ownerEmail, conversationId) {
+      const owner = normalizeOwner(ownerEmail);
+      const id = requiredBoundedText(conversationId, "Conversation ID", 100);
+      const [updated] = await retryBusyOperation(() => db.update(supportConversations).set({ unreadCount: 0 }).where(and(
+        eq(supportConversations.id, id), eq(supportConversations.ownerEmail, owner),
+      )).returning({ id: supportConversations.id }));
+      return updated ? { id: updated.id, unreadCount: 0 } : null;
+    },
+
     async claimLineWorkflowDispatch({ connectionId, eventId, now = new Date() }) {
       const dispatch = validateDispatchInput({ connectionId, eventId, now });
       return retryBusyOperation(() => db.transaction(async (tx) => {
@@ -1318,6 +1397,17 @@ function parseKeywords(value) {
   } catch {
     return [];
   }
+}
+
+function inboxPriority(conversation) {
+  return (conversation.status === "waiting_human" ? 4 : 0)
+    + (conversation.unreadCount > 0 ? 2 : 0)
+    + (conversation.deliveryFailed ? 1 : 0);
+}
+
+function dateValue(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? 0 : date.getTime();
 }
 
 function validateInboundMessage(message) {

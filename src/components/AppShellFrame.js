@@ -11,11 +11,12 @@ import {
   UnstyledButton,
 } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
-import { IconCalendarStats, IconLogout, IconPencilPlus, IconSettings } from "@tabler/icons-react";
+import { IconCalendarStats, IconLogout, IconMessages, IconPencilPlus, IconSettings } from "@tabler/icons-react";
 import { useEffect, useState } from "react";
 import { clearWizardDraft } from "../lib/wizard/wizard-draft-storage.js";
 
 const navItems = [
+  { href: "/support", label: "Support inbox", icon: IconMessages, value: "support" },
   { href: "/", label: "新增貼文", icon: IconPencilPlus, value: "create" },
   { href: "/history", label: "歷史與排程", icon: IconCalendarStats, value: "history" },
   { href: "/settings", label: "系統設定", icon: IconSettings, value: "settings" },
@@ -24,6 +25,7 @@ const navItems = [
 export function AppShellFrame({ active, children }) {
   const [opened, { toggle }] = useDisclosure();
   const [user, setUser] = useState(null);
+  const [supportCount, setSupportCount] = useState(0);
 
   useEffect(() => {
     let current = true;
@@ -33,6 +35,18 @@ export function AppShellFrame({ active, children }) {
         if (current) setUser(session?.user ?? null);
       })
       .catch(() => {});
+    return () => { current = false; };
+  }, []);
+
+  useEffect(() => {
+    let current = true;
+    fetch("/api/support/conversations")
+      .then((response) => response.ok ? response.json() : null)
+      .then((data) => {
+        if (current && Array.isArray(data?.conversations)) {
+          setSupportCount(data.conversations.reduce((total, item) => total + (item.unreadCount || 0) + (item.status === "waiting_human" ? 1 : 0), 0));
+        }
+      }).catch(() => {});
     return () => { current = false; };
   }, []);
 
@@ -76,6 +90,7 @@ export function AppShellFrame({ active, children }) {
               label={item.label}
               active={active === item.value}
               leftSection={<Icon size={18} />}
+              rightSection={item.value === "support" && supportCount > 0 ? <Text size="xs">{supportCount}</Text> : null}
             />
           );
         })}

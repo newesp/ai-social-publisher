@@ -23,6 +23,8 @@ const REPLY_TONES = new Set(["friendly", "professional", "concise"]);
 const LLM_PROVIDERS = new Set(["google", "openai"]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const WEBHOOK_HASH_PATTERN = /^[a-f0-9]{64}$/;
+const INBOX_STATUSES = new Set(["ai_active", "waiting_human", "human_active", "resolved"]);
+const INBOX_PAGE_SIZE = 30;
 
 export function createSupportStore({
   repository,
@@ -280,6 +282,25 @@ export function createSupportStore({
       if (!deleted) throw notFound();
       return toFaq(deleted);
     },
+
+    async listConversations(ownerEmail, { status, cursor } = {}) {
+      const owner = requireOwner(ownerEmail);
+      if (status != null && !INBOX_STATUSES.has(status)) throw badRequest("Conversation status is invalid.");
+      const records = await repository.listInboxConversations(owner, { status });
+      const start = decodeInboxCursor(cursor, records);
+      const conversations = records.slice(start, start + INBOX_PAGE_SIZE).map(toInboxSummary);
+      const next = records[start + INBOX_PAGE_SIZE];
+      return { conversations, nextCursor: next ? encodeInboxCursor(next) : null };
+    },
+
+    async getConversation(ownerEmail, id) {
+      const record = await repository.getInboxConversation(requireOwner(ownerEmail), requireText(id, "Conversation ID"));
+      return record ? toInboxConversation(record) : null;
+    },
+
+    async markConversationRead(ownerEmail, id) {
+      return repository.markInboxConversationRead(requireOwner(ownerEmail), requireText(id, "Conversation ID"));
+    },
   };
 }
 
@@ -435,6 +456,53 @@ function parseStringArray(value) {
   } catch {
     return [];
   }
+}
+
+function toInboxSummary(record) {
+  return {
+    id: record.id, customerLabel: "Customer", status: record.status, unreadCount: record.unreadCount,
+    handoffReason: record.handoffReason, lastMessagePreview: record.lastMessagePreview, deliveryFailed: record.deliveryFailed === true,
+    lastInboundAt: record.lastInboundAt, lastOutboundAt: record.lastOutboundAt, updatedAt: record.updatedAt,
+  };
+}
+
+function toInboxConversation(record) {
+  return {
+    ...toInboxSummary(record),
+    messages: Array.isArray(record.messages) ? record.messages.map((message) => ({
+      id: message.id, direction: message.direction, senderType: message.senderType, messageType: message.messageType,
+      text: message.text, deliveryStatus: message.deliveryStatus, safeErrorCode: message.safeErrorCode,
+      createdAt: message.createdAt, sentAt: message.sentAt, failedAt: message.failedAt,
+    })) : [],
+    decisions: Array.isArray(record.decisions) ? record.decisions.map((decision) => ({
+      id: decision.id, action: decision.action, category: decision.category, reasonCode: decision.reasonCode,
+      faqSourceIds: Array.isArray(decision.faqSourceIds) ? decision.faqSourceIds : [], createdAt: decision.createdAt,
+    })) : [],
+    faqSources: Array.isArray(record.faqSources) ? record.faqSources.map((faq) => ({ id: faq.id, question: faq.question, category: faq.category })) : [],
+    pendingTransition: record.pendingTransition ? { id: record.pendingTransition.id, action: record.pendingTransition.action, effectiveAt: record.pendingTransition.effectiveAt } : null,
+  };
+}
+
+function encodeInboxCursor(record) {
+  return Buffer.from(JSON.stringify({ id: record.id, updatedAt: dateCursorValue(record.updatedAt) }), "utf8").toString("base64url");
+}
+
+function decodeInboxCursor(cursor, records) {
+  if (cursor == null) return 0;
+  if (typeof cursor !== "string" || cursor.length > 500) throw badRequest("Conversation cursor is invalid.");
+  try {
+    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    const index = records.findIndex((record) => record.id === value.id && dateCursorValue(record.updatedAt) === value.updatedAt);
+    if (index < 0) throw new Error("missing");
+    return index + 1;
+  } catch {
+    throw badRequest("Conversation cursor is invalid.");
+  }
+}
+
+function dateCursorValue(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? 0 : date.getTime();
 }
 
 function requireOwner(ownerEmail) {
