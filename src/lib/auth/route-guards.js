@@ -48,13 +48,23 @@ function throwRouteError(message, status) {
 }
 
 export function routeErrorResponse(error, NextResponse) {
-  const status = Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599
+  const schemaUnavailable = hasMissingSupportSchema(error);
+  const status = schemaUnavailable
+    ? 503
+    : Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599
     ? error.status
     : 500;
-  const message = status >= 500 ? "Request failed." : error.message ?? "Request failed.";
+  const message = schemaUnavailable
+    ? "Support service is not ready. Contact an administrator to apply the support database schema."
+    : status >= 500 ? "Request failed." : error.message ?? "Request failed.";
 
   return NextResponse.json(
     { error: message },
     { status },
   );
+}
+
+function hasMissingSupportSchema(error) {
+  const message = typeof error?.message === "string" ? error.message : "";
+  return /no such table:\s*support_[a-z_]+/i.test(message);
 }

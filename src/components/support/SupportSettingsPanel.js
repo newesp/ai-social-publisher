@@ -235,20 +235,20 @@ export function SupportSettingsPanel({ lineConnection, initialSetupRetryable = f
               required
               maxLength={80}
               value={form.brandName}
-              onChange={(event) => setForm((current) => ({
-                ...current,
-                brandName: event.currentTarget.value,
-              }))}
+              onChange={(event) => {
+                const brandName = event.currentTarget.value;
+                setForm((current) => ({ ...current, brandName }));
+              }}
             />
             <TextInput
               label="客服名稱"
               required
               maxLength={40}
               value={form.assistantName}
-              onChange={(event) => setForm((current) => ({
-                ...current,
-                assistantName: event.currentTarget.value,
-              }))}
+              onChange={(event) => {
+                const assistantName = event.currentTarget.value;
+                setForm((current) => ({ ...current, assistantName }));
+              }}
             />
             <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="sm">
               <Select

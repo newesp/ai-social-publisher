@@ -273,10 +273,10 @@ export function FaqManager({ onChanged }) {
                 minRows={2}
                 maxLength={500}
                 value={form.question}
-                onChange={(event) => setForm((current) => ({
-                  ...current,
-                  question: event.currentTarget.value,
-                }))}
+                onChange={(event) => {
+                  const question = event.currentTarget.value;
+                  setForm((current) => ({ ...current, question }));
+                }}
               />
               <Textarea
                 label="答案"
@@ -285,28 +285,28 @@ export function FaqManager({ onChanged }) {
                 minRows={4}
                 maxLength={4_000}
                 value={form.answer}
-                onChange={(event) => setForm((current) => ({
-                  ...current,
-                  answer: event.currentTarget.value,
-                }))}
+                onChange={(event) => {
+                  const answer = event.currentTarget.value;
+                  setForm((current) => ({ ...current, answer }));
+                }}
               />
               <TextInput
                 label="分類"
                 maxLength={80}
                 value={form.category}
-                onChange={(event) => setForm((current) => ({
-                  ...current,
-                  category: event.currentTarget.value,
-                }))}
+                onChange={(event) => {
+                  const category = event.currentTarget.value;
+                  setForm((current) => ({ ...current, category }));
+                }}
               />
               <TextInput
                 label="關鍵字"
                 description="以逗號或換行分隔，最多 20 個"
                 value={form.keywords}
-                onChange={(event) => setForm((current) => ({
-                  ...current,
-                  keywords: event.currentTarget.value,
-                }))}
+                onChange={(event) => {
+                  const keywords = event.currentTarget.value;
+                  setForm((current) => ({ ...current, keywords }));
+                }}
               />
               <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="sm">
                 <NumberInput

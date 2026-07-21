@@ -94,6 +94,18 @@ test("unexpected route failures do not return owner emails or settings tokens", 
   assert.deepEqual(response, { body: { error: "Request failed." }, status: 500 });
 });
 
+test("missing support schema returns a safe actionable service response", () => {
+  const response = routeErrorResponse(
+    new Error("SQLITE_ERROR: no such table: support_configurations"),
+    { json: (body, init) => ({ body, ...init }) },
+  );
+
+  assert.deepEqual(response, {
+    body: { error: "Support service is not ready. Contact an administrator to apply the support database schema." },
+    status: 503,
+  });
+});
+
 test("route error responses safely mask non-Error thrown values", () => {
   const response = routeErrorResponse(
     null,
