@@ -289,6 +289,7 @@ export function SupportSettingsPanel({ lineConnection, initialSetupRetryable = f
                 ...current,
                 llmModel: value ?? "",
               }))}
+            />
             <Group wrap="wrap">
               <Button
                 loading={action === "save"}
