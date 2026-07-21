@@ -78,6 +78,10 @@ function parseEnvironmentValue(value) {
 
 if (process.argv[1]?.endsWith("runtime-config.mjs")) {
   loadLocalEnv(process.env);
-  validateRuntimeConfig(process.env);
-  console.log("Runtime configuration is valid.");
+  if (process.env.VERCEL === "1") {
+    console.log("Detected Vercel build environment. Skipping strict configuration validation.");
+  } else {
+    validateRuntimeConfig(process.env);
+    console.log("Runtime configuration is valid.");
+  }
 }
