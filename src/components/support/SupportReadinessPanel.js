@@ -100,19 +100,25 @@ export function SupportReadinessPanel({
             label="我已啟用 Webhook redelivery"
             checked={form.redeliveryAcknowledged}
             disabled={!lineActive || Boolean(action)}
-            onChange={(event) => setForm((current) => ({
-              ...current,
-              redeliveryAcknowledged: event.currentTarget.checked,
-            }))}
+            onChange={(event) => {
+              const redeliveryAcknowledged = event.currentTarget.checked;
+              setForm((current) => ({
+                ...current,
+                redeliveryAcknowledged,
+              }));
+            }}
           />
           <Checkbox
             label="我已停用 Greeting messages 與 Auto-reply messages"
             checked={form.nativeRepliesDisabledAcknowledged}
             disabled={!lineActive || Boolean(action)}
-            onChange={(event) => setForm((current) => ({
-              ...current,
-              nativeRepliesDisabledAcknowledged: event.currentTarget.checked,
-            }))}
+            onChange={(event) => {
+              const nativeRepliesDisabledAcknowledged = event.currentTarget.checked;
+              setForm((current) => ({
+                ...current,
+                nativeRepliesDisabledAcknowledged,
+              }));
+            }}
           />
         </Stack>
 

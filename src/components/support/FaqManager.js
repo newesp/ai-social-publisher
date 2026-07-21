@@ -325,10 +325,13 @@ export function FaqManager({ onChanged }) {
                   label="啟用這則 FAQ"
                   checked={form.enabled}
                   mt={{ base: 0, sm: 28 }}
-                  onChange={(event) => setForm((current) => ({
-                    ...current,
-                    enabled: event.currentTarget.checked,
-                  }))}
+                  onChange={(event) => {
+                    const enabled = event.currentTarget.checked;
+                    setForm((current) => ({
+                      ...current,
+                      enabled,
+                    }));
+                  }}
                 />
               </SimpleGrid>
               <Group wrap="wrap">
