@@ -100,32 +100,20 @@ export function SupportReadinessPanel({
                 <Text size="sm">
                   在 Webhook settings 區塊中，啟用 <strong>Webhook redelivery</strong> (Webhook 傳送資料重試功能)。
                 </Text>
-                <Stack gap="xs" mt="xs" mb="xs">
-                  <Checkbox
-                    label="我已啟用 Webhook redelivery"
-                    checked={form.redeliveryAcknowledged}
-                    disabled={!lineActive || Boolean(action)}
-                    onChange={(event) => {
-                      const redeliveryAcknowledged = event.currentTarget.checked;
-                      setForm((current) => ({
-                        ...current,
-                        redeliveryAcknowledged,
-                      }));
-                    }}
-                  />
-                  <Checkbox
-                    label="我已停用 Greeting messages 與 Auto-reply messages"
-                    checked={form.nativeRepliesDisabledAcknowledged}
-                    disabled={!lineActive || Boolean(action)}
-                    onChange={(event) => {
-                      const nativeRepliesDisabledAcknowledged = event.currentTarget.checked;
-                      setForm((current) => ({
-                        ...current,
-                        nativeRepliesDisabledAcknowledged,
-                      }));
-                    }}
-                  />
-                </Stack>
+                <Checkbox
+                  mt="xs"
+                  mb="xs"
+                  label="我已啟用 Webhook redelivery"
+                  checked={form.redeliveryAcknowledged}
+                  disabled={!lineActive || Boolean(action)}
+                  onChange={(event) => {
+                    const redeliveryAcknowledged = event.currentTarget.checked;
+                    setForm((current) => ({
+                      ...current,
+                      redeliveryAcknowledged,
+                    }));
+                  }}
+                />
               </li>
               <li>
                 <Text size="sm">
@@ -141,6 +129,20 @@ export function SupportReadinessPanel({
                 <Text size="sm">
                   在回應功能設定中，停用 <strong>Auto-reply messages</strong> (自動回應訊息)；且在詳細設定中開啟 Webhook (啟用)。
                 </Text>
+                <Checkbox
+                  mt="xs"
+                  mb="xs"
+                  label="我已停用 Greeting messages 與 Auto-reply messages"
+                  checked={form.nativeRepliesDisabledAcknowledged}
+                  disabled={!lineActive || Boolean(action)}
+                  onChange={(event) => {
+                    const nativeRepliesDisabledAcknowledged = event.currentTarget.checked;
+                    setForm((current) => ({
+                      ...current,
+                      nativeRepliesDisabledAcknowledged,
+                    }));
+                  }}
+                />
               </li>
               <li>
                 <Text size="sm">
