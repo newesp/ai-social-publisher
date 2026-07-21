@@ -2,16 +2,14 @@
 
 import {
   Button,
-  Checkbox,
   Group,
-  Paper,
+  Modal,
   Select,
   SimpleGrid,
   Stack,
   Text,
   TextInput,
   Title,
-  Modal,
 } from "@mantine/core";
 import { useCallback, useEffect, useState } from "react";
 
@@ -125,34 +123,10 @@ export function SupportSettingsPanel({ lineConnection, initialSetupRetryable = f
       if (!response.ok) {
         throw new Error("LINE Webhook 尚未完成設定，請稍後再試。");
       }
-      const config = await loadConfiguration();
+      await loadConfiguration();
       setNotice(data.setup?.status === "verified"
         ? "LINE Webhook 已通過測試。"
         : "Webhook 已設定，請完成 LINE Console 操作後再次檢查。");
-
-      if (config && (!config.brandName || !config.llmProvider)) {
-        const defaultName = lineConnection?.displayName || "";
-        const autoForm = {
-          brandName: config.brandName || defaultName,
-          assistantName: config.assistantName || defaultName,
-          replyTone: config.replyTone || "friendly",
-          llmProvider: config.llmProvider || "google",
-          llmModel: config.llmModel || MODELS.google[0],
-          redeliveryAcknowledged: true,
-          nativeRepliesDisabledAcknowledged: true,
-        };
-        const saveResponse = await fetch("/api/support/configuration", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(writableConfiguration(autoForm)),
-        });
-        const saveData = await safeJson(saveResponse);
-        if (saveResponse.ok && saveData.configuration) {
-          setConfiguration(saveData.configuration);
-          setForm(toForm(saveData.configuration, lineConnection));
-          await loadStaticReadiness();
-        }
-      }
     } catch (readinessError) {
       setError(readinessError.message || "LINE 就緒狀態檢查失敗。");
     } finally {
@@ -312,6 +286,11 @@ export function SupportSettingsPanel({ lineConnection, initialSetupRetryable = f
           />
           <Group wrap="wrap" justify="flex-end" mt="md">
             <Text size="xs" c="dimmed">API Key 請在 AI 分頁管理，不會顯示在這裡。</Text>
+            {(!form.redeliveryAcknowledged || !form.nativeRepliesDisabledAcknowledged) ? (
+              <Text size="xs" c="orange.8">
+                提示：請先在步驟 3 勾選確認方塊以啟用儲存按鈕。
+              </Text>
+            ) : null}
             <Button
               loading={action === "save"}
               disabled={Boolean(action) || !canSaveConfiguration(form)}

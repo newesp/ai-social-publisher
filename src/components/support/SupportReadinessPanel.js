@@ -83,70 +83,74 @@ export function SupportReadinessPanel({
               如何啟用 LINE AI 客服
             </summary>
             <Text size="sm" c="dimmed" mt="xs">
-              請依序完成以下步驟，然後返回本頁面進行就緒狀態檢查：
+              請依序完成以下步驟：
             </Text>
             <ol style={{ marginBlock: "0.75rem 0", paddingInlineStart: "1.25rem" }}>
               <li>
                 <Text size="sm">
-                  前往 <Text component="a" href="https://developers.line.biz/console/" target="_blank" rel="noreferrer noopener" inherit td="underline">LINE Developers Console</Text>，選擇您的 Provider 與 Messaging API Channel，開啟 <strong>Messaging API</strong> 頁籤。
+                  前往 <Text component="a" href="https://developers.line.biz/console/" target="_blank" rel="noreferrer noopener" inherit td="underline">LINE Developers Console</Text>，選擇您的 Provider 與 Messaging API Channel，開啟 <strong>Messaging API</strong> 頁籤。在 Webhook settings 區塊中，啟用 <strong>Use webhook</strong> (使用 Webhook) 與 <strong>Webhook redelivery</strong> (Webhook 傳送資料重試功能)。
                 </Text>
               </li>
               <li>
                 <Text size="sm">
-                  在 Webhook settings 區塊中，啟用 <strong>Use webhook</strong> (使用 Webhook)。
+                  前往 <Text component="a" href="https://manager.line.biz/" target="_blank" rel="noreferrer noopener" inherit td="underline">LINE Official Account Manager</Text>，選擇帳號，點選右上角 Settings (設定) ➡️ 左選單 Response settings (回應設定) / <strong>Official Account Manager</strong> 的回應設定。停用 <strong>Greeting messages</strong> (加入好友的歡迎訊息) 與 <strong>Auto-reply messages</strong> (自動回應訊息)；且在詳細設定中開啟 Webhook (啟用)。
                 </Text>
               </li>
               <li>
                 <Text size="sm">
-                  在 Webhook settings 區塊中，啟用 <strong>Webhook redelivery</strong> (Webhook 傳送資料重試功能)。
+                  確認以下 LINE 設定（Use webhook 由系統自動檢測，無需勾選）：
                 </Text>
-                <Checkbox
-                  mt="xs"
-                  mb="xs"
-                  label="我已啟用 Webhook redelivery"
-                  checked={form.redeliveryAcknowledged}
-                  disabled={!lineActive || Boolean(action)}
-                  onChange={(event) => {
-                    const redeliveryAcknowledged = event.currentTarget.checked;
-                    setForm((current) => ({
-                      ...current,
-                      redeliveryAcknowledged,
-                    }));
-                  }}
-                />
+                <Stack gap="xs" mt="xs">
+                  <Checkbox
+                    label="我已啟用 Webhook redelivery"
+                    checked={form.redeliveryAcknowledged}
+                    disabled={!lineActive || Boolean(action)}
+                    onChange={(event) => {
+                      const redeliveryAcknowledged = event.currentTarget.checked;
+                      setForm((current) => ({
+                        ...current,
+                        redeliveryAcknowledged,
+                      }));
+                    }}
+                  />
+                  <Checkbox
+                    label="我已停用 Greeting messages 與 Auto-reply messages"
+                    checked={form.nativeRepliesDisabledAcknowledged}
+                    disabled={!lineActive || Boolean(action)}
+                    onChange={(event) => {
+                      const nativeRepliesDisabledAcknowledged = event.currentTarget.checked;
+                      setForm((current) => ({
+                        ...current,
+                        nativeRepliesDisabledAcknowledged,
+                      }));
+                    }}
+                  />
+                </Stack>
               </li>
               <li>
                 <Text size="sm">
-                  前往 <Text component="a" href="https://manager.line.biz/" target="_blank" rel="noreferrer noopener" inherit td="underline">LINE Official Account Manager</Text>，選擇帳號，點選右上角 Settings (設定) ➡️ 左選單 Response settings (回應設定) / <strong>Official Account Manager</strong> 的回應設定。
+                  確認客服基本設定（品牌名稱、客服名稱等），點擊「儲存客服設定」。
+                </Text>
+                <Button size="xs" variant="light" mt="xs" onClick={onOpenSettings} disabled={!lineActive || Boolean(action)}>
+                  設定客服基本資料
+                </Button>
+              </li>
+              <li>
+                <Text size="sm">
+                  <strong>回到本頁執行「檢查 LINE 就緒狀態」</strong>，系統會自動設定並驗證 Webhook。
                 </Text>
               </li>
               <li>
                 <Text size="sm">
-                  在回應功能設定中，停用 <strong>Greeting messages</strong> (加入好友的歡迎訊息)。
+                  在 FAQ 知識庫中建立至少一則 FAQ 並啟用。
                 </Text>
+                <Button size="xs" variant="light" mt="xs" onClick={onOpenFaq} disabled={!lineActive || Boolean(action)}>
+                  管理 FAQ 知識庫
+                </Button>
               </li>
               <li>
                 <Text size="sm">
-                  在回應功能設定中，停用 <strong>Auto-reply messages</strong> (自動回應訊息)；且在詳細設定中開啟 Webhook (啟用)。
-                </Text>
-                <Checkbox
-                  mt="xs"
-                  mb="xs"
-                  label="我已停用 Greeting messages 與 Auto-reply messages"
-                  checked={form.nativeRepliesDisabledAcknowledged}
-                  disabled={!lineActive || Boolean(action)}
-                  onChange={(event) => {
-                    const nativeRepliesDisabledAcknowledged = event.currentTarget.checked;
-                    setForm((current) => ({
-                      ...current,
-                      nativeRepliesDisabledAcknowledged,
-                    }));
-                  }}
-                />
-              </li>
-              <li>
-                <Text size="sm">
-                  確認勾選確認方塊後，<strong>回到本頁執行「檢查 LINE 就緒狀態」</strong>。
+                  點擊「測試 AI 供應商」確認 AI 連線正常，然後點擊「啟用 AI 客服」。
                 </Text>
               </li>
             </ol>
@@ -177,22 +181,8 @@ export function SupportReadinessPanel({
         <Group wrap="wrap" aria-live="polite">
           <Button
             variant="light"
-            onClick={onOpenSettings}
-            disabled={!lineActive || Boolean(action)}
-          >
-            設定客服基本資料
-          </Button>
-          <Button
-            variant="light"
-            onClick={onOpenFaq}
-            disabled={!lineActive || Boolean(action)}
-          >
-            管理 FAQ 知識庫
-          </Button>
-          <Button
-            variant="light"
             loading={action === "readiness"}
-            disabled={!lineActive || !form.redeliveryAcknowledged || !form.nativeRepliesDisabledAcknowledged || Boolean(action)}
+            disabled={!lineActive || !configuration?.llmProvider || Boolean(action)}
             onClick={onRefresh}
           >
             檢查 LINE 就緒狀態
@@ -200,7 +190,7 @@ export function SupportReadinessPanel({
           <Button
             variant="light"
             loading={action === "provider"}
-            disabled={!configuration || !readiness?.checks?.providerConfigured || !readiness?.ready || Boolean(action)}
+            disabled={!configuration || !checks.webhookVerified || !checks.enabledFaq || Boolean(action)}
             onClick={onTestProvider}
           >
             測試 AI 供應商
