@@ -31,6 +31,8 @@ export function SupportReadinessPanel({
   onRefresh,
   onTestProvider,
   onChangeSupportState,
+  onOpenSettings,
+  onOpenFaq,
 }) {
   const lineActive = lineConnection?.state === "active";
   const supportEnabled = readiness?.supportEnabled === true;
@@ -98,6 +100,32 @@ export function SupportReadinessPanel({
                 <Text size="sm">
                   在 Webhook settings 區塊中，啟用 <strong>Webhook redelivery</strong> (Webhook 傳送資料重試功能)。
                 </Text>
+                <Stack gap="xs" mt="xs" mb="xs">
+                  <Checkbox
+                    label="我已啟用 Webhook redelivery"
+                    checked={form.redeliveryAcknowledged}
+                    disabled={!lineActive || Boolean(action)}
+                    onChange={(event) => {
+                      const redeliveryAcknowledged = event.currentTarget.checked;
+                      setForm((current) => ({
+                        ...current,
+                        redeliveryAcknowledged,
+                      }));
+                    }}
+                  />
+                  <Checkbox
+                    label="我已停用 Greeting messages 與 Auto-reply messages"
+                    checked={form.nativeRepliesDisabledAcknowledged}
+                    disabled={!lineActive || Boolean(action)}
+                    onChange={(event) => {
+                      const nativeRepliesDisabledAcknowledged = event.currentTarget.checked;
+                      setForm((current) => ({
+                        ...current,
+                        nativeRepliesDisabledAcknowledged,
+                      }));
+                    }}
+                  />
+                </Stack>
               </li>
               <li>
                 <Text size="sm">
@@ -116,39 +144,12 @@ export function SupportReadinessPanel({
               </li>
               <li>
                 <Text size="sm">
-                  勾選左側確認方塊，<strong>回到本頁執行「檢查 LINE 就緒狀態」</strong>。
+                  確認勾選確認方塊後，<strong>回到本頁執行「檢查 LINE 就緒狀態」</strong>。
                 </Text>
               </li>
             </ol>
           </details>
         ) : null}
-
-        <Stack gap="xs">
-          <Checkbox
-            label="我已啟用 Webhook redelivery"
-            checked={form.redeliveryAcknowledged}
-            disabled={!lineActive || Boolean(action)}
-            onChange={(event) => {
-              const redeliveryAcknowledged = event.currentTarget.checked;
-              setForm((current) => ({
-                ...current,
-                redeliveryAcknowledged,
-              }));
-            }}
-          />
-          <Checkbox
-            label="我已停用 Greeting messages 與 Auto-reply messages"
-            checked={form.nativeRepliesDisabledAcknowledged}
-            disabled={!lineActive || Boolean(action)}
-            onChange={(event) => {
-              const nativeRepliesDisabledAcknowledged = event.currentTarget.checked;
-              setForm((current) => ({
-                ...current,
-                nativeRepliesDisabledAcknowledged,
-              }));
-            }}
-          />
-        </Stack>
 
         <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="xs">
           {Object.entries(CHECK_LABELS).map(([key, label]) => (
@@ -174,8 +175,22 @@ export function SupportReadinessPanel({
         <Group wrap="wrap" aria-live="polite">
           <Button
             variant="light"
-            loading={action === "readiness"}
+            onClick={onOpenSettings}
             disabled={!lineActive || Boolean(action)}
+          >
+            設定客服基本資料
+          </Button>
+          <Button
+            variant="light"
+            onClick={onOpenFaq}
+            disabled={!lineActive || Boolean(action)}
+          >
+            管理 FAQ 知識庫
+          </Button>
+          <Button
+            variant="light"
+            loading={action === "readiness"}
+            disabled={!lineActive || !form.redeliveryAcknowledged || !form.nativeRepliesDisabledAcknowledged || Boolean(action)}
             onClick={onRefresh}
           >
             檢查 LINE 就緒狀態
@@ -183,7 +198,7 @@ export function SupportReadinessPanel({
           <Button
             variant="light"
             loading={action === "provider"}
-            disabled={!configuration || Boolean(action)}
+            disabled={!configuration || !readiness?.checks?.providerConfigured || !readiness?.ready || Boolean(action)}
             onClick={onTestProvider}
           >
             測試 AI 供應商
