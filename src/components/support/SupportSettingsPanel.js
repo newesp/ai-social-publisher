@@ -2,6 +2,7 @@
 
 import {
   Button,
+  Checkbox,
   Group,
   Paper,
   Select,
@@ -29,7 +30,7 @@ const EMPTY_FORM = Object.freeze({
 
 export function SupportSettingsPanel({ lineConnection, initialSetupRetryable = false }) {
   const [configuration, setConfiguration] = useState(null);
-  const [form, setForm] = useState({ ...EMPTY_FORM });
+  const [form, setForm] = useState(() => toForm(null, lineConnection));
   const [readiness, setReadiness] = useState(null);
   const [status, setStatus] = useState("loading");
   const [action, setAction] = useState("");
@@ -53,9 +54,9 @@ export function SupportSettingsPanel({ lineConnection, initialSetupRetryable = f
     if (!response.ok) throw new Error(safeError(data, "無法載入客服設定。"));
     const nextConfiguration = data.configuration ?? null;
     setConfiguration(nextConfiguration);
-    setForm(toForm(nextConfiguration));
+    setForm(toForm(nextConfiguration, lineConnection));
     return nextConfiguration;
-  }, []);
+  }, [lineConnection]);
 
   const loadSupport = useCallback(async () => {
     setStatus("loading");
@@ -95,7 +96,7 @@ export function SupportSettingsPanel({ lineConnection, initialSetupRetryable = f
         throw new Error(safeError(data, "客服設定儲存失敗。"));
       }
       setConfiguration(data.configuration);
-      setForm(toForm(data.configuration));
+      setForm(toForm(data.configuration, lineConnection));
       await loadStaticReadiness();
       setNotice("客服設定已儲存。");
     } catch (saveError) {
@@ -288,7 +289,6 @@ export function SupportSettingsPanel({ lineConnection, initialSetupRetryable = f
                 ...current,
                 llmModel: value ?? "",
               }))}
-            />
             <Group wrap="wrap">
               <Button
                 loading={action === "save"}
@@ -299,6 +299,11 @@ export function SupportSettingsPanel({ lineConnection, initialSetupRetryable = f
               </Button>
               <Text size="xs" c="dimmed">API Key 請在 AI 分頁管理，不會顯示在這裡。</Text>
             </Group>
+            {lineConnected && (!form.redeliveryAcknowledged || !form.nativeRepliesDisabledAcknowledged) ? (
+              <Text size="xs" c="orange.8">
+                提示：請勾選右側「啟用與就緒狀態」中的確認框以啟用儲存按鈕。
+              </Text>
+            ) : null}
           </Stack>
         </Paper>
 
@@ -325,15 +330,22 @@ export function SupportSettingsPanel({ lineConnection, initialSetupRetryable = f
   );
 }
 
-function toForm(configuration) {
-  if (!configuration) return { ...EMPTY_FORM };
+function toForm(configuration, lineConnection) {
+  const defaultName = lineConnection?.displayName || "";
+  if (!configuration) {
+    return {
+      ...EMPTY_FORM,
+      brandName: defaultName,
+      assistantName: defaultName,
+    };
+  }
   const provider = MODELS[configuration.llmProvider] ? configuration.llmProvider : "google";
   const model = MODELS[provider].includes(configuration.llmModel)
     ? configuration.llmModel
     : MODELS[provider][0];
   return {
-    brandName: configuration.brandName ?? "",
-    assistantName: configuration.assistantName ?? "",
+    brandName: configuration.brandName || defaultName,
+    assistantName: configuration.assistantName || defaultName,
     replyTone: configuration.replyTone ?? "friendly",
     llmProvider: provider,
     llmModel: model,

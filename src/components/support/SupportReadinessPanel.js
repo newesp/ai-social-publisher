@@ -81,16 +81,44 @@ export function SupportReadinessPanel({
               如何啟用 LINE AI 客服
             </summary>
             <Text size="sm" c="dimmed" mt="xs">
-              請確認目前連線的 Provider 與 Messaging API Channel，然後依序完成：
+              請依序完成以下步驟，然後返回本頁面進行就緒狀態檢查：
             </Text>
             <ol style={{ marginBlock: "0.75rem 0", paddingInlineStart: "1.25rem" }}>
-              <li><Text size="sm">開啟 <strong>Messaging API</strong> 分頁。</Text></li>
-              <li><Text size="sm">啟用 <strong>Use webhook</strong>。</Text></li>
-              <li><Text size="sm">啟用 <strong>Webhook redelivery</strong>。</Text></li>
-              <li><Text size="sm">開啟 <strong>Official Account Manager</strong> 的回應設定。</Text></li>
-              <li><Text size="sm">停用 <strong>Greeting messages</strong>。</Text></li>
-              <li><Text size="sm">停用 <strong>Auto-reply messages</strong>。</Text></li>
-              <li><Text size="sm">回到本頁執行「檢查 LINE 就緒狀態」。</Text></li>
+              <li>
+                <Text size="sm">
+                  前往 <Text component="a" href="https://developers.line.biz/console/" target="_blank" rel="noreferrer noopener" inherit td="underline">LINE Developers Console</Text>，選擇您的 Provider 與 Messaging API Channel，開啟 <strong>Messaging API</strong> 頁籤。
+                </Text>
+              </li>
+              <li>
+                <Text size="sm">
+                  在 Webhook settings 區塊中，啟用 <strong>Use webhook</strong> (使用 Webhook)。
+                </Text>
+              </li>
+              <li>
+                <Text size="sm">
+                  在 Webhook settings 區塊中，啟用 <strong>Webhook redelivery</strong> (Webhook 傳送資料重試功能)。
+                </Text>
+              </li>
+              <li>
+                <Text size="sm">
+                  前往 <Text component="a" href="https://manager.line.biz/" target="_blank" rel="noreferrer noopener" inherit td="underline">LINE Official Account Manager</Text>，選擇帳號，點選右上角 Settings (設定) ➡️ 左選單 Response settings (回應設定) / <strong>Official Account Manager</strong> 的回應設定。
+                </Text>
+              </li>
+              <li>
+                <Text size="sm">
+                  在回應功能設定中，停用 <strong>Greeting messages</strong> (加入好友的歡迎訊息)。
+                </Text>
+              </li>
+              <li>
+                <Text size="sm">
+                  在回應功能設定中，停用 <strong>Auto-reply messages</strong> (自動回應訊息)；且在詳細設定中開啟 Webhook (啟用)。
+                </Text>
+              </li>
+              <li>
+                <Text size="sm">
+                  勾選左側確認方塊，<strong>回到本頁執行「檢查 LINE 就緒狀態」</strong>。
+                </Text>
+              </li>
             </ol>
           </details>
         ) : null}
