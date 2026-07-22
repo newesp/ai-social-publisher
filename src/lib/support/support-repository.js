@@ -281,6 +281,7 @@ export function createSupportRepository(db = createDbClient(), {
 
     async listActivePendingSupportTransitions(ownerEmail) {
       const owner = normalizeOwner(ownerEmail);
+      await commitDueTransitionsInternal(db, owner);
       const transitions = await db.select({ id: supportConversationTransitions.id, conversationId: supportConversationTransitions.conversationId, action: supportConversationTransitions.requestedAction, effectiveAt: supportConversationTransitions.effectiveAt }).from(supportConversationTransitions).innerJoin(supportConversations, and(eq(supportConversations.pendingTransitionId, supportConversationTransitions.id), eq(supportConversations.id, supportConversationTransitions.conversationId))).where(and(
         eq(supportConversations.ownerEmail, owner),
         or(eq(supportConversations.status, "return_to_ai_pending"), eq(supportConversations.status, "resolve_pending")),
@@ -345,6 +346,7 @@ export function createSupportRepository(db = createDbClient(), {
     async getInboxConversation(ownerEmail, conversationId) {
       const owner = normalizeOwner(ownerEmail);
       const id = requiredBoundedText(conversationId, "Conversation ID", 100);
+      await commitDueTransitionsInternal(db, owner);
       const [conversation] = await db.select({
         id: supportConversations.id,
         status: supportConversations.status,
@@ -430,6 +432,25 @@ export function createSupportRepository(db = createDbClient(), {
         faqSources: faqs.map((faq) => ({ id: faq.id, question: faq.question, category: faq.category })),
         pendingTransition: transition[0] ? { id: transition[0].id, action: transition[0].requestedAction, effectiveAt: transition[0].effectiveAt } : null,
       };
+    },
+
+    async deleteSupportConversation(ownerEmail, conversationId) {
+      const owner = normalizeOwner(ownerEmail);
+      const id = requiredBoundedText(conversationId, "Conversation ID", 100);
+      return retryBusyOperation(() => db.transaction(async (tx) => {
+        const [conversation] = await tx.select({ id: supportConversations.id }).from(supportConversations).where(and(
+          eq(supportConversations.id, id), eq(supportConversations.ownerEmail, owner),
+        )).limit(1);
+        if (!conversation) return false;
+
+        await tx.delete(supportAiDecisions).where(eq(supportAiDecisions.conversationId, id));
+        await tx.delete(supportConversationTransitions).where(eq(supportConversationTransitions.conversationId, id));
+        await tx.delete(supportOutboundDeliveries).where(eq(supportOutboundDeliveries.conversationId, id));
+        await tx.delete(supportMessages).where(eq(supportMessages.conversationId, id));
+        await tx.delete(supportConversations).where(and(eq(supportConversations.id, id), eq(supportConversations.ownerEmail, owner)));
+
+        return true;
+      }));
     },
 
     async markInboxConversationRead(ownerEmail, conversationId) {
@@ -572,15 +593,7 @@ export function createSupportRepository(db = createDbClient(), {
 
     async commitSupportTransition({ transitionId, conversationId, now = new Date() }) {
       const transitionIdValue = requiredBoundedText(transitionId, "Transition ID", 100); const conversationIdValue = requiredBoundedText(conversationId, "Conversation ID", 100); const timestamp = validDate(now);
-      return retryBusyOperation(() => db.transaction(async (tx) => {
-        const [transition] = await tx.select().from(supportConversationTransitions).where(and(eq(supportConversationTransitions.id, transitionIdValue), eq(supportConversationTransitions.conversationId, conversationIdValue))).limit(1);
-        if (!transition || transition.cancelledAt || transition.committedAt) return { status: "stale" };
-        const [conversation] = await tx.update(supportConversations).set({ status: transition.toStatus, handoffReasonCode: null, pendingTransitionId: null, pendingAction: null, pendingActionEffectiveAt: null, version: transition.expectedVersion + 2, updatedAt: timestamp }).where(and(eq(supportConversations.id, conversationIdValue), eq(supportConversations.pendingTransitionId, transitionIdValue), eq(supportConversations.version, transition.expectedVersion + 1))).returning({ id: supportConversations.id });
-        if (!conversation) return { status: "stale" };
-        const [committed] = await tx.update(supportConversationTransitions).set({ committedAt: timestamp }).where(and(eq(supportConversationTransitions.id, transitionIdValue), isNull(supportConversationTransitions.cancelledAt), isNull(supportConversationTransitions.committedAt))).returning({ id: supportConversationTransitions.id });
-        if (!committed) throw unavailablePersistenceError();
-        return { status: "committed" };
-      }));
+      return commitSupportTransitionInternal(db, transitionIdValue, conversationIdValue, timestamp);
     },
 
     async undoSupportTransition(ownerEmail, conversationId, transitionId, now = new Date()) {
@@ -2320,4 +2333,57 @@ function routeError(message, status) {
   const error = new Error(message);
   error.status = status;
   return error;
+}
+
+async function commitSupportTransitionInternal(db, transitionIdValue, conversationIdValue, timestamp) {
+  return retryBusyOperation(() => db.transaction(async (tx) => {
+    const [transition] = await tx.select().from(supportConversationTransitions).where(and(
+      eq(supportConversationTransitions.id, transitionIdValue),
+      eq(supportConversationTransitions.conversationId, conversationIdValue),
+    )).limit(1);
+    if (!transition || transition.cancelledAt || transition.committedAt) return { status: "stale" };
+    const [conversation] = await tx.update(supportConversations).set({
+      status: transition.toStatus,
+      handoffReasonCode: null,
+      pendingTransitionId: null,
+      pendingAction: null,
+      pendingActionEffectiveAt: null,
+      version: transition.expectedVersion + 2,
+      updatedAt: timestamp,
+    }).where(and(
+      eq(supportConversations.id, conversationIdValue),
+      eq(supportConversations.pendingTransitionId, transitionIdValue),
+      eq(supportConversations.version, transition.expectedVersion + 1),
+    )).returning({ id: supportConversations.id });
+    if (!conversation) return { status: "stale" };
+    const [committed] = await tx.update(supportConversationTransitions).set({
+      committedAt: timestamp,
+    }).where(and(
+      eq(supportConversationTransitions.id, transitionIdValue),
+      isNull(supportConversationTransitions.cancelledAt),
+      isNull(supportConversationTransitions.committedAt),
+    )).returning({ id: supportConversationTransitions.id });
+    if (!committed) throw unavailablePersistenceError();
+    return { status: "committed" };
+  }));
+}
+
+async function commitDueTransitionsInternal(db, owner, now = new Date()) {
+  try {
+    const dueTransitions = await db.select({
+      id: supportConversationTransitions.id,
+      conversationId: supportConversationTransitions.conversationId,
+    }).from(supportConversationTransitions).where(and(
+      eq(supportConversationTransitions.requestedByOwnerEmail, owner),
+      isNull(supportConversationTransitions.committedAt),
+      isNull(supportConversationTransitions.cancelledAt),
+      lte(supportConversationTransitions.effectiveAt, now),
+    ));
+
+    for (const transition of dueTransitions) {
+      await commitSupportTransitionInternal(db, transition.id, transition.conversationId, now);
+    }
+  } catch {
+    // Non-blocking auto-commit fallback
+  }
 }

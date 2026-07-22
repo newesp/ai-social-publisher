@@ -49,6 +49,15 @@ export function createSupportInboxRouteHandlers({
       if (!conversation) return respond({ error: "Support conversation not found." }, { status: 404 });
       return respond({ conversation: { id: conversation.id, unreadCount: 0 } });
     },
+
+    async deleteConversation(request, id) {
+      const owner = await normalizedOwner(requireOwner);
+      requireSameOrigin(request);
+      const supportStore = await getStore();
+      const deleted = await supportStore.deleteConversation(owner, requiredId(id));
+      if (!deleted) return respond({ error: "Support conversation not found." }, { status: 404 });
+      return respond({ success: true });
+    },
   };
 }
 

@@ -25,12 +25,12 @@ export function SupportInbox() {
   const detailAbort = useRef(null);
   const hasSummaries = useRef(false);
 
-  const loadDetail = useCallback(async (id) => {
+  const loadDetail = useCallback(async (id, { silent = false } = {}) => {
     if (!id) { setSelected(null); return; }
     detailAbort.current?.abort();
     const controller = new AbortController();
     detailAbort.current = controller;
-    setDetailState("loading");
+    if (!silent) setDetailState("loading");
     try {
       const response = await fetch(`/api/support/conversations/${encodeURIComponent(id)}`, { signal: controller.signal });
       const data = await safeJson(response);
@@ -38,7 +38,9 @@ export function SupportInbox() {
       setSelected(data.conversation);
       setDetailState("ready");
     } catch (error) {
-      if (error.name !== "AbortError") { setSelected(null); setDetailState("error"); }
+      if (error.name !== "AbortError") {
+        if (!silent) { setSelected(null); setDetailState("error"); }
+      }
     }
   }, []);
 
@@ -53,11 +55,11 @@ export function SupportInbox() {
     }
   }, []);
 
-  const loadList = useCallback(async ({ cursor = null, append = false } = {}) => {
+  const loadList = useCallback(async ({ cursor = null, append = false, silent = false } = {}) => {
     listAbort.current?.abort();
     const controller = new AbortController();
     listAbort.current = controller;
-    if (!hasSummaries.current) setListState("loading");
+    if (!hasSummaries.current && !silent) setListState("loading");
     try {
       const response = await fetch(`/api/support/conversations${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, { signal: controller.signal });
       const data = await safeJson(response);
@@ -68,7 +70,7 @@ export function SupportInbox() {
       await loadActivePendingTransitions(controller.signal);
       setListState("ready");
       setRecoveryState((current) => current === "reconnecting" || current === "recovery_failed" ? "recovered" : "idle");
-      if (selectedId) await loadDetail(selectedId);
+      if (selectedId) await loadDetail(selectedId, { silent: true });
     } catch (error) {
       if (error.name !== "AbortError") {
         setListState(hasSummaries.current ? "stale" : "error");
@@ -76,19 +78,21 @@ export function SupportInbox() {
       }
     }
   }, [loadActivePendingTransitions, loadDetail, selectedId]);
+
   const loadMore = useCallback(() => nextCursor && loadList({ cursor: nextCursor, append: true }), [loadList, nextCursor]);
 
   useEffect(() => { loadList(); }, [loadList]);
+
   useEffect(() => {
     const refreshWhenVisible = () => {
       if (document.visibilityState === "visible") {
         setRecoveryState("reconnecting");
-        loadList();
+        loadList({ silent: true });
       }
     };
     document.addEventListener("visibilitychange", refreshWhenVisible);
     const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") loadList();
+      if (document.visibilityState === "visible") loadList({ silent: true });
     }, POLL_MS);
     return () => {
       document.removeEventListener("visibilitychange", refreshWhenVisible);
@@ -98,57 +102,135 @@ export function SupportInbox() {
     };
   }, [loadList]);
 
+  // Monitor active pending transition effectiveAt for smooth countdown completion
+  useEffect(() => {
+    if (!globalTransitions.length && !selected?.pendingTransition) return;
+    const checkExpiryTimer = window.setInterval(() => {
+      const now = Date.now();
+      const hasExpired = globalTransitions.some((t) => new Date(t.effectiveAt).getTime() <= now)
+        || (selected?.pendingTransition && new Date(selected.pendingTransition.effectiveAt).getTime() <= now);
+      if (hasExpired) {
+        loadList({ silent: true });
+      }
+    }, 1000);
+    return () => window.clearInterval(checkExpiryTimer);
+  }, [globalTransitions, selected, loadList]);
+
   const choose = useCallback(async (id) => {
     setSelectedId(id);
     await loadDetail(id);
     fetch(`/api/support/conversations/${encodeURIComponent(id)}/read`, { method: "POST", headers: { "Content-Type": "application/json" } }).catch(() => {});
   }, [loadDetail]);
+
   const takeOver = useCallback(async () => {
     if (!selected) return;
     const response = await fetch(`/api/support/conversations/${encodeURIComponent(selected.id)}/take-over`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expectedVersion: selected.version }) });
-    if (response.ok) { await loadDetail(selected.id); await loadList(); }
+    if (response.ok) { await loadDetail(selected.id, { silent: true }); await loadList({ silent: true }); }
   }, [loadDetail, loadList, selected]);
+
   const sendMessage = useCallback(async (text, idempotencyKey) => {
     if (!selected) return;
     const response = await fetch(`/api/support/conversations/${encodeURIComponent(selected.id)}/messages`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text, idempotencyKey }) });
     const data = await safeJson(response);
-    await loadDetail(selected.id); await loadList();
+    await loadDetail(selected.id, { silent: true }); await loadList({ silent: true });
     if (!response.ok || data.message?.deliveryStatus !== "sent") {
-      throw new Error(data.error || "LINE message delivery failed.");
+      throw new Error(data.error || "LINE 訊息傳送失敗。");
     }
     return data.message;
   }, [loadDetail, loadList, selected]);
+
   const retryHumanMessage = useCallback(async (messageId) => {
     if (!selected) return;
     const response = await fetch(`/api/support/messages/${encodeURIComponent(messageId)}/retry`, { method: "POST" });
     const data = await safeJson(response);
-    await loadDetail(selected.id); await loadList();
+    await loadDetail(selected.id, { silent: true }); await loadList({ silent: true });
     if (!response.ok || data.message?.deliveryStatus !== "sent") {
-      throw new Error(data.error || "LINE message delivery failed.");
+      throw new Error(data.error || "LINE 訊息傳送失敗。");
     }
     return data.message;
   }, [loadDetail, loadList, selected]);
+
   const requestTransition = useCallback(async (action) => {
     if (!selected) return;
     const response = await fetch(`/api/support/conversations/${encodeURIComponent(selected.id)}/transitions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, expectedVersion: selected.version }) });
     const data = await safeJson(response);
     if (response.ok && data.transition) setGlobalTransitions((current) => reconcileGlobalTransitions([...current, { ...data.transition, customerLabel: selected.customerLabel }]));
-    await loadDetail(selected.id); await loadList();
+    await loadDetail(selected.id, { silent: true }); await loadList({ silent: true });
   }, [loadDetail, loadList, selected]);
+
   const undoTransition = useCallback(async (transition) => {
     if (!transition) return;
     setUndoingTransition(transition.id);
     try {
       const response = await fetch(`/api/support/conversations/${encodeURIComponent(transition.conversationId)}/transitions/${encodeURIComponent(transition.id)}/undo`, { method: "POST" });
       if (response.ok || response.status === 409) setGlobalTransitions((current) => current.filter((item) => item.id !== transition.id));
-      await loadList();
-      if (selectedId === transition.conversationId) await loadDetail(selectedId);
+      await loadList({ silent: true });
+      if (selectedId === transition.conversationId) await loadDetail(selectedId, { silent: true });
     } finally { setUndoingTransition(null); }
   }, [loadDetail, loadList, selectedId]);
+
+  const deleteConversation = useCallback(async (id) => {
+    if (!id) return;
+    const response = await fetch(`/api/support/conversations/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+    });
+    const data = await safeJson(response);
+    if (!response.ok) throw new Error(data.error || "刪除對話失敗。");
+    if (selectedId === id) {
+      setSelectedId(null);
+      setSelected(null);
+    }
+    await loadList({ silent: true });
+  }, [loadDetail, loadList, selectedId]);
+
   const showList = !mobile || !selectedId;
   const showThread = !mobile || Boolean(selectedId);
 
-  return <Stack gap="md" style={{ minWidth: 0 }}><Group justify="space-between"><div><Text fw={700} size="xl">Support inbox</Text><Text c="dimmed" size="sm">Polling pauses while this tab is hidden.</Text></div><Button variant="light" onClick={loadList} loading={listState === "loading"}>Refresh</Button></Group><GlobalTransitionUndo transitions={globalTransitions} onUndo={undoTransition} undoingTransitionId={undoingTransition} /><SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="md" style={{ minWidth: 0 }}>{showList ? <ConversationList conversations={conversations} selectedId={selectedId} loading={listState === "loading"} state={listState} recoveryState={recoveryState} onSelect={choose} onRefresh={loadList} onLoadMore={loadMore} hasMore={Boolean(nextCursor)} /> : null}{showThread ? <ConversationThread conversation={selected} loading={detailState === "loading"} error={detailState === "error"} mobile={mobile} onBack={() => { setSelectedId(null); setSelected(null); }} onTakeOver={takeOver} onSendMessage={sendMessage} onRetryMessage={retryHumanMessage} onTransition={requestTransition} /> : null}{selected ? <ConversationDetailsDrawer conversation={selected} /> : null}</SimpleGrid></Stack>;
+  return (
+    <Stack gap="md" style={{ minWidth: 0 }}>
+      <Group justify="space-between">
+        <div>
+          <Text fw={700} size="xl">AI 客服對話收件匣</Text>
+          <Text c="dimmed" size="sm">分頁隱藏時將自動暫停更新。</Text>
+        </div>
+        <Button variant="light" onClick={() => loadList({ silent: false })} loading={listState === "loading" && !hasSummaries.current}>
+          重新整理
+        </Button>
+      </Group>
+      <GlobalTransitionUndo transitions={globalTransitions} onUndo={undoTransition} undoingTransitionId={undoingTransition} />
+      <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="md" style={{ minWidth: 0 }}>
+        {showList ? (
+          <ConversationList
+            conversations={conversations}
+            selectedId={selectedId}
+            loading={listState === "loading" && !hasSummaries.current}
+            state={listState}
+            recoveryState={recoveryState}
+            onSelect={choose}
+            onRefresh={() => loadList({ silent: false })}
+            onLoadMore={loadMore}
+            hasMore={Boolean(nextCursor)}
+          />
+        ) : null}
+        {showThread ? (
+          <ConversationThread
+            conversation={selected}
+            loading={detailState === "loading" && !selected}
+            error={detailState === "error" && !selected}
+            mobile={mobile}
+            onBack={() => { setSelectedId(null); setSelected(null); }}
+            onTakeOver={takeOver}
+            onSendMessage={sendMessage}
+            onRetryMessage={retryHumanMessage}
+            onTransition={requestTransition}
+            onDeleteConversation={deleteConversation}
+          />
+        ) : null}
+        {selected ? <ConversationDetailsDrawer conversation={selected} /> : null}
+      </SimpleGrid>
+    </Stack>
+  );
 }
 
 async function safeJson(response) { try { return await response.json(); } catch { return {}; } }

@@ -397,6 +397,9 @@ export function createSupportStore({
       return result ? toActionConversation(result) : null;
     },
 
+    async deleteConversation(ownerEmail, id) {
+      return repository.deleteSupportConversation(requireOwner(ownerEmail), requireText(id, "Conversation ID"));
+    },
     async recoverTransitionStartFailure(ownerEmail, id, transitionId) {
       const result = await repository.undoSupportTransition(requireOwner(ownerEmail), requireText(id, "Conversation ID"), requireText(transitionId, "Transition ID"), now());
       return result ? toActionConversation(result) : null;
