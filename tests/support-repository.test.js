@@ -453,10 +453,58 @@ test("human-owned inbound stays human-owned and cannot be replayed after return 
     });
     [conversation] = await db.select().from(supportConversations)
       .where(eq(supportConversations.id, initial.conversationId));
-    assert.equal(conversation.status, "ai_active");
+    assert.equal(conversation.status, "resolved");
     const [reopenedMessage] = await db.select().from(supportMessages)
       .where(eq(supportMessages.idempotencyKey, `${connectionId}:evt-reopen`));
+    assert.notEqual(reopenedMessage.conversationId, initial.conversationId);
     assert.equal(reopenedMessage.processedAt, null);
+  });
+});
+
+test("inbox labels use an encrypted LINE display name and retain it when a later lookup is unavailable", async () => {
+  await withDatabase(async (db) => {
+    const connectionId = "11111111-1111-4111-8111-111111111111";
+    const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });
+    await db.insert(platformConnections).values(connection(connectionId, "owner@example.com"));
+    const first = await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com", connectionId, eventId: "evt-name-1", externalUserId: "private-user-id",
+      customerDisplayName: "Leo Lin", replyToken: "reply-token", message: { type: "text", text: "hello", safeMetadata: {} }, receivedAt: NOW,
+    });
+    const [stored] = await db.select({ encryptedCustomerDisplayName: supportConversations.encryptedCustomerDisplayName })
+      .from(supportConversations).where(eq(supportConversations.id, first.conversationId));
+    assert.equal(stored.encryptedCustomerDisplayName.includes("Leo Lin"), false);
+
+    await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com", connectionId, eventId: "evt-name-2", externalUserId: "private-user-id",
+      replyToken: "reply-token-2", message: { type: "text", text: "again", safeMetadata: {} }, receivedAt: LATER,
+    });
+    const [summary] = await repository.listInboxConversations("owner@example.com");
+    const detail = await repository.getInboxConversation("owner@example.com", first.conversationId);
+    assert.equal(summary.customerLabel, "Leo Lin");
+    assert.equal(detail.customerLabel, "Leo Lin");
+  });
+});
+
+test("an inbound message after seven inactive days resolves the old case and opens a new AI case", async () => {
+  await withDatabase(async (db) => {
+    const connectionId = "11111111-1111-4111-8111-111111111111";
+    const repository = createSupportRepository(db, { encryptionKey: SETTINGS_ENCRYPTION_KEY });
+    await db.insert(platformConnections).values(connection(connectionId, "owner@example.com"));
+    const first = await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com", connectionId, eventId: "evt-case-1", externalUserId: "private-user-id",
+      replyToken: "reply-token", message: { type: "text", text: "first case", safeMetadata: {} }, receivedAt: NOW,
+    });
+    const second = await repository.ingestLineUserEvent({
+      ownerEmail: "owner@example.com", connectionId, eventId: "evt-case-2", externalUserId: "private-user-id",
+      replyToken: "reply-token-2", message: { type: "text", text: "new case", safeMetadata: {} },
+      receivedAt: new Date(NOW.getTime() + 7 * 24 * 60 * 60 * 1_000),
+    });
+
+    assert.notEqual(second.conversationId, first.conversationId);
+    const [oldCase] = await db.select().from(supportConversations).where(eq(supportConversations.id, first.conversationId));
+    const [newCase] = await db.select().from(supportConversations).where(eq(supportConversations.id, second.conversationId));
+    assert.equal(oldCase.status, "resolved");
+    assert.equal(newCase.status, "ai_active");
   });
 });
 
@@ -1960,12 +2008,12 @@ async function withDatabase(run) {
         id TEXT PRIMARY KEY NOT NULL, owner_email TEXT NOT NULL,
         platform_connection_id TEXT NOT NULL, platform TEXT NOT NULL,
         customer_lookup_key TEXT NOT NULL, encrypted_customer_external_id TEXT NOT NULL,
+        encrypted_customer_display_name TEXT,
         status TEXT NOT NULL, handoff_reason_code TEXT, unread_count INTEGER NOT NULL DEFAULT 0,
         pending_transition_id TEXT, pending_action TEXT, pending_action_effective_at INTEGER,
         ai_closure_confirmation_message_id TEXT, ai_closure_confirmation_expires_at INTEGER,
         processing_claim_id TEXT, processing_claim_expires_at INTEGER, version INTEGER NOT NULL DEFAULT 0,
-        last_inbound_at INTEGER, last_outbound_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-        UNIQUE (platform_connection_id, customer_lookup_key)
+        last_inbound_at INTEGER, last_outbound_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
       );
       CREATE TABLE support_messages (
         id TEXT PRIMARY KEY NOT NULL, conversation_id TEXT NOT NULL, direction TEXT NOT NULL,

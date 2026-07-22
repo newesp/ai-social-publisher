@@ -349,7 +349,7 @@ export function createSupportStore({
       return {
         transitions: Array.isArray(transitions) ? transitions.map((transition) => ({
         id: transition.id, conversationId: transition.conversationId, action: transition.action,
-        effectiveAt: transition.effectiveAt, customerLabel: "Customer",
+        effectiveAt: transition.effectiveAt, customerLabel: typeof transition.customerLabel === "string" && transition.customerLabel ? transition.customerLabel : "Customer",
         })) : [],
         batchLimitExceeded: result?.batchLimitExceeded === true,
       };
@@ -571,7 +571,7 @@ function parseStringArray(value) {
 
 function toInboxSummary(record) {
   return {
-    id: record.id, customerLabel: "Customer", status: record.status, unreadCount: record.unreadCount,
+    id: record.id, customerLabel: typeof record.customerLabel === "string" && record.customerLabel ? record.customerLabel : "Customer", status: record.status, unreadCount: record.unreadCount,
     handoffReason: record.handoffReason, lastMessagePreview: record.lastMessagePreview, deliveryFailed: record.deliveryFailed === true,
     lastInboundAt: record.lastInboundAt, lastOutboundAt: record.lastOutboundAt, updatedAt: record.updatedAt,
     pendingTransition: record.pendingTransition ? { id: record.pendingTransition.id, action: record.pendingTransition.action, effectiveAt: record.pendingTransition.effectiveAt } : null,

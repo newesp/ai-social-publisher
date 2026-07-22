@@ -140,6 +140,7 @@ export const supportConversations = sqliteTable("support_conversations", {
   platform: text("platform").notNull(),
   customerLookupKey: text("customer_lookup_key").notNull(),
   encryptedCustomerExternalId: text("encrypted_customer_external_id").notNull(),
+  encryptedCustomerDisplayName: text("encrypted_customer_display_name"),
   status: text("status").notNull().default("ai_active"),
   handoffReasonCode: text("handoff_reason_code"),
   unreadCount: integer("unread_count").notNull().default(0),
@@ -170,7 +171,9 @@ export const supportConversations = sqliteTable("support_conversations", {
     table.lastOutboundAt,
     table.pendingTransitionId,
   ),
-  uniqueIndex("support_conversations_customer_unique").on(table.platformConnectionId, table.customerLookupKey),
+  uniqueIndex("support_conversations_active_customer_unique")
+    .on(table.platformConnectionId, table.customerLookupKey)
+    .where(sql`${table.status} <> 'resolved'`),
 ]);
 
 export const supportMessages = sqliteTable("support_messages", {

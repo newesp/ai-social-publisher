@@ -22,7 +22,7 @@ const SUPPORT_TABLES = {
   ],
   supportConversations: [
     "id", "ownerEmail", "platformConnectionId", "platform",
-    "customerLookupKey", "encryptedCustomerExternalId", "status",
+    "customerLookupKey", "encryptedCustomerExternalId", "encryptedCustomerDisplayName", "status",
     "handoffReasonCode", "unreadCount", "pendingTransitionId", "pendingAction",
     "pendingActionEffectiveAt", "aiClosureConfirmationMessageId", "aiClosureConfirmationExpiresAt",
     "processingClaimId", "processingClaimExpiresAt",
@@ -65,7 +65,7 @@ const REQUIRED_INDEXES = [
   "support_faqs_owner_enabled_idx",
   "support_conversations_owner_status_updated_idx",
   "support_conversations_inbox_covering_idx",
-  "support_conversations_customer_unique",
+  "support_conversations_active_customer_unique",
   "support_messages_conversation_created_idx",
   "support_messages_retention_created_idx",
   "support_messages_idempotency_unique",
@@ -84,7 +84,8 @@ test("support migration creates tenant, idempotency, claim, and transition index
   const outboxSql = await readFile(new URL("../drizzle/0005_line_outbound_delivery_outbox.sql", import.meta.url), "utf8");
   const retentionSql = await readFile(new URL("../drizzle/0006_support_retention_indexes.sql", import.meta.url), "utf8");
   const paginationSql = await readFile(new URL("../drizzle/0007_support_inbox_pagination.sql", import.meta.url), "utf8");
-  for (const name of REQUIRED_INDEXES) assert.match(`${sql}\n${outboxSql}\n${retentionSql}\n${paginationSql}`, new RegExp(name));
+  const casesSql = await readFile(new URL("../drizzle/0012_support_conversation_cases.sql", import.meta.url), "utf8");
+  for (const name of REQUIRED_INDEXES) assert.match(`${sql}\n${outboxSql}\n${retentionSql}\n${paginationSql}\n${casesSql}`, new RegExp(name));
 });
 
 test("support schema exports all eight UUID-backed tables with the required fields", () => {
@@ -131,8 +132,8 @@ test("support migrations journal immutable outbound delivery, retention indexes,
   const outboxSql = await readFile(new URL("../drizzle/0005_line_outbound_delivery_outbox.sql", import.meta.url), "utf8");
   const journal = JSON.parse(await readFile(new URL("../drizzle/meta/_journal.json", import.meta.url), "utf8"));
   const snapshot = JSON.parse(await readFile(new URL("../drizzle/meta/0004_snapshot.json", import.meta.url), "utf8"));
-  assert.equal(journal.entries.at(-1).idx, 10);
-  assert.equal(journal.entries.at(-1).tag, "0010_support_ai_closure_and_handoff");
+  assert.equal(journal.entries.at(-1).idx, 12);
+  assert.equal(journal.entries.at(-1).tag, "0012_support_conversation_cases");
   for (const tableName of [
     "support_configurations",
     "support_faqs",

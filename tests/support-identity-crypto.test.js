@@ -4,9 +4,11 @@ import { test } from "node:test";
 
 import {
   customerLookupKey,
+  decryptCustomerDisplayName,
   decryptExternalId,
   decryptReplyToken,
   encryptExternalId,
+  encryptCustomerDisplayName,
   encryptReplyToken,
   hashWebhookKey,
 } from "../src/lib/support/identity-crypto.js";
@@ -37,6 +39,14 @@ test("reply tokens use a distinct encrypted payload purpose", () => {
 
   assert.equal(encrypted.includes("reply-token"), false);
   assert.equal(decryptReplyToken(encrypted, ENCRYPTION_KEY), "reply-token");
+  assert.throws(() => decryptExternalId(encrypted, ENCRYPTION_KEY), /could not be decrypted/i);
+});
+
+test("customer display names are encrypted with a purpose distinct from external identifiers", () => {
+  const encrypted = encryptCustomerDisplayName("Leo Lin", ENCRYPTION_KEY);
+
+  assert.equal(encrypted.includes("Leo Lin"), false);
+  assert.equal(decryptCustomerDisplayName(encrypted, ENCRYPTION_KEY), "Leo Lin");
   assert.throws(() => decryptExternalId(encrypted, ENCRYPTION_KEY), /could not be decrypted/i);
 });
 

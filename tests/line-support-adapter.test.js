@@ -88,6 +88,16 @@ test("configures, tests, and reads webhook status with documented LINE request s
   });
 });
 
+test("gets a LINE user's display name without exposing the provider response", async () => {
+  const adapter = createLineSupportAdapter({
+    fetchImpl: async () => jsonResponse({ displayName: "Leo Lin", userId: "U-private" }),
+  });
+
+  assert.deepEqual(await adapter.getUserProfile({ accessToken: "line-access-token", userId: "U-private" }), {
+    displayName: "Leo Lin",
+  });
+});
+
 test("sends reply and push text with bounded inputs and retry-key support", async () => {
   const calls = [];
   const adapter = createLineSupportAdapter({

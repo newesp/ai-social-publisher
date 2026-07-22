@@ -27,7 +27,14 @@ export function ConversationList({ conversations, selectedId, loading, onSelect,
             <Paper p="xs" bg={conversation.id === selectedId ? "blue.0" : undefined} radius="sm" style={{ minWidth: 0 }}>
               <Group justify="space-between" wrap="nowrap">
                 <Text fw={600} truncate>{conversation.customerLabel || "客戶"}</Text>
-                {conversation.unreadCount > 0 ? <Badge size="sm">{conversation.unreadCount}</Badge> : null}
+                <Group gap="xs" wrap="nowrap" style={{ flexShrink: 0 }}>
+                  {conversation.updatedAt || conversation.lastInboundAt ? (
+                    <Text size="xs" c="dimmed">
+                      {formatDateTime(conversation.updatedAt || conversation.lastInboundAt)}
+                    </Text>
+                  ) : null}
+                  {conversation.unreadCount > 0 ? <Badge size="sm">{conversation.unreadCount}</Badge> : null}
+                </Group>
               </Group>
               <Group gap="xs">
                 <Badge size="xs" variant="light">{STATUS_LABELS[conversation.status] || conversation.status}</Badge>
@@ -52,3 +59,16 @@ export function ConversationList({ conversations, selectedId, loading, onSelect,
     </Paper>
   );
 }
+
+function formatDateTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  const hh = String(date.getHours()).padStart(2, "0");
+  const min = String(date.getMinutes()).padStart(2, "0");
+  return `${yyyy}/${mm}/${dd} ${hh}:${min}`;
+}
+

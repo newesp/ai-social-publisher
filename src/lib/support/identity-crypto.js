@@ -4,6 +4,7 @@ import { decryptJson, encryptJson } from "../settings/credential-crypto.js";
 
 const CUSTOMER_LOOKUP_PURPOSE = "support.customer-lookup.v1";
 const EXTERNAL_ID_PURPOSE = "support.customer-external-id.v1";
+const DISPLAY_NAME_PURPOSE = "support.customer-display-name.v1";
 const REPLY_TOKEN_PURPOSE = "support.reply-token.v1";
 const OUTBOUND_BODY_PURPOSE = "support.outbound-body.v1";
 
@@ -34,6 +35,17 @@ export function encryptExternalId(externalId, encryptionKey) {
 
 export function decryptExternalId(encryptedExternalId, encryptionKey) {
   return decryptPurposeText(encryptedExternalId, encryptionKey, EXTERNAL_ID_PURPOSE, "externalId", "Stored customer identifier");
+}
+
+export function encryptCustomerDisplayName(displayName, encryptionKey) {
+  return encryptJson({
+    purpose: DISPLAY_NAME_PURPOSE,
+    displayName: requireText(displayName, "Customer display name"),
+  }, encryptionKey);
+}
+
+export function decryptCustomerDisplayName(encryptedDisplayName, encryptionKey) {
+  return decryptPurposeText(encryptedDisplayName, encryptionKey, DISPLAY_NAME_PURPOSE, "displayName", "Stored customer display name");
 }
 
 export function encryptReplyToken(replyToken, encryptionKey) {

@@ -71,11 +71,13 @@ export function createLineWebhookHandler({
           });
           continue;
         }
+        const customerDisplayName = await loadCustomerDisplayName(lineAdapter, connection, event.externalUserId);
         const result = await eventStore.ingestUserEvent({
           ownerEmail: connection.ownerEmail,
           connectionId: connection.id,
           eventId: event.eventId,
           externalUserId: event.externalUserId,
+          customerDisplayName,
           replyToken: event.replyToken,
           message: event.message,
           receivedAt: event.receivedAt,
@@ -178,6 +180,20 @@ function validConnection(connection) {
   return typeof connection.id === "string" && connection.id
     && typeof connection.ownerEmail === "string" && connection.ownerEmail
     && typeof connection.channelSecret === "string" && connection.channelSecret;
+}
+
+async function loadCustomerDisplayName(lineAdapter, connection, externalUserId) {
+  if (typeof connection.accessToken !== "string" || !connection.accessToken
+    || typeof lineAdapter?.getUserProfile !== "function") return null;
+  try {
+    const profile = await lineAdapter.getUserProfile({ accessToken: connection.accessToken, userId: externalUserId });
+    return typeof profile?.displayName === "string" && profile.displayName.trim()
+      ? profile.displayName.trim().slice(0, 512)
+      : null;
+  } catch {
+    // Profile lookup is optional; a failure must never reject a verified webhook.
+    return null;
+  }
 }
 
 function safeResponse(respond, body, status) {

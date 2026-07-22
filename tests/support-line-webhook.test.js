@@ -88,6 +88,18 @@ test("a valid user message persists once and starts one workflow with internal i
   assert.equal(harness.startCalls.length, 1);
 });
 
+test("a profile display name is persisted with a verified user event, but a lookup failure is non-blocking", async () => {
+  const harness = createHarness({
+    findConnection: async () => ({ id: CONNECTION_ID, ownerEmail: "owner@example.com", channelSecret: CHANNEL_SECRET, accessToken: "line-access-token" }),
+    lineAdapter: {
+      getUserProfile: async () => ({ displayName: "Leo Lin" }),
+    },
+  });
+
+  assert.equal((await harness.handler(signedRequest({ events: [userEvent()] }), "opaque-key")).status, 200);
+  assert.equal(harness.store.userEvents[0].customerDisplayName, "Leo Lin");
+});
+
 test("an invalid webhook key reads no body and persists nothing", async () => {
   const harness = createHarness({ findConnection: async () => null });
   const request = signedRequest({ events: [userEvent()] });
@@ -320,7 +332,7 @@ test("concurrent duplicate deliveries still start exactly one workflow", async (
   assert.equal(harness.startCalls.length, 1);
 });
 
-function createHarness({ findConnection, store = createStore(), startWorkflow } = {}) {
+function createHarness({ findConnection, store = createStore(), startWorkflow, lineAdapter: extraLineAdapter } = {}) {
   const verifiedBodies = [];
   const adapter = createLineSupportAdapter({ fetchImpl: async () => new Response("{}") });
   const lineAdapter = {
@@ -328,6 +340,7 @@ function createHarness({ findConnection, store = createStore(), startWorkflow } 
       verifiedBodies.push(input.rawBody);
       return adapter.verifySignature(input);
     },
+    ...extraLineAdapter,
   };
   const startCalls = [];
   return {

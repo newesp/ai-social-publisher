@@ -1,0 +1,1 @@
+ALTER TABLE support_conversations ADD COLUMN encrypted_customer_display_name text;

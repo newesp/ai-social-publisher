@@ -6,6 +6,7 @@ const LINE_API_BASE = "https://api.line.me";
 const PROVIDER_ERROR_MESSAGE = "LINE support request failed.";
 const MAX_WEBHOOK_URL_LENGTH = 500;
 const MAX_TEXT_LENGTH = 5_000;
+const PROFILE_REQUEST_TIMEOUT_MS = 2_000;
 
 export function createLineSupportAdapter({
   fetchImpl = fetch,
@@ -53,6 +54,16 @@ export function createLineSupportAdapter({
         endpoint: typeof result?.endpoint === "string" ? result.endpoint : "",
         active: result?.active === true,
       };
+    },
+
+    async getUserProfile({ accessToken, userId }) {
+      const result = await providerRequest(fetchImpl, Math.min(requestTimeoutMs, PROFILE_REQUEST_TIMEOUT_MS), `/v2/bot/profile/${encodeURIComponent(requireText(userId, "LINE user ID"))}`, {
+        method: "GET",
+        headers: providerHeaders(accessToken),
+      }, { parseJson: true });
+      const displayName = typeof result?.displayName === "string" ? result.displayName.trim() : "";
+      if (!displayName || displayName.length > 512) throw providerError();
+      return { displayName };
     },
 
     async replyText({ accessToken, replyToken, text }) {

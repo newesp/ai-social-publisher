@@ -84,10 +84,12 @@ const SUPPORT_INDEXES = {
       "pending_transition_id",
     ],
   },
-  support_conversations_customer_unique: {
+  support_conversations_active_customer_unique: {
     table: "support_conversations",
     unique: true,
     columns: ["platform_connection_id", "customer_lookup_key"],
+    partial: true,
+    where: "WHERE status <> 'resolved'",
   },
   support_messages_conversation_created_idx: {
     table: "support_messages",
@@ -229,7 +231,7 @@ export async function verifySupportSchema(client) {
   const duplicates = await client.execute(`
     SELECT platform_connection_id, customer_lookup_key, COUNT(*) AS count
     FROM support_conversations
-    WHERE status NOT IN ('resolved', 'blocked')
+    WHERE status <> 'resolved'
     GROUP BY platform_connection_id, customer_lookup_key
     HAVING COUNT(*) > 1
     LIMIT 1
@@ -424,7 +426,7 @@ function buildAtomicSupportVerificationStatements() {
     if (expected.where) {
       statements.push(guard(`
         instr(
-          lower(replace(replace(replace((SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ${index}), char(10), ''), char(13), ''), ' ', '')),
+          lower(replace(replace(replace(replace((SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ${index}), char(10), ''), char(13), ''), ' ', ''), char(96), '')),
           ${sqlLiteral(normalizeIndexSql(expected.where))}
         ) > 0
       `));
@@ -435,7 +437,7 @@ function buildAtomicSupportVerificationStatements() {
     NOT EXISTS (
       SELECT platform_connection_id, customer_lookup_key
       FROM support_conversations
-      WHERE status NOT IN ('resolved', 'blocked')
+      WHERE status <> 'resolved'
       GROUP BY platform_connection_id, customer_lookup_key
       HAVING COUNT(*) > 1
     )

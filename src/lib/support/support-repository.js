@@ -20,7 +20,9 @@ import { normalizeEmail } from "../auth/policy.js";
 import { decryptJson } from "../settings/credential-crypto.js";
 import {
   customerLookupKey,
+  decryptCustomerDisplayName,
   decryptExternalId,
+  encryptCustomerDisplayName,
   decryptOutboundCanonicalBody,
   encryptExternalId,
   encryptOutboundCanonicalBody,
@@ -40,6 +42,7 @@ const EVENT_PROCESSING_LEASE_MS = 30_000;
 const OUTBOUND_DELIVERY_LEASE_MS = 30_000;
 const OUTBOUND_REVIEW_WINDOW_MS = 24 * 60 * 60 * 1_000;
 const CONTEXT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
+const CASE_INACTIVITY_MS = 7 * 24 * 60 * 60 * 1_000;
 const INBOX_QUERY_LIMIT = 31;
 const INBOX_MESSAGE_LIMIT = 100;
 const INBOX_DECISION_LIMIT = 50;
@@ -75,7 +78,8 @@ export function createSupportRepository(db = createDbClient(), {
         const channelSecret = typeof credentials?.channelSecret === "string"
           ? credentials.channelSecret
           : "";
-        return channelSecret ? { id: record.id, ownerEmail: record.ownerEmail, channelSecret } : null;
+        const accessToken = typeof credentials?.accessToken === "string" ? credentials.accessToken : "";
+        return channelSecret ? { id: record.id, ownerEmail: record.ownerEmail, channelSecret, accessToken } : null;
       } catch {
         return null;
       }
@@ -109,12 +113,36 @@ export function createSupportRepository(db = createDbClient(), {
         )).limit(1);
         if (!connection) throw unavailablePersistenceError();
 
-        const [existing] = await tx.select().from(supportConversations).where(and(
+        let [existing] = await tx.select().from(supportConversations).where(and(
           eq(supportConversations.platformConnectionId, event.connectionId),
           eq(supportConversations.customerLookupKey, event.customerLookupKey),
-        )).limit(1);
+          ne(supportConversations.status, "resolved"),
+        )).orderBy(desc(supportConversations.updatedAt), desc(supportConversations.id)).limit(1);
         let conversation;
         let processWithAi;
+        if (existing && conversationIsInactive(existing, event.receivedAt)) {
+          if (existing.pendingTransitionId) {
+            await tx.update(supportConversationTransitions).set({ cancelledAt: event.receivedAt }).where(and(
+              eq(supportConversationTransitions.id, existing.pendingTransitionId),
+              eq(supportConversationTransitions.conversationId, existing.id),
+              isNull(supportConversationTransitions.cancelledAt),
+              isNull(supportConversationTransitions.committedAt),
+            ));
+          }
+          await tx.update(supportConversations).set({
+            status: "resolved",
+            handoffReasonCode: null,
+            pendingTransitionId: null,
+            pendingAction: null,
+            pendingActionEffectiveAt: null,
+            version: existing.version + 1,
+            updatedAt: event.receivedAt,
+          }).where(and(
+            eq(supportConversations.id, existing.id),
+            ne(supportConversations.status, "resolved"),
+          ));
+          existing = null;
+        }
         if (existing) {
           let cancelledTransition = null;
           if (existing.pendingTransitionId) {
@@ -131,6 +159,7 @@ export function createSupportRepository(db = createDbClient(), {
             : restoredStatus === "resolved" ? "ai_active" : restoredStatus;
           processWithAi = nextStatus === "ai_active";
           [conversation] = await tx.update(supportConversations).set({
+            ...(event.encryptedCustomerDisplayName ? { encryptedCustomerDisplayName: event.encryptedCustomerDisplayName } : {}),
             status: nextStatus,
             handoffReasonCode: nextStatus === "waiting_human" ? existing.handoffReasonCode : null,
             unreadCount: existing.unreadCount + 1,
@@ -154,6 +183,7 @@ export function createSupportRepository(db = createDbClient(), {
             platform: "line",
             customerLookupKey: event.customerLookupKey,
             encryptedCustomerExternalId: event.encryptedCustomerExternalId,
+            encryptedCustomerDisplayName: event.encryptedCustomerDisplayName,
             status: "ai_active",
             handoffReasonCode: null,
             unreadCount: 1,
@@ -219,6 +249,7 @@ export function createSupportRepository(db = createDbClient(), {
       ) : undefined;
       const records = await db.select({
         id: supportConversations.id,
+        encryptedCustomerDisplayName: supportConversations.encryptedCustomerDisplayName,
         status: supportConversations.status,
         unreadCount: supportConversations.unreadCount,
         handoffReason: supportConversations.handoffReasonCode,
@@ -252,7 +283,7 @@ export function createSupportRepository(db = createDbClient(), {
       ).limit(INBOX_QUERY_LIMIT);
       return records.map((record) => ({
         id: record.id,
-        customerLabel: "Customer",
+        customerLabel: customerLabel(record.encryptedCustomerDisplayName, encryptionKey),
         status: record.status,
         unreadCount: record.unreadCount,
         handoffReason: record.handoffReason,
@@ -282,12 +313,12 @@ export function createSupportRepository(db = createDbClient(), {
     async listActivePendingSupportTransitions(ownerEmail) {
       const owner = normalizeOwner(ownerEmail);
       await commitDueTransitionsInternal(db, owner);
-      const transitions = await db.select({ id: supportConversationTransitions.id, conversationId: supportConversationTransitions.conversationId, action: supportConversationTransitions.requestedAction, effectiveAt: supportConversationTransitions.effectiveAt }).from(supportConversationTransitions).innerJoin(supportConversations, and(eq(supportConversations.pendingTransitionId, supportConversationTransitions.id), eq(supportConversations.id, supportConversationTransitions.conversationId))).where(and(
+      const transitions = await db.select({ id: supportConversationTransitions.id, conversationId: supportConversationTransitions.conversationId, action: supportConversationTransitions.requestedAction, effectiveAt: supportConversationTransitions.effectiveAt, encryptedCustomerDisplayName: supportConversations.encryptedCustomerDisplayName }).from(supportConversationTransitions).innerJoin(supportConversations, and(eq(supportConversations.pendingTransitionId, supportConversationTransitions.id), eq(supportConversations.id, supportConversationTransitions.conversationId))).where(and(
         eq(supportConversations.ownerEmail, owner),
         or(eq(supportConversations.status, "return_to_ai_pending"), eq(supportConversations.status, "resolve_pending")),
         eq(supportConversationTransitions.requestedByOwnerEmail, owner), isNull(supportConversationTransitions.cancelledAt), isNull(supportConversationTransitions.committedAt),
       )).orderBy(asc(supportConversationTransitions.effectiveAt), asc(supportConversationTransitions.id)).limit(ACTIVE_PENDING_TRANSITION_LIMIT + 1);
-      return { transitions: transitions.slice(0, ACTIVE_PENDING_TRANSITION_LIMIT).map((transition) => ({ ...transition, customerLabel: "Customer" })), batchLimitExceeded: transitions.length > ACTIVE_PENDING_TRANSITION_LIMIT };
+      return { transitions: transitions.slice(0, ACTIVE_PENDING_TRANSITION_LIMIT).map((transition) => ({ ...transition, customerLabel: customerLabel(transition.encryptedCustomerDisplayName, encryptionKey) })), batchLimitExceeded: transitions.length > ACTIVE_PENDING_TRANSITION_LIMIT };
     },
 
     async clearExpiredSupportContent({ contentBefore, replyTokenBefore, batchSize }) {
@@ -349,6 +380,7 @@ export function createSupportRepository(db = createDbClient(), {
       await commitDueTransitionsInternal(db, owner);
       const [conversation] = await db.select({
         id: supportConversations.id,
+        encryptedCustomerDisplayName: supportConversations.encryptedCustomerDisplayName,
         status: supportConversations.status,
         unreadCount: supportConversations.unreadCount,
         version: supportConversations.version,
@@ -419,7 +451,7 @@ export function createSupportRepository(db = createDbClient(), {
       messages.reverse();
       const [lastMessage] = messages.slice(-1);
       return {
-        id: conversation.id, customerLabel: "Customer", status: conversation.status, unreadCount: conversation.unreadCount,
+        id: conversation.id, customerLabel: customerLabel(conversation.encryptedCustomerDisplayName, encryptionKey), status: conversation.status, unreadCount: conversation.unreadCount,
         version: conversation.version,
         handoffReason: conversation.handoffReasonCode, lastMessagePreview: lastMessage?.textContent ?? null,
         deliveryFailed: Boolean(delivery[0]), lastInboundAt: conversation.lastInboundAt, lastOutboundAt: conversation.lastOutboundAt,
@@ -452,6 +484,13 @@ export function createSupportRepository(db = createDbClient(), {
         )).limit(1);
         if (!conversation) return false;
 
+        await tx.update(supportConversations).set({
+          pendingTransitionId: null,
+          aiClosureConfirmationMessageId: null,
+        }).where(and(
+          eq(supportConversations.id, id),
+          eq(supportConversations.ownerEmail, owner),
+        ));
         await tx.delete(supportAiDecisions).where(eq(supportAiDecisions.conversationId, id));
         await tx.delete(supportConversationTransitions).where(eq(supportConversationTransitions.conversationId, id));
         await tx.delete(supportOutboundDeliveries).where(eq(supportOutboundDeliveries.conversationId, id));
@@ -2132,6 +2171,7 @@ function validateLineUserEvent(input, encryptionKey) {
   const connectionId = requiredBoundedText(input?.connectionId, "Connection ID", 100);
   const eventId = requiredBoundedText(input?.eventId, "Webhook event ID", 256);
   const externalUserId = requiredBoundedText(input?.externalUserId, "Customer external ID", 256);
+  const customerDisplayName = optionalBoundedText(input?.customerDisplayName, "Customer display name", 512);
   const replyToken = optionalBoundedText(input?.replyToken, "LINE reply token", 512);
   const receivedAt = validDate(input?.receivedAt);
   const message = validateInboundMessage(input?.message);
@@ -2143,6 +2183,7 @@ function validateLineUserEvent(input, encryptionKey) {
     replyTokenExpiresAt: replyToken ? new Date(receivedAt.getTime() + 60_000) : null,
     customerLookupKey: customerLookupKey(connectionId, externalUserId, encryptionKey),
     encryptedCustomerExternalId: encryptExternalId(externalUserId, encryptionKey),
+    encryptedCustomerDisplayName: customerDisplayName ? encryptCustomerDisplayName(customerDisplayName, encryptionKey) : null,
     message,
     receivedAt,
   };
@@ -2264,6 +2305,23 @@ function validateClaimedTurnInput({ connectionId, eventId, conversationId, claim
     eventId: requiredBoundedText(eventId, "Webhook event ID", 256),
     cutoff: validDate(cutoff),
   };
+}
+
+function customerLabel(encryptedDisplayName, encryptionKey) {
+  if (!encryptedDisplayName) return "Customer";
+  try {
+    return decryptCustomerDisplayName(encryptedDisplayName, encryptionKey) || "Customer";
+  } catch {
+    return "Customer";
+  }
+}
+
+function conversationIsInactive(conversation, receivedAt) {
+  const activityAt = [conversation?.lastInboundAt, conversation?.lastOutboundAt]
+    .map((value) => value instanceof Date ? value : new Date(value))
+    .filter((value) => !Number.isNaN(value.getTime()))
+    .reduce((latest, value) => !latest || value > latest ? value : latest, null);
+  return activityAt != null && receivedAt.getTime() - activityAt.getTime() >= CASE_INACTIVITY_MS;
 }
 
 function handoffDetailsFor(reasonCode) {

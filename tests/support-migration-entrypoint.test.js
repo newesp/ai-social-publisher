@@ -132,6 +132,14 @@ test("support schema verifier checks all tables, named indexes, and duplicate ac
     new URL("../drizzle/0010_support_ai_closure_and_handoff.sql", import.meta.url),
     "utf8",
   );
+  const customerDisplayNameSql = await readFile(
+    new URL("../drizzle/0011_support_customer_display_name.sql", import.meta.url),
+    "utf8",
+  );
+  const conversationCasesSql = await readFile(
+    new URL("../drizzle/0012_support_conversation_cases.sql", import.meta.url),
+    "utf8",
+  );
   const client = createClient({ url: ":memory:" });
   try {
     await client.executeMultiple(`
@@ -144,6 +152,8 @@ test("support schema verifier checks all tables, named indexes, and duplicate ac
       ${decisionTimelineSql.replaceAll("--> statement-breakpoint", "")}
       ${internalNotesSql.replaceAll("--> statement-breakpoint", "")}
       ${closureAndHandoffSql.replaceAll("--> statement-breakpoint", "")}
+      ${customerDisplayNameSql.replaceAll("--> statement-breakpoint", "")}
+      ${conversationCasesSql.replaceAll("--> statement-breakpoint", "")}
     `);
     assert.deepEqual(await verifySupportSchema(client), { schemaVerified: true });
 
@@ -186,16 +196,16 @@ test("support schema verifier checks all tables, named indexes, and duplicate ac
       "CREATE UNIQUE INDEX support_messages_idempotency_unique ON support_messages (idempotency_key)",
     );
 
-    await client.execute("DROP INDEX support_conversations_customer_unique");
+    await client.execute("DROP INDEX support_conversations_active_customer_unique");
     await client.execute(`
-      CREATE UNIQUE INDEX support_conversations_customer_unique
+      CREATE UNIQUE INDEX support_conversations_active_customer_unique
       ON support_conversations (platform_connection_id, customer_lookup_key)
       WHERE status = 'ai_active'
     `);
     await assert.rejects(verifySupportSchema(client), /verification failed/i);
-    await client.execute("DROP INDEX support_conversations_customer_unique");
+    await client.execute("DROP INDEX support_conversations_active_customer_unique");
     await client.execute(
-      "CREATE INDEX support_conversations_customer_unique ON support_conversations (platform_connection_id, customer_lookup_key)",
+      "CREATE INDEX support_conversations_active_customer_unique ON support_conversations (platform_connection_id, customer_lookup_key) WHERE status <> 'resolved'",
     );
     const row = (id) => ({
       id,
