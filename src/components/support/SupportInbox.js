@@ -1,6 +1,6 @@
 "use client";
 
-import { Button, Group, SimpleGrid, Stack, Text } from "@mantine/core";
+import { Button, Grid, Group, Stack, Text } from "@mantine/core";
 import { useMediaQuery } from "@mantine/hooks";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ConversationDetailsDrawer } from "./ConversationDetailsDrawer.js";
@@ -199,36 +199,44 @@ export function SupportInbox() {
         </Button>
       </Group>
       <GlobalTransitionUndo transitions={globalTransitions} onUndo={undoTransition} undoingTransitionId={undoingTransition} />
-      <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="md" style={{ minWidth: 0, flex: 1, height: "100%", minHeight: 0, overflow: "hidden" }}>
+      <Grid gutter="md" style={{ minWidth: 0, flex: 1, height: "100%", minHeight: 0, overflow: "hidden" }}>
         {showList ? (
-          <ConversationList
-            conversations={conversations}
-            selectedId={selectedId}
-            loading={listState === "loading" && !hasSummaries.current}
-            state={listState}
-            recoveryState={recoveryState}
-            onSelect={choose}
-            onRefresh={() => loadList({ silent: false })}
-            onLoadMore={loadMore}
-            hasMore={Boolean(nextCursor)}
-          />
+          <Grid.Col span={{ base: 12, md: selected ? 3 : 4, lg: selected ? 3 : 4 }} style={{ height: "100%", overflow: "hidden" }}>
+            <ConversationList
+              conversations={conversations}
+              selectedId={selectedId}
+              loading={listState === "loading" && !hasSummaries.current}
+              state={listState}
+              recoveryState={recoveryState}
+              onSelect={choose}
+              onRefresh={() => loadList({ silent: false })}
+              onLoadMore={loadMore}
+              hasMore={Boolean(nextCursor)}
+            />
+          </Grid.Col>
         ) : null}
         {showThread ? (
-          <ConversationThread
-            conversation={selected}
-            loading={detailState === "loading" && !selected}
-            error={detailState === "error" && !selected}
-            mobile={mobile}
-            onBack={() => { setSelectedId(null); setSelected(null); }}
-            onTakeOver={takeOver}
-            onSendMessage={sendMessage}
-            onRetryMessage={retryHumanMessage}
-            onTransition={requestTransition}
-            onDeleteConversation={deleteConversation}
-          />
+          <Grid.Col span={{ base: 12, md: selected ? 6 : 8, lg: selected ? 6 : 8 }} style={{ height: "100%", overflow: "hidden" }}>
+            <ConversationThread
+              conversation={selected}
+              loading={detailState === "loading" && !selected}
+              error={detailState === "error" && !selected}
+              mobile={mobile}
+              onBack={() => { setSelectedId(null); setSelected(null); }}
+              onTakeOver={takeOver}
+              onSendMessage={sendMessage}
+              onRetryMessage={retryHumanMessage}
+              onTransition={requestTransition}
+              onDeleteConversation={deleteConversation}
+            />
+          </Grid.Col>
         ) : null}
-        {selected ? <ConversationDetailsDrawer conversation={selected} /> : null}
-      </SimpleGrid>
+        {selected ? (
+          <Grid.Col span={{ base: 12, md: 3, lg: 3 }} style={{ height: "100%", overflow: "hidden" }}>
+            <ConversationDetailsDrawer conversation={selected} />
+          </Grid.Col>
+        ) : null}
+      </Grid>
     </Stack>
   );
 }
