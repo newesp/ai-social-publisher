@@ -33,9 +33,10 @@ export function ConversationDetailsDrawer({ conversation }) {
     : conversation.pendingTransition?.action === "return_to_ai"
       ? "交還 AI 處理"
       : conversation.pendingTransition?.action;
+  const latestHandoff = conversation.decisions?.find((decision) => decision.action === "handoff") ?? null;
 
   return (
-    <Paper withBorder p="md" radius="md" style={{ minWidth: 0 }}>
+    <Paper withBorder p="md" radius="md" style={{ minWidth: 0, height: "100%", overflowY: "auto" }}>
       <Stack gap="sm">
         <Text fw={600}>對話詳細資訊</Text>
         <Badge variant="light">{statusLabel}</Badge>
@@ -55,6 +56,18 @@ export function ConversationDetailsDrawer({ conversation }) {
         ) : (
           <Text c="dimmed" size="sm">此對話未採納或無相關 FAQ 來源。</Text>
         )}
+        {latestHandoff ? (
+          <Stack gap={4} mt="xs">
+            <Text size="sm" fw={500}>人工接手指引</Text>
+            {latestHandoff.handoffSummary ? <Text size="sm">{latestHandoff.handoffSummary}</Text> : null}
+            {latestHandoff.humanChecklist?.length ? (
+              <Text size="sm">接手前確認：{latestHandoff.humanChecklist.join("；")}</Text>
+            ) : null}
+            {latestHandoff.prohibitedCommitments?.length ? (
+              <Text size="sm" c="orange">避免承諾：{latestHandoff.prohibitedCommitments.join("；")}</Text>
+            ) : null}
+          </Stack>
+        ) : null}
       </Stack>
     </Paper>
   );

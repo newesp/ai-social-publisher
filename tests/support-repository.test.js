@@ -1083,7 +1083,7 @@ test("a consumed losing event is completed once by its repository resolution", a
   });
 });
 
-test("AI delivery terminal state is transactionally mirrored to its message and accepted delivery alone advances last outbound", async () => {
+test("AI closure finalizes only after the final reply is accepted by LINE", async () => {
   await withDatabase(async (db) => {
     const connectionId = "55555555-5555-4555-8555-555555555555";
     const eventId = "evt-ai-delivery-truth";
@@ -1106,7 +1106,10 @@ test("AI delivery terminal state is transactionally mirrored to its message and 
         cutoff: new Date(NOW.getTime() + 3_000),
       })).inboundMessageId,
       cutoff: new Date(NOW.getTime() + 3_000),
-      decision: { action: "reply", answer: "Answer", category: "general", knowledgeSourceIds: ["faq-1"] },
+      decision: {
+        action: "reply", answer: "Answer", category: null, knowledgeSourceIds: [],
+        conversationDisposition: "resolve_after_delivery",
+      },
       canonicalBody: '{"to":"U-private","messages":[{"type":"text","text":"Answer"}]}',
       now: NOW,
     });
@@ -1141,6 +1144,7 @@ test("AI delivery terminal state is transactionally mirrored to its message and 
     assert.equal(message.failedAt, null);
     assert.equal(message.safeErrorCode, null);
     assert.equal(conversation.lastOutboundAt.getTime(), acceptedAt.getTime());
+    assert.equal(conversation.status, "resolved");
   });
 });
 
@@ -1958,6 +1962,7 @@ async function withDatabase(run) {
         customer_lookup_key TEXT NOT NULL, encrypted_customer_external_id TEXT NOT NULL,
         status TEXT NOT NULL, handoff_reason_code TEXT, unread_count INTEGER NOT NULL DEFAULT 0,
         pending_transition_id TEXT, pending_action TEXT, pending_action_effective_at INTEGER,
+        ai_closure_confirmation_message_id TEXT, ai_closure_confirmation_expires_at INTEGER,
         processing_claim_id TEXT, processing_claim_expires_at INTEGER, version INTEGER NOT NULL DEFAULT 0,
         last_inbound_at INTEGER, last_outbound_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
         UNIQUE (platform_connection_id, customer_lookup_key)
@@ -1980,6 +1985,8 @@ async function withDatabase(run) {
         id TEXT PRIMARY KEY NOT NULL, conversation_id TEXT NOT NULL, inbound_message_id TEXT NOT NULL,
         action TEXT NOT NULL, category TEXT, reason_code TEXT, answer_message_id TEXT,
         faq_ids_json TEXT NOT NULL DEFAULT '[]', llm_provider TEXT, llm_model TEXT,
+        conversation_disposition TEXT NOT NULL DEFAULT 'continue_ai', handoff_summary TEXT,
+        human_checklist_json TEXT NOT NULL DEFAULT '[]', prohibited_commitments_json TEXT NOT NULL DEFAULT '[]',
         prompt_version TEXT NOT NULL, input_tokens INTEGER, output_tokens INTEGER, latency_ms INTEGER,
         created_at INTEGER NOT NULL
       );

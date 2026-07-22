@@ -382,6 +382,10 @@ export function createSupportRepository(db = createDbClient(), {
           category: supportAiDecisions.category,
           reasonCode: supportAiDecisions.reasonCode,
           faqIdsJson: supportAiDecisions.faqIdsJson,
+          conversationDisposition: supportAiDecisions.conversationDisposition,
+          handoffSummary: supportAiDecisions.handoffSummary,
+          humanChecklistJson: supportAiDecisions.humanChecklistJson,
+          prohibitedCommitmentsJson: supportAiDecisions.prohibitedCommitmentsJson,
           createdAt: supportAiDecisions.createdAt,
         }).from(supportAiDecisions).where(eq(supportAiDecisions.conversationId, id))
           .orderBy(desc(supportAiDecisions.createdAt), desc(supportAiDecisions.id))
@@ -427,7 +431,12 @@ export function createSupportRepository(db = createDbClient(), {
         })),
         decisions: decisions.map((decision) => ({
           id: decision.id, action: decision.action, category: decision.category, reasonCode: decision.reasonCode,
-          faqSourceIds: parseKeywords(decision.faqIdsJson), createdAt: decision.createdAt,
+          faqSourceIds: parseKeywords(decision.faqIdsJson),
+          conversationDisposition: decision.conversationDisposition,
+          handoffSummary: decision.handoffSummary,
+          humanChecklist: parseKeywords(decision.humanChecklistJson),
+          prohibitedCommitments: parseKeywords(decision.prohibitedCommitmentsJson),
+          createdAt: decision.createdAt,
         })),
         faqSources: faqs.map((faq) => ({ id: faq.id, question: faq.question, category: faq.category })),
         pendingTransition: transition[0] ? { id: transition[0].id, action: transition[0].requestedAction, effectiveAt: transition[0].effectiveAt } : null,
@@ -727,7 +736,7 @@ export function createSupportRepository(db = createDbClient(), {
         eq(supportConversations.id, requiredBoundedText(conversationId, "Conversation ID", 100)),
         eq(supportConversations.platformConnectionId, processing.connectionId),
         eq(supportConversations.processingClaimId, requiredBoundedText(conversationClaimId, "Conversation claim", 100)),
-        eq(supportConversations.status, "ai_active"),
+        inArray(supportConversations.status, ["ai_active", "resolved"]),
         gt(supportConversations.processingClaimExpiresAt, processing.now),
       )));
       const [updated] = await retryBusyOperation(() => db.update(supportWebhookEvents).set({
@@ -924,6 +933,7 @@ export function createSupportRepository(db = createDbClient(), {
         eq(supportConversations.processingClaimId, claim.claimId),
         or(
           eq(supportConversations.status, "ai_active"),
+          eq(supportConversations.status, "resolved"),
           and(eq(supportConversations.status, "waiting_human"), activeHandoff),
         ),
         gt(supportConversations.processingClaimExpiresAt, claim.now),
@@ -1021,6 +1031,8 @@ export function createSupportRepository(db = createDbClient(), {
       return {
         supportState: configuration?.supportState ?? "disabled",
         conversationStatus: conversation.status,
+        aiClosureConfirmationMessageId: conversation.aiClosureConfirmationMessageId,
+        aiClosureConfirmationExpiresAt: conversation.aiClosureConfirmationExpiresAt,
         configuration: configuration ?? null,
         configurationReady: Boolean(activeConnection && configuration && hasConfiguredProvider(configuration, settings, modelOptions)),
         settings,
@@ -1073,9 +1085,26 @@ export function createSupportRepository(db = createDbClient(), {
         await tx.insert(supportAiDecisions).values({
           id: randomUUID(), conversationId: decision.conversationId, inboundMessageId: inbound.id, action: decision.action,
           category: decision.category, reasonCode: null, answerMessageId, faqIdsJson: JSON.stringify(decision.knowledgeSourceIds),
+          conversationDisposition: decision.conversationDisposition,
+          handoffSummary: null,
+          humanChecklistJson: "[]",
+          prohibitedCommitmentsJson: "[]",
           llmProvider: configuration?.llmProvider ?? null, llmModel: configuration?.llmModel ?? null, promptVersion: "support-v1",
           inputTokens: null, outputTokens: null, latencyMs: null, createdAt: decision.now,
         });
+        await tx.update(supportConversations).set({
+          aiClosureConfirmationMessageId: decision.conversationDisposition === "ask_close_confirmation"
+            ? answerMessageId
+            : null,
+          aiClosureConfirmationExpiresAt: decision.conversationDisposition === "ask_close_confirmation"
+            ? new Date(decision.now.getTime() + 24 * 60 * 60 * 1_000)
+            : null,
+          updatedAt: decision.now,
+        }).where(and(
+          eq(supportConversations.id, decision.conversationId),
+          eq(supportConversations.processingClaimId, decision.claimId),
+          eq(supportConversations.status, "ai_active"),
+        ));
         const [created] = await tx.insert(supportOutboundDeliveries).values({
           id: randomUUID(), webhookEventId: event.id, conversationId: decision.conversationId,
           encryptedRecipient: encryptExternalId(decision.recipient, encryptionKey),
@@ -1165,6 +1194,7 @@ export function createSupportRepository(db = createDbClient(), {
           ));
           await completeDispatchedBatchEvents(tx, batch, batchMessages);
         }
+        const handoffDetails = handoffDetailsFor(handoffReason);
         await tx.insert(supportAiDecisions).values({
           id: randomUUID(),
           conversationId: claim.conversationId,
@@ -1174,6 +1204,10 @@ export function createSupportRepository(db = createDbClient(), {
           reasonCode: handoffReason,
           answerMessageId: null,
           faqIdsJson: "[]",
+          conversationDisposition: "handoff_human",
+          handoffSummary: handoffDetails.summary,
+          humanChecklistJson: JSON.stringify(handoffDetails.checklist),
+          prohibitedCommitmentsJson: JSON.stringify(handoffDetails.prohibitedCommitments),
           llmProvider: configuration?.llmProvider ?? null,
           llmModel: configuration?.llmModel ?? null,
           promptVersion: "support-v1",
@@ -2019,6 +2053,7 @@ async function synchronizeLinkedAiMessage(tx, delivery, status, timestamp, safeE
     ne(supportMessages.deliveryStatus, "sent"),
   )).returning({ id: supportMessages.id });
   if (status === "sent") {
+    const deliveredMessageId = message?.id;
     if (!message) {
       const [alreadySent] = await tx.select({ id: supportMessages.id }).from(supportMessages).where(and(
         eq(supportMessages.conversationId, delivery.conversationId),
@@ -2027,12 +2062,34 @@ async function synchronizeLinkedAiMessage(tx, delivery, status, timestamp, safeE
         eq(supportMessages.deliveryStatus, "sent"),
       )).limit(1);
       if (!alreadySent) return;
+      await finalizeAiResolutionAfterDelivery(tx, delivery.conversationId, alreadySent.id, timestamp);
+    } else {
+      await finalizeAiResolutionAfterDelivery(tx, delivery.conversationId, deliveredMessageId, timestamp);
     }
     await tx.update(supportConversations).set({
       lastOutboundAt: timestamp,
       updatedAt: timestamp,
     }).where(eq(supportConversations.id, delivery.conversationId));
   }
+}
+
+async function finalizeAiResolutionAfterDelivery(tx, conversationId, answerMessageId, timestamp) {
+  const [decision] = await tx.select({ id: supportAiDecisions.id }).from(supportAiDecisions).where(and(
+    eq(supportAiDecisions.conversationId, conversationId),
+    eq(supportAiDecisions.answerMessageId, answerMessageId),
+    eq(supportAiDecisions.conversationDisposition, "resolve_after_delivery"),
+  )).limit(1);
+  if (!decision) return;
+  await tx.update(supportConversations).set({
+    status: "resolved",
+    handoffReasonCode: null,
+    aiClosureConfirmationMessageId: null,
+    aiClosureConfirmationExpiresAt: null,
+    updatedAt: timestamp,
+  }).where(and(
+    eq(supportConversations.id, conversationId),
+    eq(supportConversations.status, "ai_active"),
+  ));
 }
 
 async function findOwnedLineConnection(db, ownerEmail, connectionId) {
@@ -2209,6 +2266,34 @@ function validateClaimedTurnInput({ connectionId, eventId, conversationId, claim
   };
 }
 
+function handoffDetailsFor(reasonCode) {
+  if (reasonCode === "high_risk_refund") {
+    return {
+      summary: "Customer is asking about a return, refund, exchange, pickup, delivery, warranty, or repair. Confirm the order and product condition before making any commitment.",
+      checklist: [
+        "Confirm the order number and delivery date.",
+        "Confirm whether the product has been opened, assembled, or used.",
+        "Confirm the condition of the box, accessories, and packaging.",
+      ],
+      prohibitedCommitments: [
+        "Do not state that pickup or a courier has already been arranged.",
+        "Do not state that a refund has already been approved or completed.",
+        "Do not quote a fixed refurbishment or handling fee before review.",
+      ],
+    };
+  }
+  return {
+    summary: "AI paused this conversation because it needs human review before a customer-facing commitment is made.",
+    checklist: [
+      "Review the customer's latest request and the relevant FAQ source.",
+      "Confirm the facts needed to answer the request before replying.",
+    ],
+    prohibitedCommitments: [
+      "Do not claim that an operational action has already been completed unless it is verified in the relevant system.",
+    ],
+  };
+}
+
 function validatePersistDecisionInput(input = {}) {
   const decision = input?.decision;
   const claim = {
@@ -2224,10 +2309,19 @@ function validatePersistDecisionInput(input = {}) {
   if (decision.action !== "reply" && decision.action !== "clarify") throw unavailablePersistenceError();
   const answer = requiredBoundedText(input?.decision?.answer, "AI answer", 2_000);
   const category = input?.decision?.category == null ? null : requiredBoundedText(input.decision.category, "AI category", 80);
+  const conversationDisposition = new Set([
+    "continue_ai",
+    "ask_close_confirmation",
+    "resolve_after_delivery",
+  ]).has(input?.decision?.conversationDisposition)
+    ? input.decision.conversationDisposition
+    : "continue_ai";
   const knowledgeSourceIds = Array.isArray(input?.decision?.knowledgeSourceIds)
     ? [...new Set(input.decision.knowledgeSourceIds.map((id) => requiredBoundedText(id, "FAQ ID", 100)))]
     : [];
-  if (!knowledgeSourceIds.length) throw unavailablePersistenceError();
+  if (!knowledgeSourceIds.length && conversationDisposition !== "resolve_after_delivery") {
+    throw unavailablePersistenceError();
+  }
   const canonicalBody = boundedText(input?.canonicalBody, "LINE canonical body", 20_000);
   let payload;
   try { payload = JSON.parse(canonicalBody); } catch { throw unavailablePersistenceError(); }
@@ -2240,6 +2334,7 @@ function validatePersistDecisionInput(input = {}) {
     inboundMessageId: requiredBoundedText(input.inboundMessageId, "Inbound message ID", 100),
     answer,
     category,
+    conversationDisposition,
     knowledgeSourceIds,
     canonicalBody,
     recipient,

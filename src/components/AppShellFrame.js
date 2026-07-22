@@ -16,7 +16,7 @@ import { useEffect, useState } from "react";
 import { clearWizardDraft } from "../lib/wizard/wizard-draft-storage.js";
 
 const navItems = [
-  { href: "/support", label: "Support inbox", icon: IconMessages, value: "support" },
+  { href: "/support", label: "客服收件匣", icon: IconMessages, value: "support" },
   { href: "/", label: "新增貼文", icon: IconPencilPlus, value: "create" },
   { href: "/history", label: "歷史與排程", icon: IconCalendarStats, value: "history" },
   { href: "/settings", label: "系統設定", icon: IconSettings, value: "settings" },

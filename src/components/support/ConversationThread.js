@@ -1,6 +1,6 @@
 "use client";
 
-import { Alert, Badge, Button, Group, Paper, Stack, Text, TextInput } from "@mantine/core";
+import { Alert, Badge, Button, Group, Paper, Portal, Stack, Text, TextInput } from "@mantine/core";
 import { useEffect, useRef, useState } from "react";
 
 const SENDER_LABELS = Object.freeze({
@@ -97,17 +97,30 @@ export function ConversationThread({
     }
   };
 
-  let pendingSeconds = 0;
-  let pendingText = "";
-  if (conversation.pendingTransition) {
-    const effectiveTime = new Date(conversation.pendingTransition.effectiveAt).getTime();
-    pendingSeconds = Math.max(0, Math.ceil((effectiveTime - Date.now()) / 1000));
-    pendingText = conversation.pendingTransition.action === "resolve" ? "完成結案" : "交還 AI 處理";
-  }
-
   return (
-    <Paper withBorder p="md" radius="md" style={{ minWidth: 0, overflow: "hidden" }}>
-      <Group justify="space-between" mb="sm">
+    <Paper withBorder p="md" radius="md" style={{ minWidth: 0, height: "100%", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      {sendError ? (
+        <Portal>
+          <div
+            style={{
+              position: "fixed",
+              top: 20,
+              left: "50%",
+              transform: "translateX(-50%)",
+              zIndex: 1000,
+              width: "auto",
+              maxWidth: "90vw",
+              boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+            }}
+          >
+            <Alert color="red" title="操作失敗" withCloseButton onClose={() => setSendError("")}>
+              {sendError}
+            </Alert>
+          </div>
+        </Portal>
+      ) : null}
+
+      <Group justify="space-between" mb="sm" style={{ flexShrink: 0 }}>
         {mobile ? (
           <Button variant="subtle" size="xs" onClick={onBack}>返回列表</Button>
         ) : (
@@ -128,21 +141,16 @@ export function ConversationThread({
       </Group>
 
       {conversation.status === "resolved" ? (
-        <Alert color="green" mb="sm">此對話已結案。</Alert>
+        <Alert color="green" mb="sm" style={{ flexShrink: 0 }}>此對話已結案。</Alert>
       ) : null}
       {conversation.status === "waiting_human" ? (
-        <Alert color="orange" mb="sm">等待真人客服接管處理。</Alert>
-      ) : null}
-      {transitionPending ? (
-        <Alert color="blue" mb="sm">
-          已排定變更：將在 <strong>{pendingSeconds}</strong> 秒內{pendingText}。期間 AI 暫停回應。
-        </Alert>
+        <Alert color="orange" mb="sm" style={{ flexShrink: 0 }}>等待真人客服接管處理。</Alert>
       ) : null}
       {conversation.deliveryFailed ? (
-        <Alert color="red" mb="sm">訊息傳送失敗，需注意。</Alert>
+        <Alert color="red" mb="sm" style={{ flexShrink: 0 }}>訊息傳送失敗，需注意。</Alert>
       ) : null}
 
-      <Stack gap="xs" mih={220} style={{ overflowY: "auto" }}>
+      <Stack gap="xs" style={{ flex: 1, overflowY: "auto", minHeight: 0, paddingRight: 4 }}>
         {conversation.messages.map((message) => (
           <Paper
             key={message.id}
@@ -152,7 +160,12 @@ export function ConversationThread({
             style={{ maxWidth: "88%", minWidth: 0 }}
           >
             <Stack gap={4}>
-              <Text size="xs" c="dimmed">{SENDER_LABELS[message.senderType] || message.senderType}</Text>
+              <Group justify="space-between" gap="xs">
+                <Text size="xs" c="dimmed">{SENDER_LABELS[message.senderType] || message.senderType}</Text>
+                {message.createdAt ? (
+                  <Text size="xs" c="dimmed">{formatDateTime(message.createdAt)}</Text>
+                ) : null}
+              </Group>
               <Text style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
                 {message.text || "不支援的訊息格式"}
               </Text>
@@ -183,37 +196,49 @@ export function ConversationThread({
         ))}
       </Stack>
 
-      {!composerEnabled && !transitionPending ? (
-        <Group mt="md">
-          <Button onClick={() => onTakeOver?.()}>接管對話 (真人)</Button>
-        </Group>
-      ) : null}
-      {composerEnabled ? (
-        <Group mt="md">
-          <Button variant="light" onClick={() => transition("return_to_ai")}>交還 AI 處理</Button>
-          <Button color="green" onClick={() => transition("resolve")}>完成結案</Button>
-        </Group>
-      ) : null}
+      <Stack gap="xs" mt="sm" style={{ flexShrink: 0, borderTop: "1px solid var(--mantine-color-gray-2)", paddingTop: 8 }}>
+        {!composerEnabled && !transitionPending ? (
+          <Group>
+            <Button onClick={() => onTakeOver?.()}>接管對話 (真人)</Button>
+          </Group>
+        ) : null}
+        {composerEnabled ? (
+          <Group>
+            <Button variant="light" onClick={() => transition("return_to_ai")}>交還 AI 處理</Button>
+            <Button color="green" onClick={() => transition("resolve")}>完成結案</Button>
+          </Group>
+        ) : null}
 
-      {sendError ? <Alert color="red" mt="md">{sendError}</Alert> : null}
-
-      <Group mt="md" wrap="nowrap">
-        <TextInput
-          aria-label="Reply composer"
-          value={draft}
-          onChange={(event) => {
-            if (sendError && event.currentTarget.value !== draft) idempotencyKeyRef.current = null;
-            setDraft(event.currentTarget.value);
-            setSendError("");
-          }}
-          placeholder={composerEnabled ? "輸入回覆內容…" : "請先點擊「接管對話」以開始撰寫回覆"}
-          disabled={!composerEnabled}
-          style={{ flex: 1, minWidth: 0 }}
-        />
-        <Button disabled={!composerEnabled || !draft.trim() || sending} loading={sending} onClick={send}>
-          傳送回覆
-        </Button>
-      </Group>
+        <Group wrap="nowrap">
+          <TextInput
+            aria-label="Reply composer"
+            value={draft}
+            onChange={(event) => {
+              if (sendError && event.currentTarget.value !== draft) idempotencyKeyRef.current = null;
+              setDraft(event.currentTarget.value);
+              setSendError("");
+            }}
+            placeholder={composerEnabled ? "輸入回覆內容…" : "請先點擊「接管對話」以開始撰寫回覆"}
+            disabled={!composerEnabled}
+            style={{ flex: 1, minWidth: 0 }}
+          />
+          <Button disabled={!composerEnabled || !draft.trim() || sending} loading={sending} onClick={send}>
+            傳送回覆
+          </Button>
+        </Group>
+      </Stack>
     </Paper>
   );
+}
+
+function formatDateTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  const hh = String(date.getHours()).padStart(2, "0");
+  const min = String(date.getMinutes()).padStart(2, "0");
+  return `${yyyy}/${mm}/${dd} ${hh}:${min}`;
 }

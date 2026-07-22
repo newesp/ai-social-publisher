@@ -589,7 +589,14 @@ function toInboxConversation(record) {
     })) : [],
     decisions: Array.isArray(record.decisions) ? record.decisions.map((decision) => ({
       id: decision.id, action: decision.action, category: decision.category, reasonCode: decision.reasonCode,
-      faqSourceIds: Array.isArray(decision.faqSourceIds) ? decision.faqSourceIds : [], createdAt: decision.createdAt,
+      faqSourceIds: Array.isArray(decision.faqSourceIds) ? decision.faqSourceIds : [],
+      conversationDisposition: typeof decision.conversationDisposition === "string"
+        ? decision.conversationDisposition : "continue_ai",
+      handoffSummary: typeof decision.handoffSummary === "string" ? decision.handoffSummary : null,
+      humanChecklist: Array.isArray(decision.humanChecklist) ? decision.humanChecklist : [],
+      prohibitedCommitments: Array.isArray(decision.prohibitedCommitments)
+        ? decision.prohibitedCommitments : [],
+      createdAt: decision.createdAt,
     })) : [],
     faqSources: Array.isArray(record.faqSources) ? record.faqSources.map((faq) => ({ id: faq.id, question: faq.question, category: faq.category })) : [],
     pendingTransition: record.pendingTransition ? { id: record.pendingTransition.id, action: record.pendingTransition.action, effectiveAt: record.pendingTransition.effectiveAt } : null,

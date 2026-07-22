@@ -79,11 +79,18 @@ test("decision persistence loads current protected context and atomically create
 
   assert.deepEqual(result, { status: "pending_delivery", deliveryId: "delivery-1" });
   assert.equal(persisted.length, 1);
-  assert.equal(persisted[0].canonicalBody, '{"to":"U-private","messages":[{"type":"text","text":"Use reset."}]}');
-  assert.deepEqual(persisted[0].decision, { action: "reply", answer: "Use reset.", category: "account", handoffReasonCode: null, knowledgeSourceIds: ["faq-1"] });
+  assert.equal(persisted[0].canonicalBody, '{"to":"U-private","messages":[{"type":"text","text":"Use reset.\\n\\n以上說明是否解決您的問題？若沒有其他問題，我可以為您結案。"}]}');
+  assert.deepEqual(persisted[0].decision, {
+    action: "reply",
+    answer: "Use reset.\n\n以上說明是否解決您的問題？若沒有其他問題，我可以為您結案。",
+    category: "account",
+    handoffReasonCode: null,
+    knowledgeSourceIds: ["faq-1"],
+    conversationDisposition: "ask_close_confirmation",
+  });
 });
 
-test("Traditional Chinese RAG question persists the cited source through the real decision parser", async () => {
+test("a return-policy question uses grounded FAQ guidance without claiming an operational action", async () => {
   const persisted = [];
   const context = {
     supportState: "enabled",
@@ -119,11 +126,12 @@ test("Traditional Chinese RAG question persists the cited source through the rea
     },
   });
   const service = createSupportProcessingService({
+    now: () => NOW,
     repository: {
       loadCurrentProcessingContext: async () => context,
-      persistDecisionAndOutbound: async (value) => {
-        persisted.push(value);
-        return { deliveryId: "delivery-rag" };
+      persistDecisionAndOutbound: async (input) => {
+        persisted.push(input);
+        return { deliveryId: "delivery-return-policy" };
       },
     },
     decisionService,
@@ -137,8 +145,9 @@ test("Traditional Chinese RAG question persists the cited source through the rea
     now: NOW,
   });
 
-  assert.deepEqual(result, { status: "pending_delivery", deliveryId: "delivery-rag" });
+  assert.deepEqual(result, { status: "pending_delivery", deliveryId: "delivery-return-policy" });
   assert.deepEqual(persisted[0].decision.knowledgeSourceIds, ["return-policy"]);
+  assert.equal(persisted[0].decision.conversationDisposition, "ask_close_confirmation");
 });
 
 test("a grounded clarification is persisted and delivered as an AI turn", async () => {
@@ -172,6 +181,40 @@ test("a grounded clarification is persisted and delivered as an AI turn", async 
     inboundMessageId: "message-1", now: NOW,
   }), { status: "pending_delivery", deliveryId: "delivery-clarify" });
   assert.equal(persisted[0].decision.action, "clarify");
+});
+
+test("a customer confirmation after an AI close prompt sends a final reply and resolves only after delivery", async () => {
+  const persisted = [];
+  const service = createSupportProcessingService({
+    now: () => NOW,
+    repository: {
+      loadCurrentProcessingContext: async () => ({
+        supportState: "enabled",
+        conversationStatus: "ai_active",
+        aiTurnsInLastFiveMinutes: 0,
+        aiClosureConfirmationMessageId: "close-prompt-message",
+        aiClosureConfirmationExpiresAt: new Date(NOW.getTime() + 60_000),
+        configuration: { llmProvider: "openai", llmModel: "gpt-test" },
+        settings: { openAiApiKey: "private-key" },
+        recipient: "U-private",
+        customerTexts: ["我還沒買，只是先詢問，沒問題"],
+        messages: [{ senderType: "customer", text: "我還沒買，只是先詢問，沒問題" }],
+        faqs: [],
+      }),
+      persistDecisionAndOutbound: async (input) => {
+        persisted.push(input);
+        return { deliveryId: "delivery-close" };
+      },
+    },
+    decisionService: { decide: async () => { throw new Error("should not call LLM"); } },
+  });
+
+  assert.deepEqual(await service.decideAndPersist({
+    ...IDS, claimId: "claim-1", eventClaimId: "event-claim", inboundMessageId: "message-1", now: NOW,
+  }), { status: "pending_delivery", deliveryId: "delivery-close" });
+  assert.equal(persisted[0].decision.conversationDisposition, "resolve_after_delivery");
+  assert.deepEqual(persisted[0].decision.knowledgeSourceIds, []);
+  assert.match(persisted[0].decision.answer, /這次對話已為您結案/);
 });
 
 test("configuration that becomes unready hands off before any provider decision", async () => {

@@ -147,6 +147,9 @@ export const supportConversations = sqliteTable("support_conversations", {
     .references(() => supportConversationTransitions.id),
   pendingAction: text("pending_action"),
   pendingActionEffectiveAt: integer("pending_action_effective_at", { mode: "timestamp" }),
+  aiClosureConfirmationMessageId: text("ai_closure_confirmation_message_id")
+    .references(() => supportMessages.id),
+  aiClosureConfirmationExpiresAt: integer("ai_closure_confirmation_expires_at", { mode: "timestamp" }),
   processingClaimId: text("processing_claim_id"),
   processingClaimExpiresAt: integer("processing_claim_expires_at", { mode: "timestamp" }),
   version: integer("version").notNull().default(0),
@@ -214,6 +217,10 @@ export const supportAiDecisions = sqliteTable("support_ai_decisions", {
   inputTokens: integer("input_tokens"),
   outputTokens: integer("output_tokens"),
   latencyMs: integer("latency_ms"),
+  conversationDisposition: text("conversation_disposition").notNull().default("continue_ai"),
+  handoffSummary: text("handoff_summary"),
+  humanChecklistJson: text("human_checklist_json").notNull().default("[]"),
+  prohibitedCommitmentsJson: text("prohibited_commitments_json").notNull().default("[]"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
 }, (table) => [
   index("support_ai_decisions_conversation_created_id_idx").on(table.conversationId, table.createdAt, table.id),

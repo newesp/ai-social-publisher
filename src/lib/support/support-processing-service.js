@@ -1,6 +1,8 @@
 import { retrieveRagKnowledge } from "./knowledge/rag-retrieval.js";
 
 const MAX_AI_TURNS_PER_WINDOW = 10;
+const CLOSURE_CONFIRMATION_TEXT = "以上說明是否解決您的問題？若沒有其他問題，我可以為您結案。";
+const CLOSURE_FAREWELL_TEXT = "感謝您的確認。這次對話已為您結案；之後若還需要協助，隨時再傳訊息給我們。";
 
 export function createSupportProcessingService({ repository, decisionService, deliveryService, now = () => new Date() } = {}) {
   return {
@@ -43,22 +45,43 @@ export function createSupportProcessingService({ repository, decisionService, de
         return persistHandoff(repository, input, "configuration_unready");
       }
 
-      const sources = retrieveRagKnowledge({
-        query: context.customerTexts?.join("\n") ?? "",
-        knowledge: context.faqs,
-      });
-
       let decision;
-      try {
-        decision = await decisionService.decide({
-          configuration: context.configuration,
-          settings: context.settings,
-          messages: context.messages,
-          faqs: sources,
+      if (context.aiClosureConfirmationMessageId
+        && closureConfirmationIsCurrent(context.aiClosureConfirmationExpiresAt, currentDate(now))
+        && customerConfirmedClosure(context.customerTexts)) {
+        decision = {
+          action: "reply",
+          answer: CLOSURE_FAREWELL_TEXT,
+          category: null,
+          handoffReasonCode: null,
+          knowledgeSourceIds: [],
+          conversationDisposition: "resolve_after_delivery",
+        };
+      } else {
+        const sources = retrieveRagKnowledge({
+          query: context.customerTexts?.join("\n") ?? "",
+          knowledge: context.faqs,
         });
-      } catch (error) {
-        if (error?.retryable === true) return { status: "retryable_provider" };
-        return persistHandoff(repository, { ...input, now: currentDate(now) }, "invalid_ai_decision");
+        try {
+          decision = await decisionService.decide({
+            configuration: context.configuration,
+            settings: context.settings,
+            messages: context.messages,
+            faqs: sources,
+          });
+        } catch (error) {
+          if (error?.retryable === true) return { status: "retryable_provider" };
+          return persistHandoff(repository, { ...input, now: currentDate(now) }, "invalid_ai_decision");
+        }
+        if (decision?.action === "reply") {
+          decision = {
+            ...decision,
+            answer: `${decision.answer}\n\n${CLOSURE_CONFIRMATION_TEXT}`,
+            conversationDisposition: "ask_close_confirmation",
+          };
+        } else if (decision) {
+          decision = { ...decision, conversationDisposition: "continue_ai" };
+        }
       }
       if (!decision || !["reply", "clarify"].includes(decision.action)) {
         return persistHandoff(repository, { ...input, now: currentDate(now) }, decision?.handoffReasonCode ?? "invalid_ai_decision");
@@ -156,4 +179,19 @@ function currentDate(now) {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) throw new Error("Processing clock returned an invalid time.");
   return date;
+}
+
+function customerConfirmedClosure(texts) {
+  const latest = Array.isArray(texts) ? texts.at(-1) : "";
+  const normalized = String(latest ?? "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[\p{P}\p{S}\s]+/gu, "")
+    .trim();
+  return /(?:\u6c92\u6709\u4e86|\u6c92\u6709\u5176\u4ed6\u554f\u984c|\u6c92\u554f\u984c\u4e86|\u6c92\u554f\u984c|\u6c92\u6709\u554f\u984c|\u5df2\u89e3\u6c7a|\u89e3\u6c7a\u4e86|\u53ef\u4ee5\u7d50\u6848|\u4e0d\u7528\u4e86|\u4e0d\u9700\u8981\u4e86|\u5148\u9019\u6a23|\u8b1d\u8b1d|thanks|thankyou)$/u.test(normalized);
+}
+
+function closureConfirmationIsCurrent(expiresAt, timestamp) {
+  const expiration = expiresAt instanceof Date ? expiresAt : new Date(expiresAt);
+  return !Number.isNaN(expiration.getTime()) && expiration.getTime() > timestamp.getTime();
 }

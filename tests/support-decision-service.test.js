@@ -98,16 +98,55 @@ test("RAG answers reject unsupported numeric facts and completed-operation claim
   }
 });
 
-test("invalid JSON, schema violations, and provider errors fail closed without provider details", async () => {
+test("invalid JSON, invalid required values, and provider errors fail closed without provider details", async () => {
   for (const generateTextImpl of [
     async () => "not json",
-    async () => JSON.stringify({ action: "reply", answer: "answer", category: "general", handoffReasonCode: null, knowledgeSourceIds: ["faq-password"], extra: true }),
+    async () => JSON.stringify({ action: "invalid", answer: "answer", category: "general", handoffReasonCode: null, knowledgeSourceIds: ["faq-password"] }),
     async () => { throw new Error("provider secret diagnostic"); },
   ]) {
     const result = await createSupportDecisionService({ generateTextImpl }).decide(input);
     assert.deepEqual(result, handoff("invalid_ai_decision"));
     assert.equal(JSON.stringify(result).includes("provider secret diagnostic"), false);
   }
+});
+
+test("accepts a provider response with prose around JSON and unused fields", async () => {
+  const service = createSupportDecisionService({
+    generateTextImpl: async () => `Here is the decision:\n${JSON.stringify({
+      action: "reply",
+      answer: "Use the reset-password link.",
+      category: "account",
+      handoffReasonCode: null,
+      knowledgeSourceIds: ["faq-password"],
+      confidence: 0.98,
+    })}\nThank you.`,
+  });
+
+  assert.deepEqual(await service.decide(input), {
+    action: "reply",
+    answer: "Use the reset-password link.",
+    category: "account",
+    handoffReasonCode: null,
+    knowledgeSourceIds: ["faq-password"],
+  });
+});
+
+test("accepts a grounded reply when the provider omits optional null fields", async () => {
+  const service = createSupportDecisionService({
+    generateTextImpl: async () => JSON.stringify({
+      action: "reply",
+      answer: "Use the reset-password link.",
+      knowledgeSourceIds: ["faq-password"],
+    }),
+  });
+
+  assert.deepEqual(await service.decide(input), {
+    action: "reply",
+    answer: "Use the reset-password link.",
+    category: null,
+    handoffReasonCode: null,
+    knowledgeSourceIds: ["faq-password"],
+  });
 });
 
 test("retryable provider failures remain retryable so the processing service can exhaust its bounded attempts", async () => {
@@ -139,6 +178,7 @@ test("explicit human requests and high-risk categories hand off before a provide
   for (const [text, reason] of [
     ["I want to speak to a human agent", "explicit_human_request"],
     ["我要退款", "high_risk_refund"],
+    ["請幫我安排退貨取件", "high_risk_refund"],
     ["My payment was charged twice", "high_risk_payment"],
     ["Please update my personal data", "high_risk_personal_data"],
   ]) {
@@ -271,7 +311,7 @@ test("ordinary FAQ wording is not treated as a semantic safety preflight", async
     "What are your support hours?",
     "When are support staff available?",
     "How do I delete a draft post?",
-    "想退貨",
+    "How do I reset my password?",
   ]) {
     const result = await service.decide({
       ...input,

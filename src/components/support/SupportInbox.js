@@ -188,8 +188,8 @@ export function SupportInbox() {
   const showThread = !mobile || Boolean(selectedId);
 
   return (
-    <Stack gap="md" style={{ minWidth: 0 }}>
-      <Group justify="space-between">
+    <Stack gap="md" style={{ minWidth: 0, height: "calc(100vh - 120px)", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+      <Group justify="space-between" style={{ flexShrink: 0 }}>
         <div>
           <Text fw={700} size="xl">AI 客服對話收件匣</Text>
           <Text c="dimmed" size="sm">分頁隱藏時將自動暫停更新。</Text>
@@ -199,7 +199,7 @@ export function SupportInbox() {
         </Button>
       </Group>
       <GlobalTransitionUndo transitions={globalTransitions} onUndo={undoTransition} undoingTransitionId={undoingTransition} />
-      <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="md" style={{ minWidth: 0 }}>
+      <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="md" style={{ minWidth: 0, flex: 1, height: "100%", minHeight: 0, overflow: "hidden" }}>
         {showList ? (
           <ConversationList
             conversations={conversations}

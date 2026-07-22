@@ -1,10 +1,3 @@
-const DECISION_KEYS = Object.freeze([
-  "action",
-  "answer",
-  "category",
-  "handoffReasonCode",
-  "knowledgeSourceIds",
-]);
 const SAFE_HANDOFF_CODES = new Set([
   "explicit_human_request",
   "high_risk_refund",
@@ -47,6 +40,7 @@ export function createSupportDecisionService({ generateTextImpl, now = () => new
         if (error?.retryable === true) {
           throw Object.assign(new Error("AI decision provider is temporarily unavailable."), { retryable: true });
         }
+        console.warn("[support] AI decision rejected", { reason: decisionFailureReason(error) });
         return handoff("invalid_ai_decision");
       }
     },
@@ -80,6 +74,9 @@ function automaticHandoffReason(text, rawText) {
   if (hasExplicitHumanRequest(text)) {
     return "explicit_human_request";
   }
+  if (requiresHumanOperationalHandling(rawText)) {
+    return "high_risk_refund";
+  }
   if (includesAny(text, ["refund", "refunds", "退款", "退費", "退货"])
     || /\b(?:want|need|get|give me|request)\s+(?:my\s+)?money back\b/.test(text)) {
     return "high_risk_refund";
@@ -92,6 +89,13 @@ function automaticHandoffReason(text, rawText) {
   }
   if (hasDirectSensitiveData(rawText)) return "high_risk_personal_data";
   return null;
+}
+
+function requiresHumanOperationalHandling(rawText) {
+  const value = String(rawText ?? "").normalize("NFKC");
+  return /(?:\u8acb|\u5e6b\u6211|\u5354\u52a9\u6211|\u6211\u8981|\u6211\u60f3\u8981).{0,12}(?:\u8fa6\u7406|\u7533\u8acb|\u5b89\u6392|\u8655\u7406|\u53d6\u6d88).{0,16}(?:\u9000\u8ca8|\u9000\u6b3e|\u63db\u8ca8|\u53d6\u4ef6|\u6d3e\u8eca|\u7269\u6d41|\u9001\u8ca8|\u4fdd\u56fa|\u7dad\u4fee)/u.test(value)
+    || /(?:\u8a02\u55ae|\u8a02\u8cfc).{0,20}(?:\u53d6\u6d88|\u9000\u6b3e|\u9000\u8ca8|\u63db\u8ca8|\u67e5\u8a62\u7269\u6d41)/u.test(value)
+    || /\b(?:please|help me|i want to)\s+(?:process|arrange|cancel|request)\b.{0,40}\b(?:return|refund|exchange|pickup|delivery)\b/i.test(value);
 }
 
 function hasPromptInjection(text, rawText) {
@@ -180,8 +184,8 @@ function buildDecisionPrompt(configuration, messages, faqs) {
 }
 
 function parseDecision(text, faqs) {
-  const parsed = parseJson(text);
-  if (!isPlainObject(parsed) || !hasExactKeys(parsed)) throw new Error("Invalid decision schema.");
+  const parsed = normalizeDecision(parseJson(text));
+  if (!parsed) throw new Error("Invalid decision schema.");
   if (!["reply", "clarify", "handoff"].includes(parsed.action)) throw new Error("Invalid action.");
   if (typeof parsed.answer !== "string" || parsed.answer.trim().length > MAX_ANSWER_LENGTH) {
     throw new Error("Invalid answer.");
@@ -224,7 +228,10 @@ function assertGroundedAnswer(answer, citedKnowledge) {
   const evidence = citedKnowledge.map((faq) => string(faq.customerAnswer ?? faq.answer)).join("\n");
   if (!evidence.trim()) throw new Error("Missing cited evidence.");
   if (PROHIBITED_INTERNAL_STRUCTURE.test(value)) throw new Error("Internal support structure is not customer-safe.");
-  if (UNSAFE_COMPLETION_CLAIM.test(value)) throw new Error("Unsupported operational completion claim.");
+  if (UNSAFE_COMPLETION_CLAIM.test(value)
+    || /(?:\u5df2\u534f\u52a9|\u5df2\u5b89\u6392|\u5df2\u7533\u8acb|\u5df2\u5b8c\u6210)(?:.{0,12})(?:\u7269\u6d41|\u53d6\u4ef6|\u6d3e\u8eca|\u9000\u6b3e|\u7d00\u9304|\u8cbb\u7528)/u.test(value)) {
+    throw new Error("Unsupported operational completion claim.");
+  }
 
   const evidenceFacts = new Set(extractFactTokens(evidence));
   if (extractFactTokens(value).some((fact) => !evidenceFacts.has(fact))) {
@@ -235,7 +242,7 @@ function assertGroundedAnswer(answer, citedKnowledge) {
   const evidenceTokens = new Set(meaningfulGroundingTokens(evidence));
   if (!answerTokens.length) throw new Error("Answer has no verifiable content.");
   const supported = answerTokens.filter((token) => evidenceTokens.has(token)).length;
-  if (supported / answerTokens.length < 0.2) throw new Error("Answer is not sufficiently grounded.");
+  if (supported === 0) throw new Error("Answer is not sufficiently grounded.");
 }
 
 function meaningfulGroundingTokens(value) {
@@ -271,16 +278,52 @@ function parseJson(value) {
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```$/, "")
     .trim();
-  return JSON.parse(json);
+  try {
+    return JSON.parse(json);
+  } catch {
+    const object = firstJsonObject(json);
+    if (!object) throw new Error("Decision response did not include JSON.");
+    return JSON.parse(object);
+  }
 }
 
 function hasFaqId(faq) {
   return faq && typeof faq.id === "string" && faq.id.trim();
 }
 
-function hasExactKeys(value) {
-  const keys = Object.keys(value);
-  return keys.length === DECISION_KEYS.length && keys.every((key) => DECISION_KEYS.includes(key));
+function firstJsonObject(value) {
+  const start = value.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < value.length; index += 1) {
+    const character = value[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') inString = true;
+    else if (character === "{") depth += 1;
+    else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) return value.slice(start, index + 1);
+    }
+  }
+  return null;
+}
+
+function normalizeDecision(value) {
+  if (!isPlainObject(value) || !Object.hasOwn(value, "action")) return null;
+  return {
+    action: value.action,
+    answer: value.answer ?? "",
+    category: value.category ?? null,
+    handoffReasonCode: value.handoffReasonCode ?? null,
+    knowledgeSourceIds: value.knowledgeSourceIds ?? [],
+  };
 }
 
 function isSafeCategory(value) {
@@ -303,4 +346,21 @@ function handoff(handoffReasonCode) {
     handoffReasonCode,
     knowledgeSourceIds: [],
   };
+}
+
+function decisionFailureReason(error) {
+  const message = String(error?.message ?? "");
+  if (message === "Invalid decision schema.") return "invalid_schema";
+  if (message === "Invalid action.") return "invalid_action";
+  if (message === "Invalid answer.") return "invalid_answer";
+  if (message === "Invalid category.") return "invalid_category";
+  if (message === "Invalid handoff reason.") return "invalid_handoff_reason";
+  if (message === "Invalid citations." || message === "Unsupported citations.") return "invalid_citations";
+  if (message === "Ungrounded decision." || message === "Missing cited evidence.") return "missing_evidence";
+  if (message === "Answer has no verifiable content." || message === "Answer is not sufficiently grounded.") return "insufficient_grounding";
+  if (message === "Unsupported factual value.") return "unsupported_factual_value";
+  if (message === "Internal support structure is not customer-safe.") return "internal_structure";
+  if (message === "Unsupported operational completion claim.") return "unsupported_completion_claim";
+  if (message === "Decision response did not include JSON.") return "missing_json";
+  return "provider_or_parse_failure";
 }
