@@ -2,6 +2,7 @@ const MAX_RESULTS = 5;
 const EXACT_KEYWORD_SCORE = 1_000;
 const TOKEN_SCORE = 10;
 const CATEGORY_SCORE = 50;
+const CJK_RANGE = /[\u4e00-\u9fff\u3400-\u4dbf]/;
 
 export function retrieveRagKnowledge({ query, knowledge, limit = MAX_RESULTS } = {}) {
   const normalizedQuery = normalize(query);
@@ -90,6 +91,25 @@ function normalize(value) {
     .trim();
 }
 
+/**
+ * Tokenize text for search matching.
+ * For Latin/alphanumeric text: split on whitespace (standard word tokenization).
+ * For CJK text: emit individual characters AND 2-character bigrams.
+ * This enables character-level intersection matching for Chinese, Japanese,
+ * and Korean text where there are no word boundaries.
+ */
 function tokens(value) {
-  return value.split(" ").filter(Boolean);
+  const result = [];
+  const parts = value.split(" ").filter(Boolean);
+  for (const part of parts) {
+    if (CJK_RANGE.test(part)) {
+      const chars = [...part].filter((ch) => CJK_RANGE.test(ch));
+      for (const ch of chars) result.push(ch);
+      for (let i = 0; i < chars.length - 1; i++) result.push(chars[i] + chars[i + 1]);
+    } else {
+      result.push(part);
+    }
+  }
+  return result;
 }
+
