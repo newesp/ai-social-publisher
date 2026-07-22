@@ -180,17 +180,11 @@ LLM 必須輸出純 JSON，且 keys 完全一致：
   "answer": "客戶可見的繁體中文回覆；handoff 時為空字串",
   "category": "安全分類或 null",
   "handoffReasonCode": "安全轉人工碼或 null",
-  "knowledgeSourceIds": ["本次檢索到的 id"],
-  "supportedClaims": [
-    {
-      "sourceId": "本次檢索到的 id",
-      "claim": "answer 中的一項可驗證主張"
-    }
-  ]
+  "knowledgeSourceIds": ["本次檢索到的 id"]
 }
 ```
 
-注意：新增 key 時須同步修改嚴格 schema 驗證、測試、持久化白名單；不可接受未預期欄位。
+注意：欄位須同步修改嚴格 schema 驗證、測試、持久化白名單；不可接受未預期欄位。逐項 claim mapping 暫不由模型輸出，避免供應商少回一個非持久化欄位便讓整筆有效引用失敗。
 
 ### 7.3 系統提示詞要求
 
@@ -201,7 +195,7 @@ LLM 必須輸出純 JSON，且 keys 完全一致：
 - 回覆使用繁體中文，短於 500 字，優先 1–3 句並在必要時提問。
 - 不得完整複製來源、不得輸出內部流程、不得捏造訂單、退款、物流或法律結論。
 - `knowledgeSourceIds` 必須是本次檢索到的 ID 的非空子集。
-- `supportedClaims` 的每筆 `sourceId` 必須存在於 `knowledgeSourceIds`。
+- `knowledgeSourceIds` 必須是本次檢索結果的非空子集。
 
 ### 7.4 伺服器端驗證（必做）
 
@@ -210,7 +204,7 @@ LLM 必須輸出純 JSON，且 keys 完全一致：
 - `action`、欄位型別、最大長度、白名單 handoff code 的嚴格驗證。
 - 回覆 / 釐清必須至少引用一個本次檢索 ID。
 - 引用 ID 必須為去重後的子集；不允許模型自創 ID。
-- `supportedClaims` 需有合理上限（例如最多 5 筆），字串長度限制，且 source ID 有效。
+- 伺服器端必須檢查回答和引用內容具有足夠文字覆蓋，且回答中的數字、百分比、期限與金額均能在引用內容找到。
 - 回答不可含內部提示標記、原始 JSON、API 金鑰樣式、或敏感資料。
 - 高風險 preflight 必須在呼叫 LLM 之前執行。
 - 驗證失敗一律回傳既有 `invalid_ai_decision` 人工轉接，不將模型錯誤細節傳給客戶。

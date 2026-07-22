@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { createSupportDecisionService } from "../src/lib/support/decisions/support-decision-service.js";
 import { createSupportProcessingService } from "../src/lib/support/support-processing-service.js";
 
 const IDS = Object.freeze({ eventId: "event-1", connectionId: "connection-1", conversationId: "conversation-1" });
@@ -80,6 +81,64 @@ test("decision persistence loads current protected context and atomically create
   assert.equal(persisted.length, 1);
   assert.equal(persisted[0].canonicalBody, '{"to":"U-private","messages":[{"type":"text","text":"Use reset."}]}');
   assert.deepEqual(persisted[0].decision, { action: "reply", answer: "Use reset.", category: "account", handoffReasonCode: null, knowledgeSourceIds: ["faq-1"] });
+});
+
+test("Traditional Chinese RAG question persists the cited source through the real decision parser", async () => {
+  const persisted = [];
+  const context = {
+    supportState: "enabled",
+    conversationStatus: "ai_active",
+    aiTurnsInLastFiveMinutes: 0,
+    configuration: { llmProvider: "google", llmModel: "gemini-test" },
+    settings: { googleAiApiKey: "private-key" },
+    recipient: "U-private",
+    customerTexts: ["我買了移動式冷氣，想退貨"],
+    messages: [{ senderType: "customer", text: "我買了移動式冷氣，想退貨" }],
+    faqs: [{
+      id: "return-policy",
+      question: "網購退換貨基本原則：收到商品隔天想退貨",
+      answer: "請先確認收貨時間、商品是否拆封組裝，以及外箱與配件是否完整。",
+      internalNotes: "客服內部判斷步驟，不得傳給客戶。",
+      category: "退換貨",
+      keywords: ["移動式冷氣", "退貨"],
+      enabled: true,
+      priority: 0,
+    }],
+  };
+  const decisionService = createSupportDecisionService({
+    generateTextImpl: async ({ prompt }) => {
+      assert.equal(prompt.includes("return-policy"), true);
+      assert.equal(prompt.includes("客服內部判斷步驟"), false);
+      return JSON.stringify({
+        action: "reply",
+        answer: "可以協助您確認退貨資格，請問商品是否已拆封或組裝？",
+        category: "退換貨",
+        handoffReasonCode: null,
+        knowledgeSourceIds: ["return-policy"],
+      });
+    },
+  });
+  const service = createSupportProcessingService({
+    repository: {
+      loadCurrentProcessingContext: async () => context,
+      persistDecisionAndOutbound: async (value) => {
+        persisted.push(value);
+        return { deliveryId: "delivery-rag" };
+      },
+    },
+    decisionService,
+  });
+
+  const result = await service.decideAndPersist({
+    ...IDS,
+    claimId: "claim-1",
+    eventClaimId: "event-claim",
+    inboundMessageId: "message-1",
+    now: NOW,
+  });
+
+  assert.deepEqual(result, { status: "pending_delivery", deliveryId: "delivery-rag" });
+  assert.deepEqual(persisted[0].decision.knowledgeSourceIds, ["return-policy"]);
 });
 
 test("a grounded clarification is persisted and delivered as an AI turn", async () => {

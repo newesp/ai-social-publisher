@@ -45,16 +45,15 @@ function scoreDoc(doc, query, queryTokens) {
   const overlap = queryTokens.filter((token) => {
     if (searchableTokens.has(token)) return true;
     if (token.length >= 2 && fullSearchableText.includes(token)) return true;
-    return Array.from(searchableTokens).some((st) => (
-      st.length >= 2 && (st.includes(token) || token.includes(st))
-    ));
+    return false;
   });
+  const meaningfulOverlap = overlap.filter(isMeaningfulToken);
 
   const categoryOverlap = Boolean(
     categoryText && (
-      queryTokens.some((token) => (
+      queryTokens.some((token) => isMeaningfulToken(token) && (
         categoryTokens.has(token)
-        || (token.length >= 2 && categoryText.includes(token))
+        || categoryText.includes(token)
         || (categoryText.length >= 2 && token.includes(categoryText))
       ))
       || (query.length >= 2 && (categoryText.includes(query) || query.includes(categoryText)))
@@ -66,11 +65,15 @@ function scoreDoc(doc, query, queryTokens) {
     + (categoryOverlap ? CATEGORY_SCORE : 0);
     
   return {
-    matched: evidenceScore > 0,
+    matched: exactKeywordScore > 0 || categoryOverlap || meaningfulOverlap.length > 0,
     tier: exactKeywordScore > 0 ? 1 : 0,
     score: evidenceScore + numericPriority(doc),
     matchedTerms: [...new Set([...exactKeywordMatches, ...overlap])],
   };
+}
+
+function isMeaningfulToken(token) {
+  return token.length >= 2 || !CJK_RANGE.test(token);
 }
 
 function boundedLimit(value) {
@@ -112,4 +115,3 @@ function tokens(value) {
   }
   return result;
 }
-

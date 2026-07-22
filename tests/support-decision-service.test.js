@@ -35,7 +35,7 @@ test("accepts a fenced, FAQ-grounded reply and passes trusted settings separatel
         answer: "Use the reset-password link.",
         category: "account",
         handoffReasonCode: null,
-        knowledgeSourceIds: ["faq-password"], supportedClaims: [],
+        knowledgeSourceIds: ["faq-password"],
       }) + "\n```";
     },
   });
@@ -47,7 +47,7 @@ test("accepts a fenced, FAQ-grounded reply and passes trusted settings separatel
     answer: "Use the reset-password link.",
     category: "account",
     handoffReasonCode: null,
-    knowledgeSourceIds: ["faq-password"], supportedClaims: [],
+    knowledgeSourceIds: ["faq-password"],
   });
   assert.equal(request.settings, input.settings);
   assert.equal(request.llmProvider, "openai");
@@ -60,7 +60,7 @@ test("reply citations must be a non-empty subset of supplied FAQs", async () => 
   const service = createSupportDecisionService({
     generateTextImpl: async () => JSON.stringify({
       action: "reply", answer: "answer", category: "general",
-      handoffReasonCode: null, knowledgeSourceIds: ["not-supplied"], supportedClaims: [],
+      handoffReasonCode: null, knowledgeSourceIds: ["not-supplied"],
     }),
   });
 
@@ -69,12 +69,39 @@ test("reply citations must be a non-empty subset of supplied FAQs", async () => 
   assert.deepEqual(result, handoff("invalid_ai_decision"));
 });
 
+test("a valid citation cannot launder an unsupported answer", async () => {
+  const service = createSupportDecisionService({
+    generateTextImpl: async () => JSON.stringify({
+      action: "reply",
+      answer: "Wire money to account 123.",
+      category: "account",
+      handoffReasonCode: null,
+      knowledgeSourceIds: ["faq-password"],
+    }),
+  });
 
+  assert.deepEqual(await service.decide(input), handoff("invalid_ai_decision"));
+});
+
+test("RAG answers reject unsupported numeric facts and completed-operation claims", async () => {
+  for (const answer of ["A 20% fee applies.", "已為您完成退款。"]) {
+    const service = createSupportDecisionService({
+      generateTextImpl: async () => JSON.stringify({
+        action: "reply",
+        answer,
+        category: "account",
+        handoffReasonCode: null,
+        knowledgeSourceIds: ["faq-password"],
+      }),
+    });
+    assert.deepEqual(await service.decide(input), handoff("invalid_ai_decision"));
+  }
+});
 
 test("invalid JSON, schema violations, and provider errors fail closed without provider details", async () => {
   for (const generateTextImpl of [
     async () => "not json",
-    async () => JSON.stringify({ action: "reply", answer: "answer", category: "general", handoffReasonCode: null, knowledgeSourceIds: ["faq-password"], supportedClaims: [], extra: true }),
+    async () => JSON.stringify({ action: "reply", answer: "answer", category: "general", handoffReasonCode: null, knowledgeSourceIds: ["faq-password"], extra: true }),
     async () => { throw new Error("provider secret diagnostic"); },
   ]) {
     const result = await createSupportDecisionService({ generateTextImpl }).decide(input);
@@ -94,13 +121,13 @@ test("rejects answers above 2,000 characters and clarification without evidence"
   const overlong = await createSupportDecisionService({
     generateTextImpl: async () => JSON.stringify({
       action: "reply", answer: "a".repeat(2_001), category: "account",
-      handoffReasonCode: null, knowledgeSourceIds: ["faq-password"], supportedClaims: [],
+      handoffReasonCode: null, knowledgeSourceIds: ["faq-password"],
     }),
   }).decide(input);
   const uncitedClarify = await createSupportDecisionService({
     generateTextImpl: async () => JSON.stringify({
       action: "clarify", answer: "Which account do you mean?", category: "account",
-      handoffReasonCode: null, knowledgeSourceIds: [], supportedClaims: [],
+      handoffReasonCode: null, knowledgeSourceIds: [],
     }),
   }).decide(input);
 
@@ -235,7 +262,7 @@ test("ordinary FAQ wording is not treated as a semantic safety preflight", async
         answer: "Use the reset-password link.",
         category: "account",
         handoffReasonCode: null,
-        knowledgeSourceIds: ["faq-password"], supportedClaims: [],
+        knowledgeSourceIds: ["faq-password"],
       });
     },
   });
@@ -274,6 +301,6 @@ function handoff(handoffReasonCode) {
     answer: "",
     category: null,
     handoffReasonCode,
-    knowledgeSourceIds: [], supportedClaims: [],
+    knowledgeSourceIds: [],
   };
 }

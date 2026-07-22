@@ -460,6 +460,7 @@ test("FAQ CRUD normalizes content, deduplicates keywords, and stays owner scoped
     id: faq.id,
     question: "Q",
     answer: "A",
+    internalNotes: "",
     category: "general",
     keywords: ["q", "shipping"],
     enabled: true,
@@ -488,6 +489,8 @@ test("FAQ validation enforces content, keyword, and priority bounds", async () =
   await rejectsStatus(store.createFaq("owner@example.com", { question: "", answer: "A" }), 400);
   await rejectsStatus(store.createFaq("owner@example.com", { question: 123, answer: "A" }), 400);
   await rejectsStatus(store.createFaq("owner@example.com", { question: "Q", answer: "x".repeat(4001) }), 400);
+  await rejectsStatus(store.createFaq("owner@example.com", { question: "Q", answer: "A", internalNotes: "x".repeat(8001) }), 400);
+  assert.equal((await store.createFaq("owner@example.com", { question: "Q2", answer: "A2", internalNotes: null })).internalNotes, "");
   await rejectsStatus(store.createFaq("owner@example.com", { question: "Q", answer: "A", category: "x".repeat(81) }), 400);
   await rejectsStatus(store.createFaq("owner@example.com", { question: "Q", answer: "A", keywords: Array.from({ length: 21 }, (_, i) => `k${i}`) }), 400);
   await rejectsStatus(store.createFaq("owner@example.com", { question: "Q", answer: "A", keywords: ["x".repeat(81)] }), 400);

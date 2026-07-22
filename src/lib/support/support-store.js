@@ -19,7 +19,7 @@ const CONFIGURATION_KEYS = Object.freeze([
 const BROWSER_CONFIGURATION_KEYS = Object.freeze(
   CONFIGURATION_KEYS.filter((key) => key !== "platformConnectionId"),
 );
-const FAQ_KEYS = Object.freeze(["question", "answer", "category", "keywords", "enabled", "priority"]);
+const FAQ_KEYS = Object.freeze(["question", "answer", "internalNotes", "category", "keywords", "enabled", "priority"]);
 const REPLY_TONES = new Set(["friendly", "professional", "concise"]);
 const LLM_PROVIDERS = new Set(["google", "openai"]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -462,6 +462,13 @@ function validateFaq(input, { partial }) {
   if (!partial || has("answer")) {
     faq.answer = boundedRequiredText(input.answer, "FAQ answer", 4_000);
   }
+  if (has("internalNotes")) {
+    faq.internalNotes = input.internalNotes == null
+      ? ""
+      : boundedOptionalText(input.internalNotes, "FAQ internal notes", 8_000);
+  } else if (!partial) {
+    faq.internalNotes = "";
+  }
   if (has("category")) {
     faq.category = boundedOptionalText(input.category, "FAQ category", 80);
   } else if (!partial) {
@@ -543,6 +550,7 @@ function toFaq(record) {
     id: record.id,
     question: record.question,
     answer: record.answer,
+    internalNotes: record.internalNotes ?? "",
     category: record.category,
     keywords: parseStringArray(record.keywordsJson),
     enabled: Boolean(record.enabled),

@@ -4,7 +4,6 @@ const DECISION_KEYS = Object.freeze([
   "category",
   "handoffReasonCode",
   "knowledgeSourceIds",
-  "supportedClaims",
 ]);
 const SAFE_HANDOFF_CODES = new Set([
   "explicit_human_request",
@@ -16,6 +15,9 @@ const SAFE_HANDOFF_CODES = new Set([
   "unsupported_request",
 ]);
 const MAX_ANSWER_LENGTH = 2_000;
+const CJK_CHARACTER = /[\u3400-\u4dbf\u4e00-\u9fff]/;
+const PROHIBITED_INTERNAL_STRUCTURE = /(?:客服應對重點|客服应对重点|判斷步驟|判断步骤|話術範例|话术范例|情況\s*[A-Z一二三四五六七八九十]|狀況\s*[A-Z一二三四五六七八九十])/i;
+const UNSAFE_COMPLETION_CLAIM = /(?:已|已經|已经)(?:為您|为您)?(?:安排|完成|辦理|办理|退款|退費|退费|退貨|退货|取消|派車|派车|建立|修改)/i;
 
 export function createSupportDecisionService({ generateTextImpl, now = () => new Date() } = {}) {
   const generate = typeof generateTextImpl === "function"
@@ -145,7 +147,6 @@ function buildSystemPrompt(faqs) {
     "",
     "A reply or clarification requires one or more citations from the supplied Knowledge IDs only.",
     "If a supplied Knowledge document contains facts that answer the customer, choose reply and cite it; do not hand off solely because the topic is a return, exchange, or policy question.",
-    "You must provide supportedClaims mapping each factual claim in your answer to a sourceId from the knowledge base.",
     "Use handoff only when no supplied knowledge directly answers the request or the customer requires human handling.",
     `Supplied Knowledge IDs: ${faqs.map((faq) => faq.id).join(", ")}.`,
   ].join("\n");
@@ -164,8 +165,8 @@ function buildDecisionPrompt(configuration, messages, faqs) {
     })) : [],
     untrustedKnowledge: faqs.map((faq) => ({
       id: faq.id,
-      title: string(faq.title),
-      customerAnswer: string(faq.customerAnswer),
+      title: string(faq.title ?? faq.question),
+      customerAnswer: string(faq.customerAnswer ?? faq.answer),
       category: string(faq.category),
     })),
     responseShape: {
@@ -174,7 +175,6 @@ function buildDecisionPrompt(configuration, messages, faqs) {
       category: "safe category or null",
       handoffReasonCode: "safe handoff reason code or null",
       knowledgeSourceIds: ["supplied knowledge id"],
-      supportedClaims: [{ sourceId: "supplied knowledge id", claim: "a verifiable claim made in the answer" }],
     },
   });
 }
@@ -195,26 +195,17 @@ function parseDecision(text, faqs) {
     || !parsed.knowledgeSourceIds.every((id) => typeof id === "string")) {
     throw new Error("Invalid citations.");
   }
-  if (!Array.isArray(parsed.supportedClaims)
-    || parsed.supportedClaims.length > 5
-    || !parsed.supportedClaims.every((c) => c && typeof c.sourceId === "string" && typeof c.claim === "string")) {
-    throw new Error("Invalid supported claims.");
-  }
-
   const suppliedIds = new Set(faqs.map((faq) => faq.id));
   const citations = [...new Set(parsed.knowledgeSourceIds)];
   if (citations.length !== parsed.knowledgeSourceIds.length || citations.some((id) => !suppliedIds.has(id))) {
     throw new Error("Unsupported citations.");
   }
-  
-  if (parsed.supportedClaims.some((c) => !citations.includes(c.sourceId))) {
-    throw new Error("Unsupported claim source.");
-  }
-
   if (["reply", "clarify"].includes(parsed.action)) {
     if (!parsed.answer.trim() || citations.length === 0 || parsed.handoffReasonCode !== null) {
       throw new Error("Ungrounded decision.");
     }
+    const citedKnowledge = faqs.filter((faq) => citations.includes(faq.id));
+    assertGroundedAnswer(parsed.answer, citedKnowledge);
   } else if (parsed.answer.trim() || parsed.category !== null || citations.length || !parsed.handoffReasonCode) {
     throw new Error("Unsafe handoff.");
   }
@@ -225,8 +216,53 @@ function parseDecision(text, faqs) {
     category: parsed.category,
     handoffReasonCode: parsed.handoffReasonCode,
     knowledgeSourceIds: citations,
-    supportedClaims: parsed.supportedClaims,
   };
+}
+
+function assertGroundedAnswer(answer, citedKnowledge) {
+  const value = answer.trim();
+  const evidence = citedKnowledge.map((faq) => string(faq.customerAnswer ?? faq.answer)).join("\n");
+  if (!evidence.trim()) throw new Error("Missing cited evidence.");
+  if (PROHIBITED_INTERNAL_STRUCTURE.test(value)) throw new Error("Internal support structure is not customer-safe.");
+  if (UNSAFE_COMPLETION_CLAIM.test(value)) throw new Error("Unsupported operational completion claim.");
+
+  const evidenceFacts = new Set(extractFactTokens(evidence));
+  if (extractFactTokens(value).some((fact) => !evidenceFacts.has(fact))) {
+    throw new Error("Unsupported factual value.");
+  }
+
+  const answerTokens = meaningfulGroundingTokens(value);
+  const evidenceTokens = new Set(meaningfulGroundingTokens(evidence));
+  if (!answerTokens.length) throw new Error("Answer has no verifiable content.");
+  const supported = answerTokens.filter((token) => evidenceTokens.has(token)).length;
+  if (supported / answerTokens.length < 0.2) throw new Error("Answer is not sufficiently grounded.");
+}
+
+function meaningfulGroundingTokens(value) {
+  const normalized = String(value ?? "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[\p{P}\p{S}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const result = [];
+  for (const part of normalized.split(" ").filter(Boolean)) {
+    const characters = [...part];
+    if (characters.some((character) => CJK_CHARACTER.test(character))) {
+      const cjk = characters.filter((character) => CJK_CHARACTER.test(character));
+      for (let index = 0; index < cjk.length - 1; index += 1) result.push(cjk[index] + cjk[index + 1]);
+    } else if (part.length >= 2) {
+      result.push(part);
+    }
+  }
+  return [...new Set(result)];
+}
+
+function extractFactTokens(value) {
+  return String(value ?? "")
+    .normalize("NFKC")
+    .match(/(?:NT\$|TWD|USD|\$)?\s*\d+(?:[.,]\d+)?(?:\s*%|\s*％|\s*(?:天|日|小時|小时|分鐘|分钟|元))?/gi)
+    ?.map((token) => token.replace(/\s+/g, "").toLowerCase()) ?? [];
 }
 
 function parseJson(value) {
@@ -266,6 +302,5 @@ function handoff(handoffReasonCode) {
     category: null,
     handoffReasonCode,
     knowledgeSourceIds: [],
-    supportedClaims: [],
   };
 }
