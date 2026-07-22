@@ -5,6 +5,7 @@ import { Badge, Button, Group, Paper, PasswordInput, Select, SimpleGrid, Stack, 
 import { IconKey } from "@tabler/icons-react";
 import { disconnectFeedback, platformLifecycleStatus } from "../lib/platform-connections/settings-platform-lifecycle.js";
 import { SupportSettingsPanel } from "./support/SupportSettingsPanel.js";
+import { FloatingAlert } from "./FloatingAlert.js";
 
 export function SettingsPanel() {
   const [values, setValues] = useState({});
@@ -183,12 +184,32 @@ export function SettingsPanel() {
 
   return (
     <Stack gap="lg">
+      {settingsStatus === "saved" ? (
+        <FloatingAlert color="green" onClose={() => setSettingsStatus("idle")}>
+          設定已儲存。
+        </FloatingAlert>
+      ) : null}
+      {settingsStatus === "load-error" || settingsStatus === "save-error" ? (
+        <FloatingAlert color="red" onClose={() => setSettingsStatus("idle")}>
+          無法儲存 AI 設定，請再試一次。
+        </FloatingAlert>
+      ) : null}
+      {connectionsStatus === "success" && connectionError ? (
+        <FloatingAlert color="red" onClose={() => setConnectionError("")}>
+          {connectionError}
+        </FloatingAlert>
+      ) : null}
+      {connectionsStatus === "success" && connectionNotice ? (
+        <FloatingAlert color="blue" onClose={() => setConnectionNotice("")}>
+          {connectionNotice}
+        </FloatingAlert>
+      ) : null}
+
       <div>
         <Title order={2}>系統設定</Title>
         <Text c="dimmed">AI 金鑰與發布平台連線僅供目前登入帳號使用。</Text>
-        {settingsStatus === "saved" ? <Text c="green.7" size="sm" mt={4}>設定已儲存。</Text> : null}
-        {settingsStatus === "load-error" || settingsStatus === "save-error" ? <Text c="red.7" size="sm" mt={4}>無法儲存 AI 設定，請再試一次。</Text> : null}
       </div>
+      <div role="status" aria-live="polite" />
 
       <Paper withBorder radius={8} p={{ base: "md", sm: "lg" }}>
         <Tabs value={activeTab} onChange={(tab) => setActiveTab(tab ?? "ai")}>
@@ -264,10 +285,6 @@ export function SettingsPanel() {
                   </ConnectionCard>
                 </SimpleGrid>
               ) : null}
-              <div role="status" aria-live="polite">
-                {connectionsStatus === "success" && connectionError ? <Text c="red.7" size="sm">{connectionError}</Text> : null}
-                {connectionsStatus === "success" && connectionNotice ? <Text c="blue.7" size="sm">{connectionNotice}</Text> : null}
-              </div>
             </Stack>
           </Tabs.Panel>
 

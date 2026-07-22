@@ -15,6 +15,7 @@ import {
   Title,
 } from "@mantine/core";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { FloatingAlert } from "../FloatingAlert.js";
 
 const EMPTY_FAQ = Object.freeze({
   id: "",
@@ -372,8 +373,16 @@ export function FaqManager({ onChanged }) {
         </SimpleGrid>
 
         <div role="status" aria-live="polite">
-          {status === "success" && error ? <Text c="red.7" size="sm">{error}</Text> : null}
-          {notice ? <Text c="green.7" size="sm">{notice}</Text> : null}
+          {status === "success" && error ? (
+            <FloatingAlert color="red" onClose={() => setError("")}>
+              {error}
+            </FloatingAlert>
+          ) : null}
+          {notice ? (
+            <FloatingAlert color="green" onClose={() => setNotice("")}>
+              {notice}
+            </FloatingAlert>
+          ) : null}
         </div>
       </Stack>
     </Paper>

@@ -12,6 +12,7 @@ import {
   Title,
 } from "@mantine/core";
 import { useCallback, useEffect, useState } from "react";
+import { FloatingAlert } from "../FloatingAlert.js";
 
 import { LLM_MODEL_OPTIONS as MODELS } from "../../lib/ai/model-config.js";
 import { FaqManager } from "./FaqManager.js";
@@ -329,11 +330,16 @@ export function SupportSettingsPanel({ lineConnection, initialSetupRetryable = f
           onOpenFaq={() => setFaqOpened(true)}
         />
       </SimpleGrid>
-
-      <div role="status" aria-live="polite">
-        {error ? <Text c="red.7" size="sm">{error}</Text> : null}
-        {notice ? <Text c="green.7" size="sm">{notice}</Text> : null}
-      </div>
+      {error ? (
+        <FloatingAlert color="red" onClose={() => setError("")}>
+          {error}
+        </FloatingAlert>
+      ) : null}
+      {notice ? (
+        <FloatingAlert color="green" onClose={() => setNotice("")}>
+          {notice}
+        </FloatingAlert>
+      ) : null}
     </Stack>
   );
 }

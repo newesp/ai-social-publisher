@@ -27,6 +27,7 @@ import { ACTIVE_PLATFORMS } from "../lib/platforms/platform-config.js";
 import { getPlatformLabel, getStatusLabel } from "../lib/posts/status-labels.js";
 import { getImageModelOptions, getLLMModelOptions } from "../lib/ai/model-config.js";
 import { fetchSessionOwner } from "../lib/auth/session-profile.js";
+import { FloatingAlert } from "./FloatingAlert.js";
 import { SCHEDULE_TIME } from "../lib/wizard/post-submission.js";
 import {
   WIZARD_STEPS,
@@ -291,9 +292,17 @@ export function CreatePostWizard() {
               <Text fw={600}>編輯要送出的內容</Text>
               <Button variant="light" leftSection={<IconRefresh size={16} />} loading={generationStatus === "loading"} onClick={() => regenerateContent({ form, setGeneratedTargets, setImageUrl, setGenerationStatus, setGenerationError, setProofreadIssues, setPublishResult, setPublishStatus })}>重新產生</Button>
             </Group>
-            {generationStatus === "loading" ? <Text c="dimmed" size="sm" mb="sm">正在產生內容…</Text> : null}
-            {generationError ? <Text c="red.7" size="sm" mb="sm">{generationError}</Text> : null}
-            {proofreadIssues.length > 0 ? <ProofreadIssues issues={proofreadIssues} /> : null}
+            {generationStatus === "loading" ? (
+              <FloatingAlert color="blue">
+                正在產生內容…
+              </FloatingAlert>
+            ) : null}
+            {generationError ? (
+              <FloatingAlert color="red" onClose={() => setGenerationError("")}>
+                {generationError}
+              </FloatingAlert>
+            ) : null}
+            {proofreadIssues.length > 0 ? <ProofreadIssues issues={proofreadIssues} onClose={() => setProofreadIssues([])} /> : null}
             <SimpleGrid cols={{ base: 1, lg: 2 }} spacing="md">
               {Object.values(previews).map((preview) => <PlatformPreview key={preview.platform} data={preview} displayName={platformDisplayNames[preview.platform]} content={targets.find((target) => target.platform === preview.platform)?.content ?? ""} onContentChange={(content) => editTarget(preview.platform, content)} />)}
             </SimpleGrid>
@@ -302,7 +311,7 @@ export function CreatePostWizard() {
               <SegmentedControl value={form.mode} onChange={(mode) => { setForm({ ...form, mode }); setPublishResult(null); setPublishStatus("idle"); }} data={[{ label: "立即發布", value: "now" }, { label: "排程發布", value: "scheduled" }]} />
               {form.mode === "scheduled" ? <SimpleGrid cols={{ base: 1, sm: 2 }} mt="sm"><DateInput label="發布日期" value={form.scheduledDate ?? null} onChange={(scheduledDate) => setForm({ ...form, scheduledDate: scheduledDate ?? "" })} valueFormat="YYYY-MM-DD" minDate={new Date()} clearable={false} /><Select label="發布時間（台北）" value={form.scheduledTime ?? SCHEDULE_TIME} onChange={(scheduledTime) => setForm({ ...form, scheduledTime: scheduledTime ?? SCHEDULE_TIME })} data={[{ value: "09:00", label: "09:00" }]} /></SimpleGrid> : null}
             </Paper>
-            {publishResult ? <PublishResult result={publishResult} formMode={form.mode} /> : null}
+            {publishResult ? <PublishResult result={publishResult} formMode={form.mode} onClose={() => setPublishResult(null)} /> : null}
           </Stepper.Step>
         </Stepper>
 
@@ -323,9 +332,9 @@ export function CreatePostWizard() {
   );
 }
 
-function ProofreadIssues({ issues }) {
+function ProofreadIssues({ issues, onClose }) {
   return (
-    <Alert color="red" icon={<IconAlertTriangle size={18} />} title="發現疑似錯字，已停止發布" mb="md">
+    <FloatingAlert color="red" title="發現疑似錯字，已停止發布" onClose={onClose}>
       <List size="sm" spacing="xs">
         {issues.map((issue, index) => (
           <List.Item key={`${issue.platform}-${issue.original}-${index}`}>
@@ -333,21 +342,25 @@ function ProofreadIssues({ issues }) {
           </List.Item>
         ))}
       </List>
-    </Alert>
+    </FloatingAlert>
   );
 }
 
-function PublishResult({ result, formMode }) {
+function PublishResult({ result, formMode, onClose }) {
+  const alertColor = result.status === "failed" ? "red" : result.status === "scheduled" ? "orange" : "green";
   return (
-    <Stack gap={4} mt="md">
-      <Badge color={result.status === "failed" ? "red" : result.status === "scheduled" ? "orange" : "green"}>{getStatusLabel(result.status)}</Badge>
-      {formMode === "now" && result.status === "scheduled" ? <Text role="status" c="orange.8">已加入自動重試佇列，將於下次排程執行時再次發布。</Text> : null}
-      {result.targets?.map((target) => (
-        <Text key={target.id ?? target.platform} size="sm" c={target.status === "failed" ? "red.7" : "green.7"}>
-          {getPlatformLabel(target.platform)}：{getStatusLabel(target.status)}{target.errorMessage ? `－${target.errorMessage}` : ""}
-        </Text>
-      ))}
-    </Stack>
+    <FloatingAlert color={alertColor} title={getStatusLabel(result.status)} onClose={onClose}>
+      <Stack gap={4}>
+        {formMode === "now" && result.status === "scheduled" ? (
+          <Text role="status" size="sm">已加入自動重試佇列，將於下次排程執行時再次發布。</Text>
+        ) : null}
+        {result.targets?.map((target) => (
+          <Text key={target.id ?? target.platform} size="sm">
+            {getPlatformLabel(target.platform)}：{getStatusLabel(target.status)}{target.errorMessage ? `－${target.errorMessage}` : ""}
+          </Text>
+        ))}
+      </Stack>
+    </FloatingAlert>
   );
 }
 
