@@ -45,7 +45,7 @@ export function ConversationDetailsDrawer({ conversation }) {
         {conversation.pendingTransition ? (
           <Text size="sm">預定變更: {pendingActionLabel}</Text>
         ) : null}
-        <Text size="sm" fw={500}>AI 參考之 FAQ 知識庫</Text>
+        <Text size="sm" fw={500}>AI 參考之 FAQ 知識庫 (RAG 回覆)</Text>
         {conversation.faqSources?.length ? (
           conversation.faqSources.map((faq) => (
             <Text key={faq.id} size="sm">

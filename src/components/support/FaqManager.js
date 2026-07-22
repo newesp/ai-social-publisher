@@ -20,6 +20,7 @@ const EMPTY_FAQ = Object.freeze({
   id: "",
   question: "",
   answer: "",
+  internalNotes: "",
   category: "",
   keywords: "",
   enabled: true,
@@ -76,6 +77,7 @@ export function FaqManager({ onChanged }) {
     const payload = {
       question: form.question,
       answer: form.answer,
+      internalNotes: form.internalNotes || null,
       category: form.category,
       keywords: parseKeywords(form.keywords),
       enabled: form.enabled,
@@ -163,6 +165,7 @@ export function FaqManager({ onChanged }) {
       id: faq.id,
       question: faq.question,
       answer: faq.answer,
+      internalNotes: faq.internalNotes ?? "",
       category: faq.category ?? "",
       keywords: (faq.keywords ?? []).join(", "),
       enabled: faq.enabled,
@@ -288,6 +291,18 @@ export function FaqManager({ onChanged }) {
                 onChange={(event) => {
                   const answer = event.currentTarget.value;
                   setForm((current) => ({ ...current, answer }));
+                }}
+              />
+              <Textarea
+                label="內部備註 (僅管理員可見)"
+                description="真人客服提醒、判斷流程、內部話術等，不會傳給 AI 或客戶。"
+                autosize
+                minRows={2}
+                maxLength={8_000}
+                value={form.internalNotes}
+                onChange={(event) => {
+                  const internalNotes = event.currentTarget.value;
+                  setForm((current) => ({ ...current, internalNotes }));
                 }}
               />
               <TextInput

@@ -1,4 +1,4 @@
-import { retrieveFaqs } from "./knowledge/faq-retrieval.js";
+import { retrieveRagKnowledge } from "./knowledge/rag-retrieval.js";
 
 const MAX_AI_TURNS_PER_WINDOW = 10;
 
@@ -43,17 +43,18 @@ export function createSupportProcessingService({ repository, decisionService, de
         return persistHandoff(repository, input, "configuration_unready");
       }
 
-      const faqs = retrieveFaqs({
+      const sources = retrieveRagKnowledge({
         query: context.customerTexts?.join("\n") ?? "",
-        faqs: context.faqs,
+        knowledge: context.faqs,
       });
+
       let decision;
       try {
         decision = await decisionService.decide({
           configuration: context.configuration,
           settings: context.settings,
           messages: context.messages,
-          faqs,
+          faqs: sources,
         });
       } catch (error) {
         if (error?.retryable === true) return { status: "retryable_provider" };

@@ -202,10 +202,17 @@ test("a retryable Push delivery waits for its persisted retry time and reuses th
 });
 
 test("the durable orchestration exposes one provider attempt per step instead of a retry loop inside one step", async () => {
-  const source = await readFile(new URL("../src/lib/support/workflows/line-message-workflow.js", import.meta.url), "utf8");
-  assert.match(source, /async function providerAttemptStep[\s\S]*?"use step"/);
-  assert.doesNotMatch(source, /async function decideAndPersistStep[\s\S]*?decideWithRetry/);
-  assert.match(source, /for \(let providerAttempt = 0; providerAttempt < 3; providerAttempt \+= 1\)/);
+  const [workflowSource, stepsSource] = await Promise.all([
+    readFile(new URL("../src/lib/support/workflows/line-message-workflow.js", import.meta.url), "utf8"),
+    readFile(new URL("../src/lib/support/workflows/line-message-workflow-steps.js", import.meta.url), "utf8"),
+  ]);
+  assert.match(stepsSource, /export async function providerAttemptStep[\s\S]*?"use step"/);
+  assert.doesNotMatch(stepsSource, /async function decideAndPersistStep[\s\S]*?decideWithRetry/);
+  assert.match(workflowSource, /export async function lineMessageWorkflow\(input\)[\s\S]*?runLineMessageWorkflow\(input, \{\}\)/);
+  assert.match(workflowSource, /async function runLineMessageWorkflow\([\s\S]*?startWorkflow,\r?\n  now,\r?\n\}\)/);
+  assert.match(workflowSource, /for \(let providerAttempt = 0; providerAttempt < 3; providerAttempt \+= 1\)/);
+  assert.match(workflowSource, /async function workflowNow\(now\)[\s\S]*?return now \? workflowTestNowStep\(currentDate\(now\)\) : workflowNowStep\(\);/);
+  assert.match(workflowSource, /async function workflowNowStep\(\)[\s\S]*?"use step"[\s\S]*?return new Date\(\);/);
 });
 
 test("handoff acknowledgement retains workflow fences through delivery and finalizes them repository-side once", async () => {

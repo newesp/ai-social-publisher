@@ -5,6 +5,7 @@ import { createDbClient } from "../../../../../lib/db/index.js";
 import { createLineSupportAdapter } from "../../../../../lib/support/channel-adapters/line-support-adapter.js";
 import { createSupportRepository } from "../../../../../lib/support/support-repository.js";
 import { createLineWebhookHandler } from "../../../../../lib/support/routes/line-webhook-handler.js";
+import { lineMessageWorkflow } from "../../../../../lib/support/workflows/line-message-workflow.js";
 
 export async function POST(request, { params }) {
   try {
@@ -38,9 +39,5 @@ function createHandler(env = process.env) {
 }
 
 async function startLineMessageWorkflow(input) {
-  const workflowName = "line-message-workflow";
-  const { lineMessageWorkflow } = await import(
-    `../../../../../lib/support/workflows/${workflowName}.js`
-  );
   return start(lineMessageWorkflow, [input]);
 }

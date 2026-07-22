@@ -17,7 +17,7 @@ const SUPPORT_TABLES = {
     "createdAt", "updatedAt",
   ],
   supportFaqs: [
-    "id", "ownerEmail", "question", "answer", "category", "keywordsJson",
+    "id", "ownerEmail", "question", "answer", "internalNotes", "category", "keywordsJson",
     "enabled", "priority", "createdAt", "updatedAt",
   ],
   supportConversations: [
@@ -129,8 +129,8 @@ test("support migrations journal immutable outbound delivery, retention indexes,
   const outboxSql = await readFile(new URL("../drizzle/0005_line_outbound_delivery_outbox.sql", import.meta.url), "utf8");
   const journal = JSON.parse(await readFile(new URL("../drizzle/meta/_journal.json", import.meta.url), "utf8"));
   const snapshot = JSON.parse(await readFile(new URL("../drizzle/meta/0004_snapshot.json", import.meta.url), "utf8"));
-  assert.equal(journal.entries.at(-1).idx, 8);
-  assert.equal(journal.entries.at(-1).tag, "0008_support_decision_timeline_index");
+  assert.equal(journal.entries.at(-1).idx, 9);
+  assert.equal(journal.entries.at(-1).tag, "0009_support_faq_internal_notes");
   for (const tableName of [
     "support_configurations",
     "support_faqs",

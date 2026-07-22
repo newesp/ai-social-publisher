@@ -1895,7 +1895,7 @@ export function createSupportRepository(db = createDbClient(), {
 
     async updateFaq(ownerEmail, id, changes) {
       const safeChanges = pickChanges(changes, [
-        "question", "answer", "category", "keywordsJson", "enabled", "priority", "updatedAt",
+        "question", "answer", "internalNotes", "category", "keywordsJson", "enabled", "priority", "updatedAt",
       ]);
       const [updated] = await db.update(supportFaqs).set(safeChanges).where(and(
         eq(supportFaqs.ownerEmail, normalizeOwner(ownerEmail)),

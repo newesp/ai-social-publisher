@@ -120,6 +120,7 @@ export const supportFaqs = sqliteTable("support_faqs", {
   ownerEmail: text("owner_email").notNull(),
   question: text("question").notNull(),
   answer: text("answer").notNull(),
+  internalNotes: text("internal_notes"),
   category: text("category").notNull(),
   keywordsJson: text("keywords_json").notNull().default("[]"),
   enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),

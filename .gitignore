@@ -16,3 +16,4 @@ tests/
 .vercel
 .env*
 /.swc
+.pnpm-store/

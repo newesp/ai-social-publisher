@@ -1,13 +1,21 @@
 import { sleep } from "workflow";
 import { start } from "workflow/api";
-
-import { createDbClient } from "../../db/index.js";
-import { generateText } from "../../ai/llm-service.js";
-import { createLineSupportAdapter } from "../channel-adapters/line-support-adapter.js";
-import { createSupportDecisionService } from "../decisions/support-decision-service.js";
-import { createLineOutboundDeliveryService } from "../outbox/line-outbound-delivery-service.js";
-import { createSupportProcessingService } from "../support-processing-service.js";
-import { createSupportRepository } from "../support-repository.js";
+import {
+  acquireConversationClaimStep,
+  buildTurnStep,
+  claimEventStep,
+  completeEvent,
+  deliverStep,
+  finalizeHandoffStep,
+  findFollowUpStep,
+  persistHandoffStep,
+  providerAttemptStep,
+  recoverDeliveryStep,
+  releaseConversationClaimStep,
+  releaseEventStep,
+  renewFences,
+  resolveCompetingEventStep,
+} from "./line-message-workflow-steps.js";
 
 export async function lineMessageWorkflow(input) {
   "use workflow";
@@ -48,10 +56,10 @@ async function runLineMessageWorkflow({ eventId, connectionId, conversationId },
   processingService,
   sleepImpl,
   startWorkflow,
-  now = () => new Date(),
+  now,
 }) {
   sleepImpl ??= sleep;
-  const claimedAt = await workflowNowStep(now);
+  const claimedAt = await workflowNow(now);
   const eventClaim = await claimEventStep(eventStore, { eventId, connectionId, now: claimedAt });
   if (eventClaim?.claimed !== true) return { status: "duplicate" };
 
@@ -62,7 +70,7 @@ async function runLineMessageWorkflow({ eventId, connectionId, conversationId },
     });
     if (conversationClaim?.acquired !== true) {
       const resolved = await resolveCompetingEventStep(processingService, {
-        eventId, connectionId, conversationId, claimId: eventClaim.claimId, now: await workflowNowStep(now),
+        eventId, connectionId, conversationId, claimId: eventClaim.claimId, now: await workflowNow(now),
       });
       if (!resolved) await releaseEventStep(eventStore, { eventId, connectionId, claimId: eventClaim.claimId });
       return { status: "already_processing" };
@@ -70,7 +78,7 @@ async function runLineMessageWorkflow({ eventId, connectionId, conversationId },
     const windowStart = validDate(conversationClaim.windowStart);
     const batchCutoff = new Date(windowStart.getTime() + 3_000);
     await sleepImpl("3s");
-    let operationNow = await workflowNowStep(now);
+    let operationNow = await workflowNow(now);
     await renewFences({ eventStore, processingService, eventId, connectionId, conversationId, eventClaimId: eventClaim.claimId, conversationClaimId: conversationClaim.claimId, now: operationNow });
     let outcome = await recoverDeliveryStep(processingService, {
       eventId,
@@ -95,10 +103,10 @@ async function runLineMessageWorkflow({ eventId, connectionId, conversationId },
         });
         return { status: "no_messages" };
       }
-      operationNow = await workflowNowStep(now);
+      operationNow = await workflowNow(now);
       await renewFences({ eventStore, processingService, eventId, connectionId, conversationId, eventClaimId: eventClaim.claimId, conversationClaimId: conversationClaim.claimId, now: operationNow });
       for (let providerAttempt = 0; providerAttempt < 3; providerAttempt += 1) {
-        operationNow = await workflowNowStep(now);
+        operationNow = await workflowNow(now);
         await renewFences({ eventStore, processingService, eventId, connectionId, conversationId, eventClaimId: eventClaim.claimId, conversationClaimId: conversationClaim.claimId, now: operationNow });
         outcome = await providerAttemptStep(processingService, {
           eventId, connectionId, conversationId, claimId: conversationClaim.claimId, eventClaimId: eventClaim.claimId,
@@ -107,7 +115,7 @@ async function runLineMessageWorkflow({ eventId, connectionId, conversationId },
         if (outcome.status !== "retryable_provider") break;
       }
       if (outcome?.status === "retryable_provider") {
-        const handoffNow = await workflowNowStep(now);
+        const handoffNow = await workflowNow(now);
         await renewFences({ eventStore, processingService, eventId, connectionId, conversationId, eventClaimId: eventClaim.claimId, conversationClaimId: conversationClaim.claimId, now: handoffNow });
         outcome = await persistHandoffStep(processingService, {
           eventId, connectionId, conversationId, claimId: conversationClaim.claimId, eventClaimId: eventClaim.claimId,
@@ -119,7 +127,7 @@ async function runLineMessageWorkflow({ eventId, connectionId, conversationId },
     if (outcome.deliveryId) {
       let delivery;
       do {
-        const deliveryNow = await workflowNowStep(now);
+        const deliveryNow = await workflowNow(now);
         await renewFences({ eventStore, processingService, eventId, connectionId, conversationId, eventClaimId: eventClaim.claimId, conversationClaimId: conversationClaim.claimId, now: deliveryNow });
         delivery = await deliverStep(processingService, {
           deliveryId: outcome.deliveryId, eventId, eventClaimId: eventClaim.claimId,
@@ -139,7 +147,7 @@ async function runLineMessageWorkflow({ eventId, connectionId, conversationId },
         throw new Error("Outbound delivery did not reach a terminal state.");
       }
       if (outcome.handoffAcknowledgement === true) {
-        const completionNow = await workflowNowStep(now);
+        const completionNow = await workflowNow(now);
         const finalized = await finalizeHandoffStep(processingService, {
           deliveryId: outcome.deliveryId, eventId, eventClaimId: eventClaim.claimId,
           connectionId, conversationId, conversationClaimId: conversationClaim.claimId, now: completionNow,
@@ -147,13 +155,13 @@ async function runLineMessageWorkflow({ eventId, connectionId, conversationId },
         if (finalized !== true) throw new Error("Handoff acknowledgement finalization could not be recorded.");
         return { status: delivery.status };
       }
-      const completionNow = await workflowNowStep(now);
+      const completionNow = await workflowNow(now);
       await renewFences({ eventStore, processingService, eventId, connectionId, conversationId, eventClaimId: eventClaim.claimId, conversationClaimId: conversationClaim.claimId, now: completionNow });
       await completeEvent(eventStore, { eventId, connectionId, claimId: eventClaim.claimId, conversationId, conversationClaimId: conversationClaim.claimId, now: completionNow });
       return { status: delivery.status };
     }
     if (outcome.eventCompleted) return { status: outcome.status };
-    const completionNow = await workflowNowStep(now);
+    const completionNow = await workflowNow(now);
     await renewFences({ eventStore, processingService, eventId, connectionId, conversationId, eventClaimId: eventClaim.claimId, conversationClaimId: conversationClaim.claimId, now: completionNow });
     await completeEvent(eventStore, { eventId, connectionId, claimId: eventClaim.claimId, conversationId, conversationClaimId: conversationClaim.claimId, now: completionNow });
     return { status: outcome.status };
@@ -167,41 +175,6 @@ async function runLineMessageWorkflow({ eventId, connectionId, conversationId },
       if (followUp) await startFollowUpStep(startWorkflow, followUp);
     }
   }
-}
-
-function productionEventStore(env = process.env) {
-  const repository = createSupportRepository(createDbClient(env), { encryptionKey: env.SETTINGS_ENCRYPTION_KEY });
-  return {
-    claimEventProcessing: (input) => repository.claimLineEventProcessing(input),
-    renewEventProcessing: (input) => repository.renewLineEventProcessing(input),
-    markEventProcessed: (input) => repository.markLineEventProcessed(input),
-    releaseEventProcessing: (input) => repository.releaseLineEventProcessing(input),
-  };
-}
-
-function productionProcessingService(env = process.env) {
-  const repository = createSupportRepository(createDbClient(env), { encryptionKey: env.SETTINGS_ENCRYPTION_KEY });
-  const adapter = createLineSupportAdapter();
-  const deliveryService = createLineOutboundDeliveryService({
-    outboxStore: {
-      claimDelivery: (input) => repository.claimLineOutboundDelivery(input),
-      markDeliverySent: (input) => repository.markLineOutboundDeliverySent(input),
-      markDeliveryRetryable: (input) => repository.markLineOutboundDeliveryRetryable(input),
-      markDeliveryFailed: (input) => repository.markLineOutboundDeliveryFailed(input),
-      getDeliveryStatus: (deliveryId) => repository.getLineOutboundDeliveryStatus(deliveryId),
-    },
-    sendPush: async ({ retryKey, body, connectionId }) => {
-      const accessToken = await repository.loadLineAccessToken(connectionId);
-      return adapter.pushCanonical({ accessToken, canonicalBody: body, retryKey });
-    },
-    onCredentialRejected: (input) => repository.handleLineCredentialRejected(input),
-    now: () => new Date(),
-  });
-  return createSupportProcessingService({
-    repository,
-    decisionService: createSupportDecisionService({ generateTextImpl: generateText }),
-    deliveryService,
-  });
 }
 
 function startNextLineMessageWorkflow(input) {
@@ -220,34 +193,6 @@ function durationUntil(from, to) {
   return milliseconds % 1_000 === 0 ? `${milliseconds / 1_000}s` : `${milliseconds}ms`;
 }
 
-async function completeEvent(eventStore, input) {
-  "use step";
-  const completed = await currentEventStore(eventStore).markEventProcessed(input);
-  if (completed !== true) throw new Error("Event processing completion could not be recorded.");
-}
-
-async function renewFences({
-  eventStore, processingService, eventId, connectionId, conversationId, eventClaimId, conversationClaimId, now,
-}) {
-  "use step";
-  const activeEventStore = currentEventStore(eventStore);
-  const activeProcessingService = currentProcessingService(processingService);
-  if (typeof activeEventStore.renewEventProcessing === "function") {
-    const renewed = await activeEventStore.renewEventProcessing({ eventId, connectionId, claimId: eventClaimId, now });
-    if (renewed !== true) throw new Error("Event processing claim was lost.");
-  }
-  if (typeof activeProcessingService.renewClaim === "function") {
-    await activeProcessingService.renewClaim({
-      eventId,
-      eventClaimId,
-      connectionId,
-      conversationId,
-      claimId: conversationClaimId,
-      now,
-    });
-  }
-}
-
 async function sleepWithRenewedFences({
   from, to, sleepImpl, eventStore, processingService, eventId, connectionId, conversationId, eventClaimId, conversationClaimId, now,
 }) {
@@ -259,7 +204,7 @@ async function sleepWithRenewedFences({
     cursor = next;
     await renewFences({
       eventStore, processingService, eventId, connectionId, conversationId, eventClaimId, conversationClaimId,
-      now: await workflowNowStep(now),
+      now: await workflowNow(now),
     });
   }
 }
@@ -268,33 +213,18 @@ function currentDate(now) {
   return validDate(now());
 }
 
-async function workflowNowStep(now) {
-  "use step";
-  return currentDate(now);
+async function workflowNow(now) {
+  return now ? workflowTestNowStep(currentDate(now)) : workflowNowStep();
 }
 
-async function claimEventStep(eventStore, input) { "use step"; return currentEventStore(eventStore).claimEventProcessing(input); }
-async function acquireConversationClaimStep(processingService, input) { "use step"; return currentProcessingService(processingService).acquireClaim(input); }
-async function resolveCompetingEventStep(processingService, input) { "use step"; const service = currentProcessingService(processingService); return typeof service.resolveCompetingEvent === "function" && service.resolveCompetingEvent(input); }
-async function releaseEventStep(eventStore, input) { "use step"; return currentEventStore(eventStore).releaseEventProcessing(input); }
-async function recoverDeliveryStep(processingService, input) {
+async function workflowNowStep() {
   "use step";
-  const service = currentProcessingService(processingService);
-  return typeof service.recoverDelivery === "function" ? service.recoverDelivery(input) : null;
+  return new Date();
 }
-async function buildTurnStep(processingService, input) { "use step"; return currentProcessingService(processingService).buildTurn(input); }
-async function providerAttemptStep(processingService, input) { "use step"; return currentProcessingService(processingService).decideAndPersist(input); }
-async function persistHandoffStep(processingService, input) { "use step"; return currentProcessingService(processingService).persistHandoff(input); }
-async function deliverStep(processingService, input) { "use step"; return currentProcessingService(processingService).deliver(input); }
-async function finalizeHandoffStep(processingService, input) { "use step"; return currentProcessingService(processingService).finalizeHandoff(input); }
-async function releaseConversationClaimStep(processingService, input) { "use step"; return currentProcessingService(processingService).releaseClaim(input); }
-async function findFollowUpStep(processingService, input) { "use step"; return currentProcessingService(processingService).findFollowUp(input); }
+
+async function workflowTestNowStep(value) {
+  "use step";
+  return validDate(value);
+}
+
 async function startFollowUpStep(startWorkflow, input) { "use step"; return typeof startWorkflow === "function" ? startWorkflow(input) : startNextLineMessageWorkflow(input); }
-
-function currentEventStore(eventStore) {
-  return eventStore ?? productionEventStore();
-}
-
-function currentProcessingService(processingService) {
-  return processingService ?? productionProcessingService();
-}

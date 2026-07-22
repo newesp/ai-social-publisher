@@ -1948,7 +1948,7 @@ async function withDatabase(run) {
         ON support_configurations(platform_connection_id);
       CREATE TABLE support_faqs (
         id TEXT PRIMARY KEY NOT NULL, owner_email TEXT NOT NULL, question TEXT NOT NULL,
-        answer TEXT NOT NULL, category TEXT NOT NULL, keywords_json TEXT NOT NULL DEFAULT '[]',
+        answer TEXT NOT NULL, internal_notes TEXT, category TEXT NOT NULL, keywords_json TEXT NOT NULL DEFAULT '[]',
         enabled INTEGER NOT NULL DEFAULT 1, priority INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
       );
