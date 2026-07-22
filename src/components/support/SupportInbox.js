@@ -188,7 +188,7 @@ export function SupportInbox() {
   const showThread = !mobile || Boolean(selectedId);
 
   return (
-    <Stack gap="md" style={{ minWidth: 0, height: "calc(100vh - 140px)", maxHeight: "calc(100vh - 140px)", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+    <Stack gap="md" style={{ minWidth: 0, height: "calc(100vh - 120px)", overflow: "hidden", display: "flex", flexDirection: "column" }}>
       <Group justify="space-between" style={{ flexShrink: 0 }}>
         <div>
           <Text fw={700} size="xl">AI 客服對話收件匣</Text>
@@ -199,9 +199,9 @@ export function SupportInbox() {
         </Button>
       </Group>
       <GlobalTransitionUndo transitions={globalTransitions} onUndo={undoTransition} undoingTransitionId={undoingTransition} />
-      <Grid gutter="md" align="stretch" style={{ minWidth: 0, flex: 1, height: "100%", minHeight: 0, overflow: "hidden" }}>
+      <Grid gutter="md" style={{ minWidth: 0, flex: 1, height: "100%", minHeight: 0, overflow: "hidden" }}>
         {showList ? (
-          <Grid.Col span={{ base: 12, md: selected ? 3 : 4, lg: selected ? 3 : 4 }} style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }}>
+          <Grid.Col span={{ base: 12, md: 3 }} style={{ height: "100%", display: "flex", flexDirection: "column", overflow: "hidden" }}>
             <ConversationList
               conversations={conversations}
               selectedId={selectedId}
@@ -216,7 +216,7 @@ export function SupportInbox() {
           </Grid.Col>
         ) : null}
         {showThread ? (
-          <Grid.Col span={{ base: 12, md: selected ? 6 : 8, lg: selected ? 6 : 8 }} style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }}>
+          <Grid.Col span={{ base: 12, md: selected ? 6 : 9 }} style={{ height: "100%", display: "flex", flexDirection: "column", overflow: "hidden" }}>
             <ConversationThread
               conversation={selected}
               loading={detailState === "loading" && !selected}
@@ -232,7 +232,7 @@ export function SupportInbox() {
           </Grid.Col>
         ) : null}
         {selected ? (
-          <Grid.Col span={{ base: 12, md: 3, lg: 3 }} style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }}>
+          <Grid.Col span={{ base: 12, md: 3 }} style={{ height: "100%", display: "flex", flexDirection: "column", overflow: "hidden" }}>
             <ConversationDetailsDrawer conversation={selected} />
           </Grid.Col>
         ) : null}
