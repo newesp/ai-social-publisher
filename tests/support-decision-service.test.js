@@ -256,6 +256,7 @@ test("ordinary FAQ wording is not treated as a semantic safety preflight", async
     "What are your support hours?",
     "When are support staff available?",
     "How do I delete a draft post?",
+    "想退貨",
   ]) {
     const result = await service.decide({
       ...input,
@@ -264,7 +265,7 @@ test("ordinary FAQ wording is not treated as a semantic safety preflight", async
 
     assert.equal(result.action, "reply");
   }
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
 });
 
 test("missing FAQ evidence hands off before a provider call", async () => {

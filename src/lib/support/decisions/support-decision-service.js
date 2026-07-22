@@ -77,7 +77,7 @@ function automaticHandoffReason(text, rawText) {
   if (hasExplicitHumanRequest(text)) {
     return "explicit_human_request";
   }
-  if (includesAny(text, ["refund", "refunds", "退款", "退費", "退货", "退貨"])
+  if (includesAny(text, ["refund", "refunds", "退款", "退費", "退货"])
     || /\b(?:want|need|get|give me|request)\s+(?:my\s+)?money back\b/.test(text)) {
     return "high_risk_refund";
   }

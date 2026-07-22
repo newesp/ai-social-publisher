@@ -83,6 +83,20 @@ test("an exact keyword tier outranks repeated token overlap regardless of priori
   assert.deepEqual(results.map((result) => result.id), ["exact-shipping", "repeated-returns"]);
 });
 
+test("retrieval matches CJK Chinese query substrings against unspaced question and category text", () => {
+  const faqs = [
+    faq({
+      id: "return-policy",
+      question: "網購退換貨基本原則：收到商品隔天想退貨（無瑕疵 / 純粹不喜歡）",
+      category: "退換貨",
+    }),
+  ];
+
+  const results = retrieveFaqs({ query: "想退貨", faqs });
+
+  assert.deepEqual(results.map((result) => result.id), ["return-policy"]);
+});
+
 function faq({
   id,
   question = "General question",

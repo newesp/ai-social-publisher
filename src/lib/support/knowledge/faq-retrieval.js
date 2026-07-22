@@ -28,17 +28,36 @@ export function retrieveFaqs({ query, faqs, limit = MAX_RESULTS } = {}) {
 
 function scoreFaq(faq, query, queryTokens) {
   const keywords = Array.isArray(faq.keywords) ? faq.keywords.map(normalize).filter(Boolean) : [];
-  const exactKeywordScore = keywords
-    .filter((keyword) => query.includes(keyword))
-    .reduce((total, keyword) => total + tokens(keyword).length, 0) * EXACT_KEYWORD_SCORE;
-  const searchableTokens = new Set(tokens([
-    faq.question,
-    faq.category,
-    ...keywords,
-  ].map(normalize).join(" ")));
-  const overlap = queryTokens.filter((token) => searchableTokens.has(token)).length;
-  const categoryTokens = new Set(tokens(normalize(faq.category)));
-  const categoryOverlap = queryTokens.some((token) => categoryTokens.has(token));
+  const exactKeywordMatches = keywords.filter((keyword) => (
+    query.includes(keyword) || (query.length >= 2 && keyword.includes(query))
+  ));
+  const exactKeywordScore = exactKeywordMatches
+    .reduce((total, keyword) => total + Math.max(1, tokens(keyword).length), 0) * EXACT_KEYWORD_SCORE;
+
+  const questionCategoryKeywordsText = [faq.question, faq.category, ...keywords].map(normalize).join(" ");
+  const fullSearchableText = [faq.question, faq.category, faq.answer, ...keywords].map(normalize).join(" ");
+  const searchableTokens = new Set(tokens(questionCategoryKeywordsText));
+  const categoryText = normalize(faq.category);
+  const categoryTokens = new Set(tokens(categoryText));
+
+  const overlap = queryTokens.filter((token) => {
+    if (searchableTokens.has(token)) return true;
+    if (token.length >= 2 && fullSearchableText.includes(token)) return true;
+    return Array.from(searchableTokens).some((st) => (
+      st.length >= 2 && (st.includes(token) || token.includes(st))
+    ));
+  }).length;
+
+  const categoryOverlap = Boolean(
+    categoryText && (
+      queryTokens.some((token) => (
+        categoryTokens.has(token)
+        || (token.length >= 2 && categoryText.includes(token))
+        || (categoryText.length >= 2 && token.includes(categoryText))
+      ))
+      || (query.length >= 2 && (categoryText.includes(query) || query.includes(categoryText)))
+    ),
+  );
 
   const evidenceScore = exactKeywordScore
     + overlap * TOKEN_SCORE
