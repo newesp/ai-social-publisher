@@ -1,6 +1,6 @@
 "use client";
 
-import { Button, Grid, Group, Stack, Text } from "@mantine/core";
+import { Button, Group, Stack, Text } from "@mantine/core";
 import { useMediaQuery } from "@mantine/hooks";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ConversationDetailsDrawer } from "./ConversationDetailsDrawer.js";
@@ -199,9 +199,9 @@ export function SupportInbox() {
         </Button>
       </Group>
       <GlobalTransitionUndo transitions={globalTransitions} onUndo={undoTransition} undoingTransitionId={undoingTransition} />
-      <Grid gutter="md" style={{ minWidth: 0, flex: 1, height: "100%", minHeight: 0, overflow: "hidden" }}>
+      <div style={{ display: "flex", gap: "var(--mantine-spacing-md)", flex: 1, minHeight: 0, overflow: "hidden" }}>
         {showList ? (
-          <Grid.Col span={{ base: 12, md: 3 }} style={{ height: "100%", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+          <div style={{ width: mobile ? "100%" : "25%", flexShrink: 0, minHeight: 0 }}>
             <ConversationList
               conversations={conversations}
               selectedId={selectedId}
@@ -213,10 +213,10 @@ export function SupportInbox() {
               onLoadMore={loadMore}
               hasMore={Boolean(nextCursor)}
             />
-          </Grid.Col>
+          </div>
         ) : null}
         {showThread ? (
-          <Grid.Col span={{ base: 12, md: selected ? 6 : 9 }} style={{ height: "100%", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+          <div style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
             <ConversationThread
               conversation={selected}
               loading={detailState === "loading" && !selected}
@@ -229,14 +229,14 @@ export function SupportInbox() {
               onTransition={requestTransition}
               onDeleteConversation={deleteConversation}
             />
-          </Grid.Col>
+          </div>
         ) : null}
         {selected ? (
-          <Grid.Col span={{ base: 12, md: 3 }} style={{ height: "100%", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+          <div style={{ width: mobile ? "100%" : "25%", flexShrink: 0, minHeight: 0 }}>
             <ConversationDetailsDrawer conversation={selected} />
-          </Grid.Col>
+          </div>
         ) : null}
-      </Grid>
+      </div>
     </Stack>
   );
 }
