@@ -111,6 +111,8 @@ export function ConversationThread({
               width: "auto",
               maxWidth: "90vw",
               boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+              borderRadius: 8,
+              overflow: "hidden",
             }}
           >
             <Alert color="red" title="操作失敗" withCloseButton onClose={() => setSendError("")}>

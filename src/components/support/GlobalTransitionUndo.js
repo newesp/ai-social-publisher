@@ -27,6 +27,8 @@ export function GlobalTransitionUndo({ transitions, onUndo, undoingTransitionId 
           maxWidth: "90vw",
           minWidth: 320,
           boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+          borderRadius: 8,
+          overflow: "hidden",
         }}
       >
         <Stack gap="xs">
