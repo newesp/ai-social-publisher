@@ -12,6 +12,8 @@ export function PlatformPreview({ data, content, onContentChange, displayName })
 }
 
 function MetaPreview({ data, content, onContentChange, displayName }) {
+  const [modalOpen, setModalOpen] = useState(false);
+
   return (
     <Paper withBorder radius={8} p="md">
       <Stack gap="sm">
@@ -26,7 +28,20 @@ function MetaPreview({ data, content, onContentChange, displayName }) {
         </Group>
         <PreviewTextarea value={content} onChange={onContentChange} ariaLabel="Facebook 文案" />
         {data.preview.imageUrl ? (
-          <Image src={data.preview.imageUrl} alt="Meta 預覽圖片" radius={6} fit="cover" h={220} />
+          <>
+            <Image
+              src={data.preview.imageUrl}
+              alt="Meta 預覽圖片"
+              radius={6}
+              fit="contain"
+              h={240}
+              style={{ cursor: "pointer", backgroundColor: "#f8f9fa" }}
+              onClick={() => setModalOpen(true)}
+            />
+            <Modal opened={modalOpen} onClose={() => setModalOpen(false)} title="Meta 圖片完整視圖" size="lg" centered>
+              <Image src={data.preview.imageUrl} alt="Meta 預覽全圖" radius={4} fit="contain" />
+            </Modal>
+          </>
         ) : null}
       </Stack>
     </Paper>
