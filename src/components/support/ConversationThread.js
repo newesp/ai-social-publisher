@@ -198,37 +198,39 @@ export function ConversationThread({
         ))}
       </Stack>
 
-      <Stack gap="xs" mt="sm" style={{ flexShrink: 0, borderTop: "1px solid var(--mantine-color-gray-2)", paddingTop: 8 }}>
-        {!composerEnabled && !transitionPending ? (
-          <Group>
-            <Button onClick={() => onTakeOver?.()}>接管對話 (真人)</Button>
-          </Group>
-        ) : null}
-        {composerEnabled ? (
-          <Group>
-            <Button variant="light" onClick={() => transition("return_to_ai")}>交還 AI 處理</Button>
-            <Button color="green" onClick={() => transition("resolve")}>完成結案</Button>
-          </Group>
-        ) : null}
+      {conversation.status !== "resolved" ? (
+        <Stack gap="xs" mt="sm" style={{ flexShrink: 0, borderTop: "1px solid var(--mantine-color-gray-2)", paddingTop: 8 }}>
+          {!composerEnabled && !transitionPending ? (
+            <Group>
+              <Button onClick={() => onTakeOver?.()}>接管對話 (真人)</Button>
+            </Group>
+          ) : null}
+          {composerEnabled ? (
+            <Group>
+              <Button variant="light" onClick={() => transition("return_to_ai")}>交還 AI 處理</Button>
+              <Button color="green" onClick={() => transition("resolve")}>完成結案</Button>
+            </Group>
+          ) : null}
 
-        <Group wrap="nowrap">
-          <TextInput
-            aria-label="Reply composer"
-            value={draft}
-            onChange={(event) => {
-              if (sendError && event.currentTarget.value !== draft) idempotencyKeyRef.current = null;
-              setDraft(event.currentTarget.value);
-              setSendError("");
-            }}
-            placeholder={composerEnabled ? "輸入回覆內容…" : "請先點擊「接管對話」以開始撰寫回覆"}
-            disabled={!composerEnabled}
-            style={{ flex: 1, minWidth: 0 }}
-          />
-          <Button disabled={!composerEnabled || !draft.trim() || sending} loading={sending} onClick={send}>
-            傳送回覆
-          </Button>
-        </Group>
-      </Stack>
+          <Group wrap="nowrap">
+            <TextInput
+              aria-label="Reply composer"
+              value={draft}
+              onChange={(event) => {
+                if (sendError && event.currentTarget.value !== draft) idempotencyKeyRef.current = null;
+                setDraft(event.currentTarget.value);
+                setSendError("");
+              }}
+              placeholder={composerEnabled ? "輸入回覆內容…" : "請先點擊「接管對話」以開始撰寫回覆"}
+              disabled={!composerEnabled}
+              style={{ flex: 1, minWidth: 0 }}
+            />
+            <Button disabled={!composerEnabled || !draft.trim() || sending} loading={sending} onClick={send}>
+              傳送回覆
+            </Button>
+          </Group>
+        </Stack>
+      ) : null}
     </Paper>
   );
 }
