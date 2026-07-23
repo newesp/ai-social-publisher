@@ -1,6 +1,7 @@
 "use client";
 
-import { Avatar, Group, Image, Paper, Stack, Text, Textarea } from "@mantine/core";
+import { Avatar, Group, Image, Modal, Paper, Stack, Text, Textarea } from "@mantine/core";
+import { useState } from "react";
 
 export function PlatformPreview({ data, content, onContentChange, displayName }) {
   if (data.platform === "meta") {
@@ -55,6 +56,8 @@ function InstagramPreview({ data }) {
 }
 
 function LinePreview({ data, content, onContentChange, displayName }) {
+  const [modalOpen, setModalOpen] = useState(false);
+
   return (
     <Paper withBorder radius={8} p="md">
       <Stack gap="sm">
@@ -71,7 +74,20 @@ function LinePreview({ data, content, onContentChange, displayName }) {
           <PreviewTextarea value={content} onChange={onContentChange} ariaLabel="LINE 文案" />
         </Paper>
         {data.preview.imageUrl ? (
-          <Image src={data.preview.imageUrl} alt="LINE 預覽圖片" radius={6} fit="cover" h={180} />
+          <>
+            <Image
+              src={data.preview.imageUrl}
+              alt="LINE 預覽圖片"
+              radius={6}
+              fit="contain"
+              h={240}
+              style={{ cursor: "pointer", backgroundColor: "#f8f9fa" }}
+              onClick={() => setModalOpen(true)}
+            />
+            <Modal opened={modalOpen} onClose={() => setModalOpen(false)} title="LINE 圖片完整視圖" size="lg" centered>
+              <Image src={data.preview.imageUrl} alt="LINE 預覽全圖" radius={4} fit="contain" />
+            </Modal>
+          </>
         ) : null}
       </Stack>
     </Paper>
