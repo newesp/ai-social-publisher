@@ -9,7 +9,10 @@ ai-social-publisher-secrets-*.json
 data/settings.json
 .worktrees/
 .superpowers/
-docs/
+# Internal planning and handoff records. Published runbooks in docs/ are versioned.
+docs/handoffs/
+docs/plan.md
+docs/superpowers/
 tests/
 
 .vercel
