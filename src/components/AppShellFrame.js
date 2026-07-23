@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Anchor,
   AppShell,
   Avatar,
   Burger,
@@ -74,9 +75,15 @@ export function AppShellFrame({ active, children }) {
               <Title order={3} textWrap="nowrap">
                 AI Social Publisher
               </Title>
-              <Text size="xs" c="dimmed">
+              <Anchor
+                href="https://github.com/newesp/ai-social-publisher"
+                target="_blank"
+                rel="noreferrer noopener"
+                size="xs"
+                c="dimmed"
+              >
                 newesp/ai-social-publisher
-              </Text>
+              </Anchor>
             </div>
           </Group>
           <Group gap="sm" wrap="nowrap">
