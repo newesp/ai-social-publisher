@@ -35,7 +35,6 @@ import {
   getInitialPostForm,
   isProductStepComplete,
   reconcileConnectedPlatforms,
-  shouldGenerateOnPreviewAdvance,
 } from "../lib/wizard/wizard-flow.js";
 import {
   clearWizardDraft,
@@ -204,13 +203,6 @@ export function CreatePostWizard() {
   const goToStep = (nextStep) => {
     if (!canSelectWizardStep({ step: nextStep, form }) || (nextStep !== WIZARD_STEPS.PRODUCT && !productStepComplete)) return;
     setActive(nextStep);
-    if (shouldGenerateOnPreviewAdvance({
-      currentStep: active,
-      nextStep,
-      hasGeneratedTargets: Boolean(generatedTargets),
-    })) {
-      regenerateContent({ form, setGeneratedTargets, setImageUrl, setGenerationStatus, setGenerationError });
-    }
   };
 
   const editTarget = (platform, content) => {
@@ -290,7 +282,7 @@ export function CreatePostWizard() {
           <Stepper.Step label="預覽與發布" allowStepClick={productStepComplete} allowStepSelect={productStepComplete} disabled={!productStepComplete}>
             <Group justify="space-between" mt="md" mb="sm">
               <Text fw={600}>編輯要送出的內容</Text>
-              <Button variant="light" leftSection={<IconRefresh size={16} />} loading={generationStatus === "loading"} onClick={() => regenerateContent({ form, setGeneratedTargets, setImageUrl, setGenerationStatus, setGenerationError, setProofreadIssues, setPublishResult, setPublishStatus })}>重新產生</Button>
+              <Button variant="light" leftSection={<IconRefresh size={16} />} loading={generationStatus === "loading"} onClick={() => regenerateContent({ form, setGeneratedTargets, setImageUrl, setGenerationStatus, setGenerationError, setProofreadIssues, setPublishResult, setPublishStatus })}>生成內容</Button>
             </Group>
             {generationStatus === "loading" ? (
               <FloatingAlert color="blue">
